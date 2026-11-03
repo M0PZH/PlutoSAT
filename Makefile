@@ -1,5 +1,10 @@
 
-VIVADO_VERSION ?= 2025.1
+VIVADO_VERSION ?= 2026.1
+# ADI hdl pins one Vivado release; allow building with a newer one.
+HDL_REQUIRED_VIVADO := $(shell sed -n 's/^set required_vivado_version "\(.*\)"/\1/p' hdl/scripts/adi_env.tcl 2>/dev/null)
+ifneq ($(HDL_REQUIRED_VIVADO),$(VIVADO_VERSION))
+export ADI_IGNORE_VERSION_CHECK=1
+endif
 
 BR2_EXT_DIR = $(CURDIR)/br2-external
 BUILDROOT_DIR = $(CURDIR)/buildroot
@@ -32,10 +37,18 @@ $(error "      3] export VIVADO_VERSION=v20xx.x")
 endif
 
 TARGET ?= pluto
-SUPPORTED_TARGETS:=pluto sidekiqz2
+SUPPORTED_TARGETS:=pluto sidekiqz2 fishball
 
 # Include target specific constants
 -include scripts/$(TARGET).mk
+
+# Out-of-tree HDL project location (boards may override in their .mk)
+HDL_PROJECT_DIR ?= hdl/projects/$(TARGET)
+HDL_PROJECT_NAME ?= $(TARGET)
+# extra buildroot external trees from the board (BOARD_BR2_EXTERNAL)
+BR2_EXTERNALS = $(BR2_EXT_DIR)$(if $(BOARD_BR2_EXTERNAL),:$(BOARD_BR2_EXTERNAL))
+# initramfs compression (gz or xz); xz keeps the 7020 FIT within a 16 MB flash
+ROOTFS_EXT ?= gz
 
 ifeq (, $(shell which dfu-suffix))
 $(warning "No dfu-utils in PATH consider doing: sudo apt-get install dfu-util")
@@ -61,13 +74,20 @@ endif
 
 .PHONY: all clean clean-build zip-all legal-info sysroot jtag-bootstrap
 .PHONY: dfu-$(TARGET) dfu-sf-uboot dfu-all dfu-ram uboot-test-ram
-.PHONY: git-update-all git-pull
+.PHONY: git-update-all git-pull board-install sdimg
+
+### Board files living outside the submodules (boards/<board>/install.sh) ###
+
+board-install:
+ifneq ($(BOARD_DIR),)
+	$(BOARD_DIR)/install.sh $(CURDIR)
+endif
 
 TARGET_DTS_FILES:=$(foreach dts,$(TARGET_DTS_FILES),build/$(dts))
 
-TOOLCHAIN:
-	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) ARCH=arm zynq_$(TARGET)_defconfig
-	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) toolchain
+TOOLCHAIN: board-install
+	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) ARCH=arm zynq_$(TARGET)_defconfig
+	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) toolchain
 
 build:
 	mkdir -p $@
@@ -117,32 +137,34 @@ build/%.dtb: linux/arch/arm/boot/dts/xilinx/%.dtb | build
 
 ### Buildroot ###
 
-$(BUILDROOT_DIR)/output/images/rootfs.cpio.gz:
+$(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT): board-install
 	@echo device-fw $(VERSION)> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS
 	@$(foreach dir,$(VSUBDIRS),echo $(dir) $(shell cd $(dir) && git describe --abbrev=4 --dirty --always --tags) >> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS;)
 	@echo buildroot $(shell cd $(BUILDROOT_DIR) && git describe --abbrev=4 --dirty --always --tags 2>/dev/null || echo unknown) >> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS
-	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) ARCH=arm zynq_$(TARGET)_defconfig
+	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) ARCH=arm zynq_$(TARGET)_defconfig
 
 ifneq (1, ${SKIP_LEGAL})
-	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) legal-info
+	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) legal-info
 	scripts/legal_info_html.sh "$(COMPLETE_NAME)" "$(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS" "$(BUILDROOT_DIR)/output/legal-info/manifest.csv"
 	cp build/LICENSE.html $(BR2_EXT_DIR)/board/adi/$(TARGET)/msd/LICENSE.html
 endif
 
-	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) BUSYBOX_CONFIG_FILE=$(BR2_EXT_DIR)/board/adi/$(TARGET)/busybox-1.25.0.config all
+	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) BUSYBOX_CONFIG_FILE=$(BR2_EXT_DIR)/board/adi/$(TARGET)/busybox-1.25.0.config all
 
-.PHONY: $(BUILDROOT_DIR)/output/images/rootfs.cpio.gz
+.PHONY: $(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT)
 
-build/rootfs.cpio.gz: $(BUILDROOT_DIR)/output/images/rootfs.cpio.gz | build
+build/rootfs.cpio.$(ROOTFS_EXT): $(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT) | build
 	cp $< $@
 
-build/$(TARGET).itb: u-boot/tools/mkimage build/zImage build/rootfs.cpio.gz $(TARGET_DTS_FILES) build/system_top.bit
+build/$(TARGET).itb: u-boot/tools/mkimage build/zImage build/rootfs.cpio.$(ROOTFS_EXT) $(TARGET_DTS_FILES) build/system_top.bit
 	u-boot/tools/mkimage -f scripts/$(TARGET).its $@
 
 build/system_top.xsa:  | build
 ifeq (1, ${HAVE_VIVADO})
-	bash -c "source $(VIVADO_SETTINGS) && $(MAKE) -C hdl/projects/$(TARGET) && cp hdl/projects/$(TARGET)/$(TARGET).sdk/system_top.xsa $@"
-	unzip -l $@ | grep -q ps7_init || cp hdl/projects/$(TARGET)/$(TARGET).srcs/sources_1/bd/system/ip/system_sys_ps7_0/ps7_init* build/
+	# Run the HDL make without our command-line variables (TARGET=... would
+	# otherwise leak into ADI's project/library makefiles).
+	env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL bash -c "source $(VIVADO_SETTINGS) && make -C $(HDL_PROJECT_DIR) && cp $(HDL_PROJECT_DIR)/$(HDL_PROJECT_NAME).sdk/system_top.xsa $(CURDIR)/$@"
+	unzip -l $@ | grep -q ps7_init || cp $(HDL_PROJECT_DIR)/$(HDL_PROJECT_NAME).srcs/sources_1/bd/system/ip/system_sys_ps7_0/ps7_init* build/
 else ifneq ($(XSA_FILE),)
 	cp $(XSA_FILE) $@
 else ifneq ($(XSA_URL),)
@@ -151,17 +173,41 @@ endif
 
 ### TODO: Build system_top.xsa from src if dl fails ...
 
-build/sdk/fsbl/Release/fsbl.elf build/system_top.bit : build/system_top.xsa
+build/system_top.bit: build/system_top.xsa
+	unzip -o build/system_top.xsa system_top.bit -d build
+	touch $@
+
+build/ps7_init.tcl: build/system_top.xsa
+	unzip -o build/system_top.xsa 'ps7_init*' -d build
+	touch $@
+
+build/sdk/fsbl/Release/fsbl.elf: build/system_top.xsa
 	rm -Rf build/sdk
 ifeq (1, ${HAVE_VIVADO})
-	bash -c "source $(VIVADO_SETTINGS) && xsct scripts/create_fsbl_project.tcl"
+	# xsct was removed in Vitis 2025.x+; use the SDT flow (sdtgen + empyro) there.
+	bash -c "source $(VIVADO_SETTINGS) && if command -v xsct >/dev/null; then \
+		xsct scripts/create_fsbl_project.tcl; \
+	else \
+		source $(dir $(VIVADO_SETTINGS))../Vitis/settings64.sh && \
+		scripts/create_fsbl.sh build/system_top.xsa build/sdk $@; \
+	fi"
+	unzip -o build/system_top.xsa 'ps7_init*' -d build
 else
-	unzip -o build/system_top.xsa system_top.bit -d build
+	@echo "FSBL needs Vivado/Vitis" && exit 1
 endif
 
 build/boot.bin: build/sdk/fsbl/Release/fsbl.elf build/u-boot.elf
 	@echo img:{[bootloader] $^ } > build/boot.bif
 	bash -c "source $(VIVADO_SETTINGS) && bootgen -image build/boot.bif -w -o $@"
+
+### SD card image (BOOT.bin + FIT image) ###
+# Copy build/sdimg/* to the FAT partition of an SD card and set the
+# boot-mode straps to SD; u-boot then loads $(TARGET).itb from the card.
+
+sdimg: build/boot.bin build/$(TARGET).itb
+	rm -rf build/sdimg && mkdir -p build/sdimg
+	cp build/boot.bin build/sdimg/BOOT.bin
+	cp build/$(TARGET).itb build/sdimg/$(TARGET).itb
 
 ### MSD update firmware file ###
 
@@ -192,7 +238,7 @@ clean-build:
 clean:
 	$(MAKE) -C u-boot clean
 	$(MAKE) -C linux clean
-	test -d $(BUILDROOT_DIR) && $(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) clean || true
+	test -d $(BUILDROOT_DIR) && $(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) clean || true
 	$(MAKE) -C hdl clean
 	rm -rf build/*
 
@@ -242,7 +288,7 @@ jtag-bootstrap: build/u-boot.elf build/ps7_init.tcl build/system_top.bit scripts
 	$(TOOLS_PATH) $(CROSS_COMPILE)strip build/u-boot.elf
 	zip -j build/$(ZIP_ARCHIVE_PREFIX)-$@-$(VERSION).zip $^
 
-sysroot: $(BUILDROOT_DIR)/output/images/rootfs.cpio.gz
+sysroot: $(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT)
 	tar czfh build/sysroot-$(VERSION).tar.gz --hard-dereference --exclude=usr/share/man --exclude=dev --exclude=etc -C $(BUILDROOT_DIR)/output staging
 
 LINUX_VERSION = $(shell cd linux && git describe --abbrev=4 --dirty --always --tags)
@@ -263,11 +309,11 @@ EXTRA_PKGS = \
 
 SBOM_DIR = build/sbom
 
-legal-info: $(BUILDROOT_DIR)/output/images/rootfs.cpio.gz
+legal-info: $(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT)
 ifneq (1, ${SKIP_LEGAL})
 	tar czvf build/legal-info-$(VERSION).tar.gz -C $(BUILDROOT_DIR)/output legal-info
 	mkdir -p $(SBOM_DIR)
-	$(MAKE) --no-print-directory -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXT_DIR) show-info > $(SBOM_DIR)/show-info.json
+	$(MAKE) --no-print-directory -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) show-info > $(SBOM_DIR)/show-info.json
 	@echo "=== Generating individual SBOMs ==="
 	# Buildroot SBOM (CycloneDX via native tool)
 	$(BUILDROOT_DIR)/utils/generate-cyclonedx \

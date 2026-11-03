@@ -37,3 +37,24 @@
 
 build/
 .Xil
+
+# fishball HDL project build outputs (Vivado)
+boards/fishball/hdl/*
+!boards/fishball/hdl/Makefile
+!boards/fishball/hdl/system_*.tcl
+!boards/fishball/hdl/system_*.v
+!boards/fishball/hdl/system_*.xdc
+
+# DVB-S2 simulation / synthesis outputs
+dvbs2/.venv/
+dvbs2/sim/sim_build/
+dvbs2/sim/results.xml
+dvbs2/sim/*.log
+dvbs2/sim/rx/build/
+dvbs2/syn/out_*/
+dvbs2/syn/*.log
+dvbs2/syn/.Xil/
+dvbs2/syn/*.jou
+__pycache__/
+.pytest_cache/
+dvbs2/syn/clockInfo.txt
