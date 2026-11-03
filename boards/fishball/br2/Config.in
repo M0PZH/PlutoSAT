@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_FISHBALL_PATH/package/dvbs2-tx/Config.in"

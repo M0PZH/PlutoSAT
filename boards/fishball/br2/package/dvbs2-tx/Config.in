@@ -1,0 +1,7 @@
+config BR2_PACKAGE_DVBS2_TX
+	bool "dvbs2-tx"
+	help
+	  User-space tools for the PL DVB-S2 transmitter and receiver:
+	  dvbs2-tx (TS over UDP or from a file -> BBFRAMEs -> DMA) and
+	  dvbs2-rx (DMA -> BBFRAMEs -> TS over UDP or to a file).
+	  Source: dvbs2/sw in plutosdr-fw.

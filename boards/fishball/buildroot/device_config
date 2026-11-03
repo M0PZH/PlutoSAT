@@ -1,0 +1,14 @@
+#S23udc
+PRODUCT="fishball-sdr-7020 (PlutoSDR compatible)"
+USBPID=0xb673
+ENDPOINTS=3
+
+#S40network / S41network
+UDHCPD_CONF=/etc/udhcpd.conf
+CONF=/opt/config.txt
+IFAC=/etc/network/interfaces
+
+#update.sh
+TARGET=fishball
+FIRMWARE=/mnt/msd/fishball.frm
+FRM_MAGIC="ITB fishball-sdr-7020"

@@ -1,0 +1,72 @@
+/*
+ * U-Boot FIT image source for fishball-sdr-7020: one device tree, the PL
+ * bitstream (loaded by u-boot before the kernel), kernel and ramdisk.
+ */
+
+/dts-v1/;
+
+/ {
+	description = "fishball-sdr-7020: load fpga before Kernel";
+	magic = "ITB fishball-sdr-7020";
+	#address-cells = <1>;
+	images {
+
+		fdt@1 {
+			description = "zynq-fishball-sdr-7020";
+			data = /incbin/("../build/zynq-fishball-sdr-7020.dtb");
+			type = "flat_dt";
+			arch = "arm";
+			compression = "none";
+		};
+
+		fpga@1 {
+			description = "FPGA";
+			data = /incbin/("../build/system_top.bit");
+			type = "fpga";
+			arch = "arm";
+			compression = "none";
+			load = <0xF000000>;
+			hash@1 {
+				algo = "md5";
+			};
+		};
+
+		linux_kernel@1 {
+			description = "Linux";
+			data = /incbin/("../build/zImage");
+			type = "kernel";
+			arch = "arm";
+			os = "linux";
+			compression = "none";
+			load = <0x8000>;
+			entry = <0x8000>;
+			hash@1 {
+				algo = "md5";
+			};
+		};
+
+		ramdisk@1 {
+			description = "Ramdisk";
+			/* xz initramfs, unpacked by the kernel (u-boot never decompresses ramdisks) */
+			data = /incbin/("../build/rootfs.cpio.xz");
+			type = "ramdisk";
+			arch = "arm";
+			os = "linux";
+			compression = "none";
+			hash@1 {
+				algo = "md5";
+			};
+		};
+	};
+
+	configurations {
+		default = "config@0";
+		config@0 {
+			description = "Linux with fpga";
+			fdt = "fdt@1";
+			kernel = "linux_kernel@1";
+			ramdisk = "ramdisk@1";
+			fpga = "fpga@1";
+		};
+	};
+};

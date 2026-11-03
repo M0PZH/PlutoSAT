@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * fishball-sdr-7020: Zynq-7020 (xc7z020clg400-2) + AD9363, LVDS interface,
+ * 1 GB DDR3 (32 bit), GbE (RGMII, Realtek PHY), SD card, 16 MB QSPI.
+ *
+ * Based on the ADI PlutoSDR device tree; board parameters from the
+ * Fish-Wan plutosdr-fw-7020-SDR project.
+ *
+ * hdl_project: <boards/fishball/hdl>
+ */
+/dts-v1/;
+#include "zynq-pluto-sdr.dtsi"
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	model = "fishball-sdr-7020 (Z7020/AD9363)";
+	compatible = "fishball,sdr-7020", "xlnx,zynq-7000";
+
+	memory {
+		device_type = "memory";
+		reg = <0x00000000 0x40000000>;
+	};
+
+	aliases {
+		ethernet0 = &gem0;
+		mmc0 = &sdhci0;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led0 {
+			label = "led0:green";
+			gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+		};
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		button {
+			interrupt-parent = <&gpio0>;
+			interrupts = <10 IRQ_TYPE_EDGE_FALLING>;
+			label = "Button";
+			linux,code = <BTN_MISC>;
+		};
+	};
+};
+
+&ad9364_clkin {
+	clock-accuracy = <500>; /* ppb, as in the Fish-Wan board files */
+};
+
+&usb0 {
+	xlnx,phy-reset-gpio = <&gpio0 46 GPIO_ACTIVE_LOW>;
+};
+
+&sdhci0 {
+	status = "okay";
+	disable-wp;
+	broken-cd;
+};
+
+&gem0 {
+	status = "okay";
+	phy-mode = "rgmii-id";
+	phy-handle = <&ethernet_phy0>;
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ethernet_phy0: ethernet-phy@0 {
+			compatible = "ethernet-phy-ieee802.3-c22";
+			reg = <0>;
+		};
+	};
+};
+
+/* 16 MB flash: shrink the Linux partition from Pluto's 30 MB */
+&primary_flash {
+	partition@qspi-linux {
+		reg = <0x200000 0xE00000>; /* 14M */
+	};
+};
+
+&fpga_axi {
+	axi_spi: spi@7c430000 {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		bits-per-word = <8>;
+		compatible = "xlnx,xps-spi-2.00.a";
+		fifo-size = <16>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 55 IRQ_TYPE_LEVEL_HIGH>;
+		num-cs = <0x1>;
+		reg = <0x7c430000 0x10000>;
+		xlnx,num-ss-bits = <0x1>;
+		xlnx,spi-mode = <0>;
+	};
+};
+
+&adc0_ad9364 {
+	/* LVDS interface instead of Pluto's CMOS */
+	/delete-property/ adi,full-port-enable;
+	/delete-property/ adi,digital-interface-tune-fir-disable;
+	/delete-property/ adi,swap-ports-enable;
+
+	adi,lvds-mode-enable;
+	adi,lvds-bias-mV = <150>;
+	adi,lvds-rx-onchip-termination-enable;
+	adi,rx-data-delay = <4>;
+	adi,tx-fb-clock-delay = <7>;
+	adi,tx-data-delay = <9>;
+
+	/* This property is controlled by u-boot environment. */
+	adi,2rx-2tx-mode-enable;
+};
+
+&cf_ad9364_dac_core_0 {
+	/* This property is controlled by u-boot environment. */
+	compatible = "adi,axi-ad9361-dds-6.00.a";
+};
+
+/* DVB-S2 transmitter and receiver (dvbs2/): registers, their axi_dmac and
+ * uncached buffers at the top of RAM (16 MB TX, 1 MB RX), exported to user
+ * space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
+ * uio_pdrv_genirq.of_id=generic-uio on the command line. */
+/ {
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		dvbs2_buffer: dvbs2-buffer@3f000000 {
+			reg = <0x3f000000 0x01000000>;
+			no-map;
+		};
+
+		dvbs2_rx_buffer: dvbs2-rx-buffer@3ef00000 {
+			reg = <0x3ef00000 0x00100000>;
+			no-map;
+		};
+	};
+};
+
+&fpga_axi {
+	dvbs2-tx@7c500000 {
+		compatible = "generic-uio";
+		reg = <0x7c500000 0x10000>,     /* dvbs2_tx registers */
+		      <0x7c480000 0x10000>,     /* axi_dmac (BBFRAME DMA) */
+		      <0x3f000000 0x01000000>;  /* DMA buffer */
+		interrupt-parent = <&intc>;
+		interrupts = <0 54 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	dvbs2-rx@7c510000 {
+		compatible = "generic-uio";
+		reg = <0x7c510000 0x10000>,     /* dvbs2_rx registers */
+		      <0x7c490000 0x10000>,     /* axi_dmac (BBFRAME packets, stream -> memory) */
+		      <0x3ef00000 0x00100000>;  /* DMA buffer */
+		interrupt-parent = <&intc>;
+		interrupts = <0 53 IRQ_TYPE_LEVEL_HIGH>;
+	};
+};
