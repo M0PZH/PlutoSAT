@@ -1,20 +1,20 @@
 [submodule "linux"]
 	path = linux
-	url = https://github.com/analogdevicesinc/linux
-	branch = xlnx/release/v6.12.y-2026r1
+	url = ../PlutoSAT-linux.git
+	branch = plutosat
 [submodule "hdl"]
 	path = hdl
-	url = https://github.com/analogdevicesinc/hdl
-	branch = hdl_2026_r1
+	url = ../PlutoSAT-hdl.git
+	branch = plutosat
 [submodule "br2-external"]
 	path = br2-external
-	url = https://github.com/analogdevicesinc/br2-external.git
-	branch = main
+	url = ../PlutoSAT-br2-external.git
+	branch = plutosat
 [submodule "u-boot"]
 	path = u-boot
-	url = https://github.com/analogdevicesinc/u-boot.git
-	branch = adi-xlnx-u-boot-2025.1-y
+	url = ../PlutoSAT-u-boot.git
+	branch = plutosat
 [submodule "buildroot"]
 	path = buildroot
-	url = https://github.com/analogdevicesinc/buildroot.git
-	branch = adi-2026.02-y
+	url = ../PlutoSAT-buildroot.git
+	branch = plutosat
