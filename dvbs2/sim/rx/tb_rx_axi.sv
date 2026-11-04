@@ -1,7 +1,7 @@
 // Testbench for dvbs2_rx_axi: configures the core over AXI-Lite, plays ADC
 // samples on a separate 48 MHz clock (one every +adcdiv clocks), writes the
 // DMA packets ("hhhhhhhhhhhhhhhh last") and finally the status registers.
-//   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall=
+//   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall= +hold=
 //   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift=
 //                    +tkp= +tki= +thresh= +pkp= +pki= +maxit=
 `timescale 1ps/1ps
@@ -128,9 +128,13 @@ module tb_rx_axi;
 
   // DMA side
   int idle = 0;
+  longint cyc = 0, hold;
+  initial if (!$value$plusargs("hold=%d", hold)) hold = 0;
   always @(posedge clk) begin
-    tready <= ($urandom % 100) >= stall;
+    cyc++;
+    tready <= cyc >= hold && ($urandom % 100) >= stall;   // hold: no DMA yet
     if (tvalid && tready) begin
+      if (tlast) $display("packet end at cycle %0d (hold %0d)", cyc, hold);
       $fdisplay(fo, "%016h %0d", tdata, tlast);
       idle = 0;
     end else idle++;

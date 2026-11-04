@@ -496,3 +496,64 @@ def test_bch(bch_exe, rate_idx, stall):
         assert (g[-1, 2], g[-1, 3], g[-1, 4], g[-1, 5]) == (int(ok), lok, it, L), (i, g[-1], ok, L)
         assert right == (nerrs[i] <= t)                    # the model corrects <= t
         assert g[-1, 6] == raw
+
+
+def test_rx_axi_hold(rx_axi_exe):
+    """No DMA for the first frames (both packet slots fill, later frames are
+    dropped), then the DMA starts: the two held frames and every later
+    frame come out, in order (the board starts this way)."""
+    import grref
+    import rxmodel as rf
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    rate_idx, pilots, dec, nframes = 3, True, 3, 8
+    kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
+    rng = np.random.default_rng(5)
+    ts = rng.integers(0, 256, ((nframes + 1) * kb // 1504 + 3, 188), dtype=np.uint8)
+    ts[:, 0] = 0x47
+    bb = grref.bbheader(ts.ravel(), m.RATES[rate_idx])[: nframes * kb].reshape(nframes, kb)
+    frames = [m.dummy_plframe_signs()] * 8 + \
+             [m.plframe_signs(m.fec_frame(b, rate_idx), rate_idx + 1, pilots) for b in bb] + \
+             [m.dummy_plframe_signs()] * 2
+    c = m.rrc_coefs(8, 0.35, 16)
+    tx = m.rrc_interp(m.signs_to_iq(np.concatenate(frames)), c, 8, 16)
+    y = rf.channel(tx, 8, 2 * dec, 0.002, 40.0, 0.2, 8.0, 5)
+    y *= 300 / np.sqrt(np.mean(np.abs(y) ** 2) / 2)
+    x = np.clip(np.round(np.stack([y.real, y.imag], 1)), -2048, 2047).astype(np.int64)
+    dcoef = fx.ddc_coefs(dec)
+    fddc = os.path.join(WORK, "hold_ddc.hex")
+    with open(fddc, "w") as f:
+        for v in dcoef:
+            f.write(f"{int(v) & 0x3FFFF:05x}\n")
+    frrc = os.path.join(WORK, "hold_rrc.hex")
+    write_coefs(frrc, fx.timing_coefs(0.35))
+    fin = os.path.join(WORK, "hold_in.hex")
+    fout = os.path.join(WORK, "hold_out.hex")
+    fregs = os.path.join(WORK, "hold_regs.hex")
+    rxsim.write_iq(fin, x)
+    kp, ki = fx.timing_gains()
+    xa, xb = m.gold_init(0)
+    frame_clk = (32400 + 90 + 792) * 2 * dec * 4                  # ADC samples x adcdiv
+    hold = 2 * (8 * 3330 * 2 * dec * 4) + 11 * frame_clk          # ~5 frames decoded
+    pkp, pki = fx.pll_gains()
+    log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=10, hold=hold,
+              modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=0, dec=dec,
+              ntaps=len(dcoef), shift=12, tkp=kp, tki=ki, thresh=fx.fs_threshold(),
+              pkp=pkp, pki=pki, maxit=30, **{"in": fin, "out": fout})
+    print(log)
+    lines = [l.split() for l in open(fregs)]
+    regs = {int(a, 16): int(v, 16) for a, v in lines if not a.startswith("s")}
+    words = [int(l.split()[0], 16) for l in open(fout)]
+    assert len(words) % 1024 == 0
+    pk = [words[i:i + 1024] for i in range(0, len(words), 1024)]
+    hdr = [p[0] for p in pk]
+    assert all(h >> 56 == 0xB5 for h in hdr)
+    cnts = [(h >> 16) & 0xFFFF for h in hdr]
+    got = [np.frombuffer(np.array(p[1:], dtype="<u8").tobytes(), np.uint8)[: kb // 8] for p in pk]
+    sent = [next((k for k, b in enumerate(bb) if np.array_equal(np.packbits(b), g)), -1) for g in got]
+    print("packets", len(pk), "counters", cnts, "frames", sent, "dropped", regs[0x8C], "sent", regs[0x90])
+    assert regs[0x8C] >= 1, "the hold must make the RX drop frames"
+    assert cnts == list(range(len(pk))), "packet counter must run on"
+    assert len(pk) + regs[0x8C] == nframes, (len(pk), regs[0x8C])
+    assert len(pk) >= 3
+    assert sent == sorted(sent) and -1 not in sent, sent
