@@ -42,6 +42,7 @@ async def setup(dut, sps, gold, finc, rolloff=0.35):
     dut.gold_xb.value = xb
     dut.nco_finc.value = finc
     dut.nco_bypass.value = 0
+    dut.carrier_only.value = 0
     dut.coef_we.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst.value = 0
@@ -147,3 +148,27 @@ async def tx_gold_code(dut):
     """Gold code n = 12345, rates 1/4 and 8/9 with pilots."""
     await run(dut, [(0, 1), (9, 1)], sps=2, gold=12345, finc=0, stall=0.0,
               check_samples=False)
+
+
+@cocotb.test()
+async def tx_carrier_only(dut):
+    """Carrier-only test tone: constant symbols through the RRC and the NCO,
+    bit exact against the model fed with all-zero sign pairs."""
+    sps, finc = 4, 0x0C49BA5E
+    coefs = await setup(dut, sps, 0, finc)
+    snk = Sink(dut, ["i", "q"], stall_prob=0.2, seed=9)
+    cocotb.start_soon(snk.run())
+    dut.carrier_only.value = 1
+    dut.enable.value = 1
+    while len(snk.beats) < 6000:
+        await RisingEdge(dut.clk)
+    dut.enable.value = 0
+    rtl = np.array([(to_signed16(i), to_signed16(q)) for i, q in snk.beats], dtype=np.int64)
+    model = m.nco_mix(m.rrc_interp(m.signs_to_iq(np.zeros((len(rtl) // sps + 64, 2), np.uint8)),
+                                   coefs, sps, TPP), finc)
+    n = len(rtl)
+    bad = np.flatnonzero((rtl[:n] != model[:n]).any(axis=1))
+    assert bad.size == 0, f"{bad.size} sample mismatches, first {bad[:5]}"
+    amp = np.abs(rtl[2000:, 0] + 1j * rtl[2000:, 1])
+    assert amp.std() < 0.01 * amp.mean(), "not a constant-envelope tone"
+    dut._log.info(f"{n} carrier-only samples match the model; amplitude {amp.mean():.0f}")

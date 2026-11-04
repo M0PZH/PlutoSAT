@@ -29,6 +29,7 @@ module dvbs2_tx #(
   input  logic [17:0] gold_xb,
   input  logic [31:0] nco_finc,
   input  logic        nco_bypass,
+  input  logic        carrier_only,  // constant symbols: a tone at the NCO offset
   input  logic        coef_we,
   input  logic [$clog2(MAX_SPS * TPP)-1:0] coef_addr,
   input  logic [17:0] coef_data,
@@ -112,7 +113,7 @@ module dvbs2_tx #(
     .clk, .rst, .sps,
     .coef_we, .coef_addr, .coef_data,
     .s_valid(p_valid), .s_ready(p_ready),
-    .s_i(p_si ? -SYM_A : SYM_A), .s_q(p_sq ? -SYM_A : SYM_A),
+    .s_i((p_si && !carrier_only) ? -SYM_A : SYM_A), .s_q((p_sq && !carrier_only) ? -SYM_A : SYM_A),
     .m_valid(r_valid), .m_ready(r_ready), .m_i(r_i), .m_q(r_q));
 
   logic signed [15:0] n_i, n_q;

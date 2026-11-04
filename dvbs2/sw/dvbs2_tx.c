@@ -38,6 +38,7 @@
 #define   CTRL_RESET    (1u << 1)
 #define   CTRL_DACSEL   (1u << 2)
 #define   CTRL_NCOBYP   (1u << 3)
+#define   CTRL_CARRIER  (1u << 4)   /* carrier only: a test tone at the NCO offset */
 #define R_SPS         0x14
 #define R_GOLD_XA     0x18
 #define R_GOLD_XB     0x1C
@@ -280,7 +281,9 @@ static void usage(const char *p)
 		"  -u, --udp PORT         read TS from UDP port (default 1234)\n"
 		"  -i, --input FILE       read TS from FILE ('-' = stdin) instead of UDP\n"
 		"  -t, --flush-ms MS      send a partly filled BBFRAME after MS without data (default 100)\n"
-		"  -n, --no-iio           do not touch the AD9363 / DAC data source\n",
+		"  -n, --no-iio           do not touch the AD9363 / DAC data source\n"
+		"  -T, --tone             carrier only: an unmodulated test tone at --offset (needs a\n"
+		"                         non-zero offset; no TS input)\n",
 		p);
 	exit(2);
 }
@@ -288,7 +291,7 @@ static void usage(const char *p)
 int main(int argc, char **argv)
 {
 	double sr = 500e3, fs = 12e6, rolloff = 0.35, offset = 0, freq = 0, atten = -1;
-	int rate_idx = 3, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0;
+	int rate_idx = 3, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0, tone = 0;
 	uint32_t gold = 0;
 	const char *input = NULL;
 
@@ -297,9 +300,9 @@ int main(int argc, char **argv)
 		{ "pilots", 0, 0, 'p' }, { "rolloff", 1, 0, 'r' }, { "gold", 1, 0, 'g' },
 		{ "offset", 1, 0, 'o' }, { "freq", 1, 0, 'f' }, { "atten", 1, 0, 'a' },
 		{ "udp", 1, 0, 'u' }, { "input", 1, 0, 'i' }, { "flush-ms", 1, 0, 't' },
-		{ "no-iio", 0, 0, 'n' }, { 0, 0, 0, 0 },
+		{ "no-iio", 0, 0, 'n' }, { "tone", 0, 0, 'T' }, { 0, 0, 0, 0 },
 	};
-	for (int c; (c = getopt_long(argc, argv, "s:F:m:pr:g:o:f:a:u:i:t:n", lo, NULL)) != -1;) {
+	for (int c; (c = getopt_long(argc, argv, "s:F:m:pr:g:o:f:a:u:i:t:nT", lo, NULL)) != -1;) {
 		switch (c) {
 		case 's': sr = atof(optarg); break;
 		case 'F': fs = atof(optarg); break;
@@ -321,6 +324,7 @@ int main(int argc, char **argv)
 		case 'i': input = optarg; break;
 		case 't': flush_ms = atoi(optarg); break;
 		case 'n': no_iio = 1; break;
+		case 'T': tone = 1; break;
 		default: usage(argv[0]);
 		}
 	}
@@ -384,6 +388,9 @@ int main(int argc, char **argv)
 
 	int32_t coefs[MAX_SPS * TPP];
 	rrc_coefs(sps, rolloff, coefs);
+	/* stop the DMA first: transfers a previous run left queued would
+	 * otherwise flow into the core right after its reset */
+	wr(dmac, DMAC_CONTROL, 0);
 	wr(regs, R_CTRL, CTRL_RESET);
 	usleep(10);
 	wr(regs, R_SPS, sps);
@@ -395,6 +402,22 @@ int main(int argc, char **argv)
 		for (int j = 0; j < TPP; j++)
 			wr(regs, R_COEF_DATA, (uint32_t)coefs[p + sps * j] & 0x3FFFF);
 	uint32_t ctrl = CTRL_ENABLE | CTRL_DACSEL | (offset == 0 ? CTRL_NCOBYP : 0);
+	if (tone) {
+		if (offset == 0) {
+			fprintf(stderr, "--tone needs a non-zero --offset\n");
+			return 2;
+		}
+		signal(SIGINT, on_signal);
+		signal(SIGTERM, on_signal);
+		wr(regs, R_CTRL, ctrl | CTRL_CARRIER);
+		if (!(rd(regs, R_CTRL) & CTRL_CARRIER))
+			fprintf(stderr, "warning: this bitstream has no carrier-only mode\n");
+		fprintf(stderr, "dvbs2-tx: test tone at %+.0f Hz (fs %.0f)\n", offset, fs);
+		while (!stop)
+			pause();
+		wr(regs, R_CTRL, 0);
+		return 0;
+	}
 	wr(regs, R_CTRL, ctrl);
 
 	wr(dmac, DMAC_CONTROL, 0);
@@ -475,6 +498,7 @@ int main(int argc, char **argv)
 		"%u length / %u header errors, %u DAC underruns\n", frames,
 		rd(regs, R_DATA_FRAMES), rd(regs, R_DUMMY_FRAMES), rd(regs, R_LEN_ERR),
 		rd(regs, R_HDR_ERR), rd(regs, R_DAC_UNDERRUN));
+	wr(dmac, DMAC_CONTROL, 0);
 	wr(regs, R_CTRL, 0);   /* stop framing, give DAC channel 0 back */
 	return 0;
 }

@@ -39,6 +39,7 @@ async def loopback_gr_dvbs2rx(dut):
     dut.gold_xa.value, dut.gold_xb.value = xa, xb
     dut.nco_finc.value = 0
     dut.nco_bypass.value = 1
+    dut.carrier_only.value = 0
     dut.coef_we.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst.value = 0

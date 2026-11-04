@@ -10,6 +10,8 @@
 //                         [1] soft reset (core, FIFOs, counters)
 //                         [2] DAC select: 1 = DVB-S2 drives DAC channel 0
 //                         [3] NCO bypass
+//                         [4] carrier only: constant symbols (a test tone at the
+//                             NCO offset; framing keeps running)
 //   0x14 SPS          RW  [6:0] samples per symbol (2..64)
 //   0x18 GOLD_XA      RW  [17:0]
 //   0x1C GOLD_XB      RW  [17:0]
@@ -67,7 +69,7 @@ module dvbs2_tx_axi #(
 
   // ---------------------------------------------------------------- registers
   logic [31:0] scratch, nco_finc;
-  logic [3:0]  ctrl;
+  logic [4:0]  ctrl;
   logic [6:0]  sps;
   logic [17:0] gold_xa, gold_xb;
   logic [9:0]  coef_addr;
@@ -103,7 +105,7 @@ module dvbs2_tx_axi #(
     coef_we <= 1'b0;
     if (!s_axi_aresetn) begin
       aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b0;
-      ctrl <= 4'b0000; sps <= 7'd8; scratch <= '0; nco_finc <= '0;
+      ctrl <= 5'b00000; sps <= 7'd8; scratch <= '0; nco_finc <= '0;
       gold_xa <= 18'h00001; gold_xb <= 18'h01008; coef_addr <= '0;
     end else begin
       if (s_axi_awvalid && s_axi_awready) begin aw_hold <= 1'b1; awaddr_q <= s_axi_awaddr; end
@@ -113,7 +115,7 @@ module dvbs2_tx_axi #(
         aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b1;
         case (awaddr_q[7:2])
           6'h02: scratch   <= wdata_q;
-          6'h04: ctrl      <= wdata_q[3:0];
+          6'h04: ctrl      <= wdata_q[4:0];
           6'h05: sps       <= wdata_q[6:0];
           6'h06: gold_xa   <= wdata_q[17:0];
           6'h07: gold_xb   <= wdata_q[17:0];
@@ -140,7 +142,7 @@ module dvbs2_tx_axi #(
           6'h00: s_axi_rdata <= 32'h0001_0000;
           6'h01: s_axi_rdata <= 32'h4456_5332;
           6'h02: s_axi_rdata <= scratch;
-          6'h04: s_axi_rdata <= {28'd0, ctrl};
+          6'h04: s_axi_rdata <= {27'd0, ctrl};
           6'h05: s_axi_rdata <= {25'd0, sps};
           6'h06: s_axi_rdata <= {14'd0, gold_xa};
           6'h07: s_axi_rdata <= {14'd0, gold_xb};
@@ -187,7 +189,7 @@ module dvbs2_tx_axi #(
 
   dvbs2_tx #(.LDPC_ROM_FILE(LDPC_ROM_FILE), .NCO_LUT_FILE(NCO_LUT_FILE)) i_tx (
     .clk, .rst(core_rst),
-    .enable(ctrl[0]), .sps, .gold_xa, .gold_xb, .nco_finc, .nco_bypass(ctrl[3]),
+    .enable(ctrl[0]), .sps, .gold_xa, .gold_xb, .nco_finc, .nco_bypass(ctrl[3]), .carrier_only(ctrl[4]),
     .coef_we, .coef_addr, .coef_data,
     .s_valid(b_valid), .s_ready(b_ready), .s_data(b_data), .s_user(b_user), .s_last(b_last),
     .m_valid(t_valid), .m_ready(t_ready), .m_i(t_i), .m_q(t_q),
