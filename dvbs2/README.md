@@ -387,6 +387,43 @@ rate, ~10 s per step at 33.33 kS/s) or an offset known in advance: from
 the QO-100 beacon (1.5 MS/s, acquires within +-195 kHz in ~0.2 s; its
 FREQ register gives the LNB offset to a few Hz) or from the spectrum.
 
+### Symbol-rate offset
+
+At 12 MS/s the receiver's nominal rate is 6 MS/s / decimation, while
+QO-100 stations transmit integer-kS rates: 333000 S/s is decimation 18
+(333333 S/s) with the transmitter at e = -1000 ppm, 66000 and 33000 S/s
+are decimation 91 and 182 (65934, 32967 S/s) at e = +1000 ppm.
+`model/sr_offset_experiment.py` measures this: TX model, windowed-sinc
+resampler with the rate error e, 0.004 cycles/symbol carrier offset, AWGN
+over the ADC band, 12-bit ADC, the DDC as dvbs2-rx loads it, the receiver
+model, gr-dvbs2rx FEC; QPSK 1/2, Es/N0 2 dB, data frames from the first
+symbol on.
+
+The Gardner loop (Bn T = 0.002) follows up to ~+-850 ppm without slipping
+(2 zeta omega_n / 2 pi); a larger offset is pulled in by slipping symbols
+first (12-45 at +-1000 ppm), which takes a time growing with e^2. The
+integrator update rounds down (`>> 16`, -0.5 LSB per symbol), which the
+loop balances with a small static timing error: the integrator settles
+~187 below the expected 2 (nominal / actual - 1) x 2^24 at every offset,
+and the pull-in is slower for e < 0 (transmitter slower than nominal).
+
+| e (ppm) | pull-in, symbols (median) | data frames lost before the first decoded one (median of 12 runs, decimation 3) | after it (200 frames at decimation 3 and 18, 100 at 91 and 182; pilots on and off) |
+| --- | --- | --- | --- |
+| 0, +-200 | 4k | 5 | none, apart from single LDPC failures without pilots (also at e = 0) |
+| +-500 | 7-11k | 5-6 | the same |
+| -1000 / +1000 | 28k / 19k | 7 / 7 | the same, no slips |
+| -2000 / +2000 | 120k / 50k | 10 / 8 (5 / 1 of 12 runs not locked within 12 frames) | the same |
+| -5000 | none in 200 frames | - | no frame decoded |
+| +5000 | 210-440k | 14-23 | the same |
+
+So +-1000 ppm is tracked (integrator standard deviation ~1040 LSB, 31
+ppm) and costs 1-2 frames of acquisition (1-2 s at 33 kS/s). A known
+offset is removed by the integrator's start value: TIMING_INTEG (0x5C)
+written before the soft reset is loaded at the reset
+(`rxfixed.timing_integ_preset()`; 333000 S/s at decimation 18: 33588).
+With it acquisition is the same as at e = 0 (median 5 frames) for every
+tested offset up to +-2 % (`sr_offset_experiment.py --preset`).
+
 ### Fishball bitstream integration
 
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_rx` (module reference
@@ -408,7 +445,9 @@ CW 30 dB above the signal in an alias band); `test_ddc` checks the DDC
 alone (FIR alone and CIC, several R and D, NCO on/off, input at the
 maximum rate, saturation of the CIC and FIR outputs) and
 `test_ddc_sw_config` that `dvbs2-rx` chooses the model's configuration for
-every decimation.
+every decimation. `test_rx_axi_sr_offset` runs decimation 18 with the
+transmitter at 333000 S/s (-1000 ppm, TIMING_INTEG preset) and at +1000 ppm
+(pulled in from 0).
 
 Linux: UIO device `dvbs2-rx` (registers, DMA, 1 MB buffer at 0x3EF00000)
 and `dvbs2-rx` in the same buildroot package as `dvbs2-tx`:
