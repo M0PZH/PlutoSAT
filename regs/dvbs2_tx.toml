@@ -1,0 +1,212 @@
+# DVB-S2 transmitter: AXI-Lite registers of dvbs2/rtl/dvbs2_tx_axi.sv.
+# The core takes one DMA packet per BBFRAME (see [[packet]] HDR) from an
+# axi_dmac (map 1, memory -> stream) and drives AD9363 DAC channel 0.
+
+[core]
+name = "dvbs2_tx"
+title = "DVB-S2 transmitter"
+uio = "dvbs2-tx"
+size = 0x10000
+id = { offset = 0x04, value = 0x44565332 }        # "DVS2"
+version = { offset = 0x00, value = 0x00010000 }
+rtl = "dvbs2/rtl/dvbs2_tx_axi.sv"
+maps = ["regs", "dmac", "buffer"]
+
+[[const]]
+name = "TPP"
+value = 16
+doc = "RRC interpolator taps per polyphase branch"
+
+[[const]]
+name = "SPS_MIN"
+value = 2
+doc = "Smallest samples per symbol"
+
+[[const]]
+name = "SPS_MAX"
+value = 64
+doc = "Largest samples per symbol"
+
+[[const]]
+name = "GOLD_MAX"
+value = 262142
+doc = "Largest PL scrambling Gold code number"
+
+[[const]]
+name = "HDR_MAGIC"
+value = 0xB5
+doc = "HDR.MAGIC value of a valid DMA packet"
+
+[[reg]]
+name = "VERSION"
+offset = 0x00
+access = "ro"
+doc = "Core version, 0x0001_0000 = 1.0"
+  [[reg.field]]
+  name = "MINOR"
+  bits = [0, 15]
+  doc = "Minor version"
+  [[reg.field]]
+  name = "MAJOR"
+  bits = [16, 31]
+  doc = "Major version"
+
+[[reg]]
+name = "ID"
+offset = 0x04
+access = "ro"
+doc = "Core identification \"DVS2\" (0x44565332)"
+
+[[reg]]
+name = "SCRATCH"
+offset = 0x08
+access = "rw"
+reset = 0
+doc = "Scratch register, no function"
+
+[[reg]]
+name = "CTRL"
+offset = 0x10
+access = "rw"
+reset = 0
+doc = "Control"
+  [[reg.field]]
+  name = "ENABLE"
+  bits = [0, 0]
+  doc = "Enable PLFRAME generation"
+  [[reg.field]]
+  name = "RESET"
+  bits = [1, 1]
+  doc = "Soft reset (core, FIFOs, counters)"
+  [[reg.field]]
+  name = "DAC_SEL"
+  bits = [2, 2]
+  doc = "DAC select: 1 = DVB-S2 drives DAC channel 0"
+  [[reg.field]]
+  name = "NCO_BYPASS"
+  bits = [3, 3]
+  doc = "NCO bypass (no frequency offset)"
+  [[reg.field]]
+  name = "CARRIER_ONLY"
+  bits = [4, 4]
+  doc = "Carrier only: constant symbols, an unmodulated test tone at the NCO offset (NCO bypass off); framing keeps running"
+
+[[reg]]
+name = "SPS"
+offset = 0x14
+access = "rw"
+doc = "Samples per symbol"
+  [[reg.field]]
+  name = "SPS"
+  bits = [0, 6]
+  doc = "Samples per symbol, 2..64"
+
+[[reg]]
+name = "GOLD_XA"
+offset = 0x18
+access = "rw"
+doc = "PL scrambler x sequence start (x LFSR advanced by the Gold code n)"
+  [[reg.field]]
+  name = "X"
+  bits = [0, 17]
+  doc = "LFSR state"
+
+[[reg]]
+name = "GOLD_XB"
+offset = 0x1C
+access = "rw"
+doc = "PL scrambler second x sequence start (x LFSR advanced by n + 131072)"
+  [[reg.field]]
+  name = "X"
+  bits = [0, 17]
+  doc = "LFSR state"
+
+[[reg]]
+name = "NCO_FINC"
+offset = 0x20
+access = "rw"
+doc = "NCO phase increment per sample, 2^32 = sample rate (signed)"
+
+[[reg]]
+name = "COEF_ADDR"
+offset = 0x24
+access = "rw"
+doc = "RRC coefficient address"
+  [[reg.field]]
+  name = "ADDR"
+  bits = [0, 9]
+  doc = "Address p * 16 + j (polyphase branch p, tap j)"
+
+[[reg]]
+name = "COEF_DATA"
+offset = 0x28
+access = "wo"
+doc = "Write the coefficient at COEF_ADDR, then COEF_ADDR++"
+  [[reg.field]]
+  name = "DATA"
+  bits = [0, 17]
+  signed = true
+  doc = "RRC coefficient"
+
+[[reg]]
+name = "DATA_FRAMES"
+offset = 0x30
+access = "ro"
+doc = "Data PLFRAMEs sent"
+
+[[reg]]
+name = "DUMMY_FRAMES"
+offset = 0x34
+access = "ro"
+doc = "Dummy PLFRAMEs sent"
+
+[[reg]]
+name = "LEN_ERRORS"
+offset = 0x38
+access = "ro"
+doc = "Bad-length packets (adapter) + core length errors"
+
+[[reg]]
+name = "HDR_ERRORS"
+offset = 0x3C
+access = "ro"
+doc = "Packets with a bad header word"
+
+[[reg]]
+name = "FIFO_LEVEL"
+offset = 0x40
+access = "ro"
+doc = "FECFRAME buffer level in symbols"
+
+[[reg]]
+name = "DAC_UNDERRUN"
+offset = 0x44
+access = "ro"
+doc = "DAC samples with no DVB-S2 sample available"
+
+[[reg]]
+name = "FIFO_FRAMES"
+offset = 0x48
+access = "ro"
+doc = "Complete FECFRAMEs waiting"
+  [[reg.field]]
+  name = "FRAMES"
+  bits = [0, 2]
+  doc = "FECFRAMEs"
+
+[[packet]]
+name = "HDR"
+width = 32
+doc = "Word 0 of a DMA packet (32-bit words, first byte in [7:0]); the Kbch/8 BBFRAME bytes follow, zero padded to 64 bits"
+  [[packet.field]]
+  name = "RATE"
+  bits = [0, 3]
+  doc = "Rate index 0..10 (QPSK 1/4 .. 9/10)"
+  [[packet.field]]
+  name = "PILOTS"
+  bits = [4, 4]
+  doc = "Pilots on"
+  [[packet.field]]
+  name = "MAGIC"
+  bits = [24, 31]
+  doc = "0xB5 (HDR_MAGIC)"

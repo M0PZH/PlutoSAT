@@ -1,0 +1,105 @@
+# Self-test noise source on the AD9363 rx0 samples: AXI-Lite registers of
+# awgn/rtl/rx_awgn_axi.sv. CTRL / GAIN / NSCALE reach the ADC clock domain a
+# few clocks after the last write.
+
+[core]
+name = "rx_awgn"
+title = "RX self-test noise source"
+uio = "rx-awgn"
+size = 0x10000
+id = { offset = 0x04, value = 0x4157474E }        # "AWGN"
+version = { offset = 0x00, value = 0x00010000 }
+rtl = "awgn/rtl/rx_awgn_axi.sv"
+maps = ["regs"]
+
+[[const]]
+name = "GAIN_ONE"
+value = 16384
+doc = "GAIN value for unity gain (Q2.14)"
+
+[[const]]
+name = "NSCALE_MAX"
+value = 131071
+doc = "Largest NSCALE"
+
+[[const]]
+name = "METER_SAMPLES"
+value = 65536
+doc = "Samples per power measurement (P_IN, P_OUT)"
+
+[[reg]]
+name = "VERSION"
+offset = 0x00
+access = "ro"
+doc = "Core version, 0x0001_0000 = 1.0"
+  [[reg.field]]
+  name = "MINOR"
+  bits = [0, 15]
+  doc = "Minor version"
+  [[reg.field]]
+  name = "MAJOR"
+  bits = [16, 31]
+  doc = "Major version"
+
+[[reg]]
+name = "ID"
+offset = 0x04
+access = "ro"
+doc = "Core identification \"AWGN\" (0x4157474E)"
+
+[[reg]]
+name = "CTRL"
+offset = 0x08
+access = "rw"
+reset = 0
+doc = "Control"
+  [[reg.field]]
+  name = "ENABLE"
+  bits = [0, 0]
+  doc = "Add noise to rx0 (and apply GAIN)"
+
+[[reg]]
+name = "GAIN"
+offset = 0x0C
+access = "rw"
+reset = 16384
+doc = "rx0 signal gain"
+  [[reg.field]]
+  name = "GAIN"
+  bits = [0, 15]
+  doc = "Gain, Q2.14 (16384 = 1)"
+
+[[reg]]
+name = "NSCALE"
+offset = 0x10
+access = "rw"
+reset = 0
+doc = "Noise level"
+  [[reg.field]]
+  name = "NSCALE"
+  bits = [0, 16]
+  doc = "Noise sigma per component = 0.018042 * NSCALE ADC LSB (SIGMA_G / 2^14)"
+
+[[reg]]
+name = "P_IN"
+offset = 0x14
+access = "ro"
+doc = "Mean I^2 + Q^2 of rx0 before the noise, over 2^16 samples"
+
+[[reg]]
+name = "P_OUT"
+offset = 0x18
+access = "ro"
+doc = "Mean I^2 + Q^2 of rx0 after the noise, over 2^16 samples"
+
+[[reg]]
+name = "P_COUNT"
+offset = 0x1C
+access = "ro"
+doc = "Power measurements done"
+
+[[reg]]
+name = "SIGMA_G"
+offset = 0x20
+access = "ro"
+doc = "Noise generator sigma * 2^16 (295.6 LSB)"

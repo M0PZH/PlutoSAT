@@ -1,0 +1,277 @@
+# Spectrum analyser (fft/): averaged 4096-bin power spectra of rx0, rx1 or
+# one nbiq channel, computed in the PL. Registers of fft/rtl/fft_axi.sv.
+# Configuration (CTRL source and channel, NAVG, SCALE, RSHIFT) is taken when
+# an average starts; RES_CFG / RES_SCALE describe the result in RESULT.
+
+[core]
+name = "fft"
+title = "Spectrum analyser"
+uio = "fft"
+size = 0x10000
+id = { offset = 0x004, value = 0x46465453 }        # "FFTS"
+version = { offset = 0x000, value = 0x00010000 }
+rtl = "fft/rtl/fft_axi.sv"
+maps = ["regs"]
+
+[[const]]
+name = "N"
+value = 4096
+doc = "FFT length (bins, RESULT words)"
+
+[[const]]
+name = "NAVG_MAX"
+value = 256
+doc = "Largest NAVG"
+
+[[const]]
+name = "RSHIFT_MAX"
+value = 8
+doc = "Largest RSHIFT"
+
+[[const]]
+name = "WIN_ONE"
+value = 131072
+doc = "WIN value for a gain of 1 (2^17)"
+
+[[const]]
+name = "SCALE_RX"
+value = 0x555400
+doc = "Scale schedule for the 12-bit ADC sources (rx0, rx1): total shift 7, no overflow"
+
+[[const]]
+name = "SCALE_NBIQ"
+value = 0x555550
+doc = "Scale schedule for nbiq channels at their default gain 8 (12-bit full scale = 16384): total shift 10"
+
+[[const]]
+name = "SCALE_16"
+value = 0x555555
+doc = "Scale schedule for full-scale 16-bit data (nbiq): total shift 12, no overflow"
+
+[[reg]]
+name = "VERSION"
+offset = 0x000
+access = "ro"
+doc = "Core version, 0x0001_0000 = 1.0"
+  [[reg.field]]
+  name = "MINOR"
+  bits = [0, 15]
+  doc = "Minor version"
+  [[reg.field]]
+  name = "MAJOR"
+  bits = [16, 31]
+  doc = "Major version"
+
+[[reg]]
+name = "ID"
+offset = 0x004
+access = "ro"
+doc = "Core identification \"FFTS\" (0x46465453)"
+
+[[reg]]
+name = "CTRL"
+offset = 0x008
+access = "rw"
+reset = 0
+doc = "Control; SRC and NB_CH are taken when an average starts"
+  [[reg.field]]
+  name = "RUN"
+  bits = [0, 0]
+  doc = "Start averages back to back (DOUBLE_BUF = 0: each after DONE is cleared); 0 stops after the current one"
+  [[reg.field]]
+  name = "IRQ_EN"
+  bits = [1, 1]
+  doc = "Interrupt on DONE"
+  [[reg.field]]
+  name = "SRC"
+  bits = [4, 5]
+  doc = "Source"
+  enum = { RX0 = 0, RX1 = 1, NBIQ = 2 }
+  [[reg.field]]
+  name = "NB_CH"
+  bits = [8, 10]
+  doc = "nbiq channel (tap_ch) when SRC = NBIQ, 0..4"
+
+[[reg]]
+name = "CMD"
+offset = 0x00C
+access = "wo"
+doc = "Commands (write 1)"
+  [[reg.field]]
+  name = "START"
+  bits = [0, 0]
+  doc = "Clear DONE; start one average if the core is idle (BUSY = 0)"
+  [[reg.field]]
+  name = "ABORT"
+  bits = [1, 1]
+  doc = "Reset the FFT and the sequencer, drop the average in progress, clear DONE (RUN stays: a new average starts with the current configuration)"
+
+[[reg]]
+name = "NAVG"
+offset = 0x010
+access = "rw"
+reset = 1
+doc = "Spectra per average"
+  [[reg.field]]
+  name = "NAVG"
+  bits = [0, 8]
+  doc = "1..256 (0 counts as 1, larger values as 256)"
+
+[[reg]]
+name = "SCALE"
+offset = 0x014
+access = "rw"
+reset = 0x555400
+doc = "FFT scale schedule"
+  [[reg.field]]
+  name = "SCALE"
+  bits = [0, 23]
+  doc = "2 bits per radix-2 stage (shift 0..3), stage 0 in bits [1:0]; output = DFT / 2^(sum of the shifts)"
+
+[[reg]]
+name = "RSHIFT"
+offset = 0x018
+access = "rw"
+reset = 0
+doc = "Result scaling"
+  [[reg.field]]
+  name = "RSHIFT"
+  bits = [0, 3]
+  doc = "Right shift of the 40-bit power sum, 0..8 (larger values: 8); log2(NAVG) gives the mean"
+
+[[reg]]
+name = "STATUS"
+offset = 0x01C
+access = "ro"
+doc = "Status"
+  [[reg.field]]
+  name = "BUSY"
+  bits = [0, 0]
+  doc = "An average is in progress"
+  [[reg.field]]
+  name = "DONE"
+  bits = [1, 1]
+  doc = "Copy of DONE"
+  [[reg.field]]
+  name = "CAPT"
+  bits = [2, 2]
+  doc = "Samples are being loaded into the FFT"
+  [[reg.field]]
+  name = "FRAME"
+  bits = [8, 15]
+  doc = "Frame of the average being captured (0..NAVG-1)"
+
+[[reg]]
+name = "DONE"
+offset = 0x020
+access = "w1c"
+reset = 0
+doc = "Result ready (interrupt source)"
+  [[reg.field]]
+  name = "DONE"
+  bits = [0, 0]
+  doc = "Set when a result is published in RESULT; write 1 to clear (acknowledge)"
+
+[[reg]]
+name = "FLAGS"
+offset = 0x024
+access = "w1c"
+reset = 0
+doc = "Sticky error flags, write 1 to clear"
+  [[reg.field]]
+  name = "FFT_OVF"
+  bits = [0, 0]
+  doc = "FFT overflow in some frame (SCALE too small for the input)"
+  [[reg.field]]
+  name = "SAT"
+  bits = [1, 1]
+  doc = "A result word saturated at 0xFFFFFFFF (RSHIFT too small)"
+  [[reg.field]]
+  name = "LOST"
+  bits = [2, 2]
+  doc = "A sample reached the FFT while it was not ready, or the frame order was wrong (should never happen)"
+  [[reg.field]]
+  name = "DROP"
+  bits = [3, 3]
+  doc = "DOUBLE_BUF: an average finished while DONE was set and was dropped"
+
+[[reg]]
+name = "FRAMES"
+offset = 0x028
+access = "ro"
+doc = "FFT frames accumulated since reset (wraps)"
+
+[[reg]]
+name = "AVGS"
+offset = 0x02C
+access = "ro"
+doc = "Results published since reset (wraps); unchanged before and after reading RESULT means a consistent copy"
+
+[[reg]]
+name = "DROPS"
+offset = 0x030
+access = "ro"
+doc = "Averages dropped since reset (DOUBLE_BUF, result still unread)"
+
+[[reg]]
+name = "RES_CFG"
+offset = 0x034
+access = "ro"
+doc = "Configuration of the published result"
+  [[reg.field]]
+  name = "SRC"
+  bits = [0, 1]
+  doc = "Source"
+  enum = { RX0 = 0, RX1 = 1, NBIQ = 2 }
+  [[reg.field]]
+  name = "NB_CH"
+  bits = [4, 6]
+  doc = "nbiq channel"
+  [[reg.field]]
+  name = "RSHIFT"
+  bits = [8, 11]
+  doc = "Result right shift"
+  [[reg.field]]
+  name = "NAVG"
+  bits = [16, 24]
+  doc = "Spectra averaged (1..256)"
+
+[[reg]]
+name = "RES_SCALE"
+offset = 0x038
+access = "ro"
+doc = "Scale schedule of the published result"
+  [[reg.field]]
+  name = "SCALE"
+  bits = [0, 23]
+  doc = "As SCALE"
+
+[[reg]]
+name = "INFO"
+offset = 0x03C
+access = "ro"
+doc = "Build options"
+  [[reg.field]]
+  name = "LOG2N"
+  bits = [0, 3]
+  doc = "log2 FFT length (12)"
+  [[reg.field]]
+  name = "DOUBLE_BUF"
+  bits = [4, 4]
+  doc = "Separate result buffer: averages continue while the ARM reads"
+
+[[window]]
+name = "WIN"
+offset = 0x2000
+words = 2048
+access = "wo"
+width = 18
+doc = "Window table: w[n] = w[4095 - n] = WIN[n], unsigned, 2^17 = 1.0 (at most 2^17); write while idle. Reset: 4-term Blackman-Harris"
+
+[[window]]
+name = "RESULT"
+offset = 0x4000
+words = 4096
+access = "ro"
+width = 32
+doc = "Result word j = min(sum over NAVG frames of |X[k]|^2 >> RSHIFT, 2^32 - 1), k = j ^ 2048: FFT-shifted, frequency (j - 2048) fs / 4096; valid while DONE"

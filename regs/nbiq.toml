@@ -1,0 +1,198 @@
+[core]
+name = "nbiq"
+title = "Narrowband IQ channels"
+uio = "nbiq"
+size = 0x10000
+id = { offset = 0x004, value = 0x4E424951 }
+version = { offset = 0x000, value = 0x00020000 }
+rtl = "nbiq/rtl/nbiq_axi.sv"
+maps = ["regs", "ring"]
+
+[[reg]]
+name = "VERSION"
+offset = 0x000
+access = "ro"
+reset = 0x00020000
+doc = "Core version (major in [31:16])"
+
+[[reg]]
+name = "ID"
+offset = 0x004
+access = "ro"
+reset = 0x4E424951
+doc = "Core identifier \"NBIQ\""
+
+[[reg]]
+name = "CTRL"
+offset = 0x008
+access = "rw"
+reset = 0
+doc = "Control"
+  [[reg.field]]
+  name = "IRQ_EN"
+  bits = [0, 0]
+  doc = "Interrupt enable"
+
+[[reg]]
+name = "IRQ_PERIOD"
+offset = 0x00C
+access = "rw"
+reset = 0
+doc = "Interrupt period in clocks (0: off)"
+
+[[reg]]
+name = "IRQ_STATUS"
+offset = 0x010
+access = "w1c"
+reset = 0
+doc = "Interrupt status"
+  [[reg.field]]
+  name = "PERIOD"
+  bits = [0, 0]
+  doc = "Period elapsed; write 1 to clear"
+
+[[reg]]
+name = "ADC_CNT_LO"
+offset = 0x014
+access = "ro"
+doc = "ADC samples received, low word (reading it latches ADC_CNT_HI)"
+
+[[reg]]
+name = "ADC_CNT_HI"
+offset = 0x018
+access = "ro"
+doc = "ADC samples received, high word (as latched by reading ADC_CNT_LO)"
+
+[[reg]]
+name = "INFO"
+offset = 0x01C
+access = "ro"
+reset = 0x00807F05
+doc = "Core parameters"
+  [[reg.field]]
+  name = "CHANNELS"
+  bits = [0, 7]
+  doc = "Number of channels (5)"
+  [[reg.field]]
+  name = "NPAIRS_MAX"
+  bits = [8, 15]
+  doc = "Maximum FIR tap pairs (127, 254 taps)"
+  [[reg.field]]
+  name = "R_MAX"
+  bits = [16, 23]
+  doc = "Maximum CIC decimation (128)"
+
+[[array]]
+name = "CH"
+offset = 0x100
+stride = 0x40
+count = 5
+  [[array.reg]]
+  name = "CTRL"
+  offset = 0x00
+  access = "rw"
+  reset = 0
+  doc = "Channel control"
+    [[array.reg.field]]
+    name = "EN"
+    bits = [0, 0]
+    doc = "Enable; 0 clears the channel (enabling latches T0)"
+    [[array.reg.field]]
+    name = "SRC"
+    bits = [1, 1]
+    doc = "Receive channel"
+    enum = { RX0 = 0, RX1 = 1 }
+
+  [[array.reg]]
+  name = "FINC"
+  offset = 0x04
+  access = "rw"
+  reset = 0
+  doc = "NCO step: frequency finc / 2^32 * fs goes to DC"
+
+  [[array.reg]]
+  name = "CIC"
+  offset = 0x08
+  access = "rw"
+  reset = 0x006
+  doc = "CIC decimation and scaling (change while disabled)"
+    [[array.reg.field]]
+    name = "R"
+    bits = [0, 7]
+    doc = "Decimation R, 2..128 (output rate fs / (2 R))"
+    [[array.reg.field]]
+    name = "CSHIFT"
+    bits = [8, 12]
+    doc = "CIC output shift: sat24(round(comb / 2^cshift))"
+
+  [[array.reg]]
+  name = "FIR"
+  offset = 0x0C
+  access = "rw"
+  reset = 0x001
+  doc = "FIR length and scaling (change while disabled)"
+    [[array.reg.field]]
+    name = "NPAIRS"
+    bits = [0, 6]
+    doc = "Tap pairs, 1..127 (2 npairs taps)"
+    [[array.reg.field]]
+    name = "OSHIFT"
+    bits = [8, 13]
+    doc = "FIR output shift: sat16(round(acc / 2^oshift))"
+
+  [[array.reg]]
+  name = "RING_BASE"
+  offset = 0x10
+  access = "rw"
+  reset = 0
+  doc = "Ring physical address, aligned to RING_MASK + 1"
+
+  [[array.reg]]
+  name = "RING_MASK"
+  offset = 0x14
+  access = "rw"
+  reset = 0xFFF
+  doc = "Ring size - 1 (size a power of two >= 4096)"
+
+  [[array.reg]]
+  name = "WPTR"
+  offset = 0x18
+  access = "ro"
+  doc = "Bytes written to the ring since enable, wraps at 2^32"
+
+  [[array.reg]]
+  name = "T0_LO"
+  offset = 0x1C
+  access = "ro"
+  doc = "ADC_CNT at enable (the channel's first ADC sample), low word"
+
+  [[array.reg]]
+  name = "T0_HI"
+  offset = 0x20
+  access = "ro"
+  doc = "ADC_CNT at enable, high word"
+
+  [[array.reg]]
+  name = "DROPS"
+  offset = 0x24
+  access = "ro"
+  doc = "Overrun counters (wrap)"
+    [[array.reg.field]]
+    name = "FIR"
+    bits = [0, 15]
+    doc = "FIR job FIFO overruns (each delays the channel's output by one sample)"
+    [[array.reg.field]]
+    name = "STAGING"
+    bits = [16, 31]
+    doc = "Samples lost to a full staging buffer (DDR writes too slow)"
+
+[[window]]
+name = "COEF"
+offset = 0x2000
+stride = 0x400
+count = 5
+words = 256
+access = "wo"
+width = 18
+signed = true
+doc = "FIR taps h[i] of the channel, i = 0..2 npairs - 1 (254 used)"

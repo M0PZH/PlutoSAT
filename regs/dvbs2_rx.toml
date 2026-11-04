@@ -1,0 +1,516 @@
+# DVB-S2 receiver: AXI-Lite registers of dvbs2/rtl/dvbs2_rx_axi.sv.
+# One fixed-size DMA packet (PKT_BYTES, see [[packet]] HDR) per decoded
+# BBFRAME goes to an axi_dmac (map 1, stream -> memory).
+
+[core]
+name = "dvbs2_rx"
+title = "DVB-S2 receiver"
+uio = "dvbs2-rx"
+size = 0x10000
+id = { offset = 0x04, value = 0x44565232 }        # "DVR2"
+version = { offset = 0x00, value = 0x00010000 }
+rtl = "dvbs2/rtl/dvbs2_rx_axi.sv"
+maps = ["regs", "dmac", "buffer"]
+
+[[const]]
+name = "PKT_WORDS"
+value = 1024
+doc = "64-bit words per DMA packet (tlast on the last)"
+
+[[const]]
+name = "PKT_BYTES"
+value = 8192
+doc = "Bytes per DMA packet"
+
+[[const]]
+name = "HDR_MAGIC"
+value = 0xB5
+doc = "HDR.MAGIC value of a packet"
+
+[[const]]
+name = "RRC_PHASES"
+value = 32
+doc = "Fractional-delay phases of the RRC matched filter"
+
+[[const]]
+name = "RRC_TAPS"
+value = 25
+doc = "Taps per RRC phase in use"
+
+[[const]]
+name = "RRC_ROW"
+value = 32
+doc = "RRC coefficient addresses per phase (taps RRC_TAPS.. are written as 0)"
+
+[[const]]
+name = "DDC_TAPS_MAX"
+value = 512
+doc = "Largest DDC lowpass length"
+
+[[const]]
+name = "DECIM_MAX"
+value = 32
+doc = "Largest DDC decimation (ADC samples per 2 symbols)"
+
+[[const]]
+name = "SNAP_SYMBOLS"
+value = 1024
+doc = "Symbols per constellation snapshot"
+
+[[reg]]
+name = "VERSION"
+offset = 0x00
+access = "ro"
+doc = "Core version, 0x0001_0000 = 1.0"
+  [[reg.field]]
+  name = "MINOR"
+  bits = [0, 15]
+  doc = "Minor version"
+  [[reg.field]]
+  name = "MAJOR"
+  bits = [16, 31]
+  doc = "Major version"
+
+[[reg]]
+name = "ID"
+offset = 0x04
+access = "ro"
+doc = "Core identification \"DVR2\" (0x44565232)"
+
+[[reg]]
+name = "SCRATCH"
+offset = 0x08
+access = "rw"
+reset = 0
+doc = "Scratch register, no function"
+
+[[reg]]
+name = "CTRL"
+offset = 0x10
+access = "rw"
+reset = 0
+doc = "Control"
+  [[reg.field]]
+  name = "ENABLE"
+  bits = [0, 0]
+  doc = "Enable (take ADC samples)"
+  [[reg.field]]
+  name = "RESET"
+  bits = [1, 1]
+  doc = "Soft reset (self-clearing)"
+
+[[reg]]
+name = "MODCOD"
+offset = 0x14
+access = "rw"
+doc = "Expected MODCOD"
+  [[reg.field]]
+  name = "MODCOD"
+  bits = [0, 4]
+  doc = "MODCOD (QPSK: 1..11)"
+  [[reg.field]]
+  name = "PILOTS"
+  bits = [8, 8]
+  doc = "Frames have pilots"
+
+[[reg]]
+name = "GOLD_XA"
+offset = 0x18
+access = "rw"
+doc = "PL descrambler x sequence start (x LFSR advanced by the Gold code n)"
+  [[reg.field]]
+  name = "X"
+  bits = [0, 17]
+  doc = "LFSR state"
+
+[[reg]]
+name = "GOLD_XB"
+offset = 0x1C
+access = "rw"
+doc = "PL descrambler second x sequence start (x LFSR advanced by n + 131072)"
+  [[reg.field]]
+  name = "X"
+  bits = [0, 17]
+  doc = "LFSR state"
+
+[[reg]]
+name = "DDC_FINC"
+offset = 0x20
+access = "rw"
+doc = "DDC NCO phase increment per ADC sample, 2^32 = ADC rate (signed)"
+
+[[reg]]
+name = "DDC_CFG"
+offset = 0x24
+access = "rw"
+doc = "DDC configuration"
+  [[reg.field]]
+  name = "DECIM"
+  bits = [0, 5]
+  doc = "Decimation (ADC samples per 2 symbols)"
+  [[reg.field]]
+  name = "TAPS"
+  bits = [8, 17]
+  doc = "Lowpass taps (even, <= 512)"
+  [[reg.field]]
+  name = "SHIFT"
+  bits = [24, 28]
+  doc = "Output shift (16 - DDC gain exponent)"
+
+[[reg]]
+name = "DDC_COEF_ADDR"
+offset = 0x28
+access = "rw"
+doc = "DDC coefficient address"
+  [[reg.field]]
+  name = "ADDR"
+  bits = [0, 8]
+  doc = "Tap index"
+
+[[reg]]
+name = "DDC_COEF_DATA"
+offset = 0x2C
+access = "wo"
+doc = "Write the DDC coefficient at DDC_COEF_ADDR, then DDC_COEF_ADDR++"
+  [[reg.field]]
+  name = "DATA"
+  bits = [0, 17]
+  signed = true
+  doc = "Coefficient"
+
+[[reg]]
+name = "RRC_COEF_ADDR"
+offset = 0x30
+access = "rw"
+doc = "RRC matched filter coefficient address"
+  [[reg.field]]
+  name = "TAP"
+  bits = [0, 4]
+  doc = "Tap"
+  [[reg.field]]
+  name = "PHASE"
+  bits = [5, 9]
+  doc = "Fractional-delay phase"
+
+[[reg]]
+name = "RRC_COEF_DATA"
+offset = 0x34
+access = "wo"
+doc = "Write the RRC coefficient at RRC_COEF_ADDR, then RRC_COEF_ADDR++"
+  [[reg.field]]
+  name = "DATA"
+  bits = [0, 17]
+  signed = true
+  doc = "Coefficient"
+
+[[reg]]
+name = "TIMING_GAINS"
+offset = 0x38
+access = "rw"
+doc = "Timing loop gains"
+  [[reg.field]]
+  name = "KP"
+  bits = [0, 15]
+  doc = "Proportional gain"
+  [[reg.field]]
+  name = "KI"
+  bits = [16, 31]
+  doc = "Integral gain"
+
+[[reg]]
+name = "FS_THRESH"
+offset = 0x3C
+access = "rw"
+doc = "Frame sync header metric threshold"
+
+[[reg]]
+name = "PLL_KP"
+offset = 0x40
+access = "rw"
+doc = "Carrier PLL proportional gain"
+  [[reg.field]]
+  name = "KP"
+  bits = [0, 17]
+  doc = "Gain"
+
+[[reg]]
+name = "PLL_KI"
+offset = 0x44
+access = "rw"
+doc = "Carrier PLL integral gain"
+  [[reg.field]]
+  name = "KI"
+  bits = [0, 17]
+  doc = "Gain"
+
+[[reg]]
+name = "LDPC_MAX_IT"
+offset = 0x48
+access = "rw"
+doc = "LDPC iteration limit"
+  [[reg.field]]
+  name = "MAX_IT"
+  bits = [0, 5]
+  doc = "Iterations, 1..63"
+
+[[reg]]
+name = "IN_OVERFLOWS"
+offset = 0x50
+access = "ro"
+doc = "2-sps samples lost at the core input FIFO"
+
+[[reg]]
+name = "DDC_DROPPED"
+offset = 0x54
+access = "ro"
+doc = "DDC outputs lost (input too fast for the taps)"
+
+[[reg]]
+name = "AGC_GAIN"
+offset = 0x58
+access = "ro"
+doc = "Digital AGC gain, Q5.12"
+
+[[reg]]
+name = "TIMING_INTEG"
+offset = 0x5C
+access = "ro"
+doc = "Timing loop integrator (Q.24 samples/symbol, signed)"
+
+[[reg]]
+name = "FS_STATE"
+offset = 0x60
+access = "ro"
+doc = "Frame sync state"
+  [[reg.field]]
+  name = "STATE"
+  bits = [0, 1]
+  doc = "State"
+  enum = { SEARCH = 0, CHECK = 1, LOCKED = 2 }
+
+[[reg]]
+name = "FS_FOUND"
+offset = 0x64
+access = "ro"
+doc = "Frame sync: headers found"
+
+[[reg]]
+name = "FS_FLYWHEEL"
+offset = 0x68
+access = "ro"
+doc = "Frame sync: flywheel frames"
+
+[[reg]]
+name = "FS_LOST"
+offset = 0x6C
+access = "ro"
+doc = "Frame sync: locks lost"
+
+[[reg]]
+name = "FREQ"
+offset = 0x70
+access = "ro"
+doc = "Carrier frequency, turns * 2^32 per symbol (signed)"
+
+[[reg]]
+name = "AMP"
+offset = 0x74
+access = "ro"
+doc = "Mean symbol amplitude"
+
+[[reg]]
+name = "ENERGY"
+offset = 0x78
+access = "ro"
+doc = "Mean symbol energy, bits [35:4] (multiply by 16)"
+
+[[reg]]
+name = "LLR_GAIN"
+offset = 0x7C
+access = "ro"
+doc = "LLR scaling gain"
+
+[[reg]]
+name = "FRAMES"
+offset = 0x80
+access = "ro"
+doc = "Data frames demodulated"
+
+[[reg]]
+name = "LDPC_FRAMES"
+offset = 0x84
+access = "ro"
+doc = "Frames LDPC decoded"
+
+[[reg]]
+name = "LDPC_FAILED"
+offset = 0x88
+access = "ro"
+doc = "Frames where LDPC did not converge"
+
+[[reg]]
+name = "PKT_DROPPED"
+offset = 0x8C
+access = "ro"
+doc = "Frames that found both packet slots full"
+
+[[reg]]
+name = "PKT_SENT"
+offset = 0x90
+access = "ro"
+doc = "Packets sent to the DMA"
+
+[[reg]]
+name = "CARRIER_ACQ"
+offset = 0x94
+access = "ro"
+doc = "Carrier acquisition counters"
+  [[reg.field]]
+  name = "ACQ"
+  bits = [0, 15]
+  doc = "Frequency acquisitions"
+  [[reg.field]]
+  name = "FALSE_LOCK"
+  bits = [16, 31]
+  doc = "1/1476 false-lock corrections"
+
+[[reg]]
+name = "CARRIER_RETYPE"
+offset = 0x98
+access = "ro"
+doc = "Coherent frame-type decision counter"
+  [[reg.field]]
+  name = "RETYPE"
+  bits = [0, 15]
+  doc = "Frame types changed by the coherent decision"
+
+[[reg]]
+name = "BCH"
+offset = 0x9C
+access = "ro"
+doc = "BCH decoder counters"
+  [[reg.field]]
+  name = "CORRECTED"
+  bits = [0, 15]
+  doc = "Frames corrected"
+  [[reg.field]]
+  name = "FAILED"
+  bits = [16, 31]
+  doc = "Frames not decodable"
+
+[[reg]]
+name = "SNAP_CTRL"
+offset = 0xA0
+access = "rw"
+doc = "Constellation snapshot control (write and read differ)"
+  [[reg.field]]
+  name = "ARM"
+  bits = [0, 0]
+  access = "wo"
+  doc = "Arm: capture the next 1024 symbols"
+  [[reg.field]]
+  name = "SOURCE"
+  bits = [1, 1]
+  access = "wo"
+  doc = "Source of the capture"
+  enum = { CARRIER = 0, TIMING = 1 }
+  [[reg.field]]
+  name = "BUSY"
+  bits = [0, 0]
+  access = "ro"
+  doc = "Capture running"
+  [[reg.field]]
+  name = "DONE"
+  bits = [1, 1]
+  access = "ro"
+  doc = "Capture complete"
+  [[reg.field]]
+  name = "SOURCE_RD"
+  bits = [2, 2]
+  access = "ro"
+  doc = "Source of the capture (as written to SOURCE)"
+
+[[reg]]
+name = "SNAP_ADDR"
+offset = 0xA4
+access = "rw"
+doc = "Snapshot read address"
+  [[reg.field]]
+  name = "ADDR"
+  bits = [0, 9]
+  doc = "Symbol index"
+
+[[reg]]
+name = "SNAP_DATA"
+offset = 0xA8
+access = "ro"
+doc = "Snapshot symbol at SNAP_ADDR, then SNAP_ADDR++"
+  [[reg.field]]
+  name = "I"
+  bits = [0, 15]
+  signed = true
+  doc = "In-phase"
+  [[reg.field]]
+  name = "Q"
+  bits = [16, 31]
+  signed = true
+  doc = "Quadrature"
+
+[[reg]]
+name = "RAW_ERR"
+offset = 0xAC
+access = "ro"
+doc = "Pre-FEC bit errors (channel hard decisions vs. the decoded frame, Kldpc bits of each BCH-good frame), wraps"
+
+[[reg]]
+name = "RAW_BITS"
+offset = 0xB0
+access = "ro"
+doc = "Bits counted in RAW_ERR, wraps"
+
+[[reg]]
+name = "BCH_BITERR"
+offset = 0xB4
+access = "ro"
+doc = "Bit errors corrected by BCH (post-LDPC errors), wraps"
+
+[[packet]]
+name = "HDR"
+width = 64
+doc = "Word 0 of a DMA packet (64-bit words, byte 0 = [7:0]); BBFRAME bytes (BB-descrambled) from byte 8, then zeros"
+  [[packet.field]]
+  name = "LEN"
+  bits = [0, 15]
+  doc = "BBFRAME length in bytes (Kbch/8)"
+  [[packet.field]]
+  name = "COUNT"
+  bits = [16, 31]
+  doc = "Frame counter"
+  [[packet.field]]
+  name = "MODCOD"
+  bits = [32, 36]
+  doc = "MODCOD"
+  [[packet.field]]
+  name = "PILOTS"
+  bits = [37, 37]
+  doc = "Pilots"
+  [[packet.field]]
+  name = "ITERATIONS"
+  bits = [40, 45]
+  doc = "LDPC iterations"
+  [[packet.field]]
+  name = "LDPC_OK"
+  bits = [48, 48]
+  doc = "LDPC converged"
+  [[packet.field]]
+  name = "BCH_OK"
+  bits = [49, 49]
+  doc = "BCH ok: the BBFRAME is a codeword after <= t corrections (use it)"
+  [[packet.field]]
+  name = "BCH_ERRORS"
+  bits = [50, 54]
+  doc = "BCH errors located"
+  [[packet.field]]
+  name = "MAGIC"
+  bits = [56, 63]
+  doc = "0xB5 (HDR_MAGIC)"
