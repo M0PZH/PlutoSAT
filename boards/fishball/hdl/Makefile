@@ -14,8 +14,6 @@ ADI_MAX_THREADS ?= 32
 ADI_MAX_OOC_JOBS ?= 16
 export ADI_MAX_THREADS ADI_MAX_OOC_JOBS
 
-M_DEPS += $(ADI_HDL_DIR)/projects/common/xilinx/adi_fir_filter_constr.xdc
-M_DEPS += $(ADI_HDL_DIR)/projects/common/xilinx/adi_fir_filter_bd.tcl
 M_DEPS += $(ADI_HDL_DIR)/library/common/ad_iobuf.v
 M_DEPS += $(ADI_HDL_DIR)/library/axi_ad9361/axi_ad9361_delay.tcl
 
