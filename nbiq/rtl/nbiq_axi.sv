@@ -1,6 +1,7 @@
 // Five programmable narrowband IQ channels from the AD9363 receive samples,
 // written to DDR ring buffers (one per channel). AXI-Lite registers, an
-// AXI3 write master (to S_AXI_GP0), a periodic interrupt, and the FIR
+// AXI3 write master of DW = 32 or 64 bits (S_AXI_GP / S_AXI_HP), a periodic
+// interrupt, and the FIR
 // output stream of all channels as a tap (for the PL FFT).
 //
 // Channel: source (rx0 / rx1) -> NCO + mixer -> CIC /R -> FIR /2 -> ring.
@@ -40,7 +41,8 @@
 
 module nbiq_axi #(
   parameter string LUT_FILE = "nbiq_lut.mem",
-  parameter int    NCH = 5
+  parameter int    NCH = 5,
+  parameter int    DW  = 32
 ) (
   input  logic        s_axi_aclk,
   input  logic        s_axi_aresetn,
@@ -68,8 +70,8 @@ module nbiq_axi #(
   output logic [3:0]  m_axi_awcache,
   output logic        m_axi_awvalid,
   input  logic        m_axi_awready,
-  output logic [31:0] m_axi_wdata,
-  output logic [3:0]  m_axi_wstrb,
+  output logic [DW-1:0]   m_axi_wdata,
+  output logic [DW/8-1:0] m_axi_wstrb,
   output logic        m_axi_wlast,
   output logic        m_axi_wvalid,
   input  logic        m_axi_wready,
@@ -263,7 +265,7 @@ module nbiq_axi #(
     tap_q <= f_q;
   end
 
-  nbiq_wr #(.NCH(NCH)) u_wr (
+  nbiq_wr #(.NCH(NCH), .DW(DW)) u_wr (
     .clk, .rst, .en, .base, .mask,
     .s_valid(f_v), .s_ch(f_ch), .s_data({f_q, f_i}),
     .wptr, .st_ovf,

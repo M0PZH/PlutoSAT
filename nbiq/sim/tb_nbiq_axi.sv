@@ -10,8 +10,10 @@
 //   +out=<file>  read results and "T ch data" for every tap sample ({q, i}) as
 //                they come, then "M addr data" for every memory word written
 //   +stall=<0..100>  AXI3 slave ready/response stall probability (%)
+// Parameter DW: the AXI master's data width (32 or 64, verilator -GDW=..).
 `timescale 1ns/1ps
-module tb_nbiq_axi;
+module tb_nbiq_axi #(parameter int DW = 32);
+  localparam int BEATS = 64 / (DW / 8);
   logic clk = 0, aresetn = 0;
   always #5 clk = ~clk;
   logic adc_clk = 0;
@@ -30,8 +32,10 @@ module tb_nbiq_axi;
   logic        s_axi_bvalid, s_axi_bready = 1, s_axi_arvalid = 0, s_axi_arready;
   logic        s_axi_rvalid, s_axi_rready = 1;
 
-  logic [31:0] m_axi_awaddr, m_axi_wdata;
-  logic [3:0]  m_axi_awlen, m_axi_awcache, m_axi_wstrb;
+  logic [31:0] m_axi_awaddr;
+  logic [DW-1:0] m_axi_wdata;
+  logic [DW/8-1:0] m_axi_wstrb;
+  logic [3:0]  m_axi_awlen, m_axi_awcache;
   logic [2:0]  m_axi_awsize;
   logic [1:0]  m_axi_awburst, m_axi_bresp = 0;
   logic        m_axi_awvalid, m_axi_awready, m_axi_wlast, m_axi_wvalid, m_axi_wready;
@@ -44,27 +48,28 @@ module tb_nbiq_axi;
   logic        adc_valid = 0;
   logic [15:0] adc_data_i0, adc_data_q0, adc_data_i1, adc_data_q1;
 
-  nbiq_axi #(.LUT_FILE("../rtl/gen/nbiq_lut.mem")) dut (
+  nbiq_axi #(.LUT_FILE("../rtl/gen/nbiq_lut.mem"), .DW(DW)) dut (
     .s_axi_aclk(clk), .s_axi_aresetn(aresetn), .*);
 
   // ---------------------------------------------------------------- AXI3 slave
   int stall;
   logic [31:0] mem [logic [31:0]];
-  logic [31:0] aq [$], wq [$];              // accepted burst addresses / data beats
+  logic [31:0] aq [$], wq [$];              // accepted burst addresses / data words
   int          wbeat = 0, nb_pend = 0;
   always @(posedge clk) begin
     m_axi_awready <= ($urandom % 100) >= stall;
     m_axi_wready  <= ($urandom % 100) >= stall;
     if (m_axi_awvalid && m_axi_awready) begin
-      if (m_axi_awlen != 15 || m_axi_awsize != 2 || m_axi_awburst != 1) $fatal(1, "burst type");
+      if (m_axi_awlen != BEATS - 1 || m_axi_awsize != $clog2(DW / 8) || m_axi_awburst != 1)
+        $fatal(1, "burst type");
       if (m_axi_awaddr[5:0] != 0) $fatal(1, "burst alignment %h", m_axi_awaddr);
       aq.push_back(m_axi_awaddr);
     end
     if (m_axi_wvalid && m_axi_wready) begin
-      if (m_axi_wstrb != 4'hF) $fatal(1, "wstrb");
-      if (m_axi_wlast != (wbeat == 15)) $fatal(1, "wlast at beat %0d", wbeat);
-      wq.push_back(m_axi_wdata);
-      wbeat = (wbeat + 1) % 16;
+      if (m_axi_wstrb != '1) $fatal(1, "wstrb");
+      if (m_axi_wlast != (wbeat == BEATS - 1)) $fatal(1, "wlast at beat %0d", wbeat);
+      for (int l = 0; l < DW / 32; l++) wq.push_back(m_axi_wdata[32 * l +: 32]);
+      wbeat = (wbeat + 1) % BEATS;
     end
     while (aq.size() > 0 && wq.size() >= 16) begin
       automatic logic [31:0] a = aq.pop_front();

@@ -21,16 +21,18 @@ CH_BASE = 0x100
 COEF_BASE = 0x2000
 
 
-@pytest.fixture(scope="module")
-def exe():
-    obj = os.path.join(BUILD, "tb_nbiq_axi")
+@pytest.fixture(scope="module", params=[64, 32], ids=["dw64", "dw32"])
+def exe(request):
+    """The testbench with a 64-bit (S_AXI_HP, as built) or 32-bit AXI master."""
+    dw = request.param
+    obj = os.path.join(BUILD, f"tb_nbiq_axi_dw{dw}")
     os.makedirs(obj, exist_ok=True)
     nb.write_lut()
     src = [os.path.join(RTL, f) for f in ("nbiq_chan.sv", "nbiq_comb.sv", "nbiq_fir.sv", "nbiq_sdpram.sv", "nbiq_wr.sv", "nbiq_axi.sv")]
     src += [os.path.join(HERE, "..", "..", "dvbs2", "rtl", "dvbs2_async_fifo.sv"),
             os.path.join(HERE, "tb_nbiq_axi.sv")]
     subprocess.run(["verilator", "--binary", "--timing", "-j", "16", "-O3", "-Wno-fatal",
-                    "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "--top-module", "tb_nbiq_axi",
+                    "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "--top-module", "tb_nbiq_axi", f"-GDW={dw}",
                     "-Mdir", obj] + src, check=True, stdout=subprocess.DEVNULL)
     return os.path.join(obj, "Vtb_nbiq_axi")
 

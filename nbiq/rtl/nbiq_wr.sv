@@ -1,8 +1,10 @@
-// Narrowband channel samples -> one DDR ring buffer per channel, through a
-// 32-bit AXI3 write master (Zynq S_AXI_GP0).
+// Narrowband channel samples -> one DDR ring buffer per channel, through an
+// AXI3 write master of DW = 32 or 64 bits (64 for a Zynq S_AXI_HP port in
+// its default 64-bit mode, 32 for S_AXI_GP).
 //
 // Each channel collects its samples ({Q, I}, 16 bits each) in a 64-entry
-// staging buffer and writes them as 16-beat bursts (64 bytes) to
+// staging buffer and writes them as 64-byte bursts (16 beats at DW 32, 8 at
+// DW 64; lane l of a beat holds sample 2 k + l, i.e. little-endian) to
 // base | (wptr & mask); wptr (bytes, wraps at 2^32) advances when a burst's
 // response is back, so everything below it is in memory. base must be
 // aligned to mask + 1, a power of two >= 4096. A sample that finds its
@@ -11,7 +13,8 @@
 // served round-robin.
 
 module nbiq_wr #(
-  parameter int NCH = 5
+  parameter int NCH = 5,
+  parameter int DW  = 32                     // 32 or 64
 ) (
   input  logic               clk,
   input  logic               rst,
@@ -33,8 +36,8 @@ module nbiq_wr #(
   output logic [3:0]         m_axi_awcache,
   output logic               m_axi_awvalid,
   input  logic               m_axi_awready,
-  output logic [31:0]        m_axi_wdata,
-  output logic [3:0]         m_axi_wstrb,
+  output logic [DW-1:0]      m_axi_wdata,
+  output logic [DW/8-1:0]    m_axi_wstrb,
   output logic               m_axi_wlast,
   output logic               m_axi_wvalid,
   input  logic               m_axi_wready,
@@ -43,15 +46,21 @@ module nbiq_wr #(
   output logic               m_axi_bready
 );
 
-  assign m_axi_awlen   = 4'd15;
-  assign m_axi_awsize  = 3'd2;
+  localparam int L     = DW / 32;            // samples per beat
+  localparam int LB    = $clog2(L);
+  localparam int BEATS = 16 / L;              // beats per 64-byte burst
+  localparam int AW    = 6 - LB;              // lane address bits per channel
+
+  initial assert (DW == 32 || DW == 64) else $fatal(1, "nbiq_wr: DW must be 32 or 64");
+
+  assign m_axi_awlen   = 4'(BEATS - 1);
+  assign m_axi_awsize  = 3'(2 + LB);
   assign m_axi_awburst = 2'd1;
   assign m_axi_awcache = 4'b0011;
-  assign m_axi_wstrb   = 4'hF;
+  assign m_axi_wstrb   = '1;
   assign m_axi_bready  = 1'b1;
 
   // ------------------------------------------------------------ staging
-  (* ram_style = "distributed" *) logic [31:0] stg [NCH * 64];
   logic [6:0] wc [NCH], rc [NCH];             // written / read, mod 128
 
   // burst state
@@ -63,12 +72,19 @@ module nbiq_wr #(
   logic [3:0]  beat;
 
   wire s_ok = s_valid && en[s_ch] && 7'(wc[s_ch] - rc[s_ch]) != 7'd64;
-  always_ff @(posedge clk) begin
-    if (s_ok) stg[{s_ch, wc[s_ch][5:0]}] <= s_data;
-  end
 
-  assign m_axi_wdata = stg[{bc, 6'(rb + 6'(beat))}];
-  assign m_axi_wlast = beat == 4'd15;
+  // one 64/L-deep buffer per lane and channel: sample n of a channel goes to
+  // lane n % L, so a beat reads all lanes at one address (bursts start at
+  // multiples of 16 samples)
+  for (genvar l = 0; l < L; l++) begin : g_lane
+    (* ram_style = "distributed" *) logic [31:0] stg [NCH * 64 / L];
+    always_ff @(posedge clk) begin
+      if (s_ok && 32'(wc[s_ch][5:0]) % L == l)
+        stg[{s_ch, AW'(wc[s_ch][5:0] >> LB)}] <= s_data;
+    end
+    assign m_axi_wdata[32 * l +: 32] = stg[{bc, AW'(32'(rb >> LB) + 32'(beat))}];
+  end
+  assign m_axi_wlast = beat == 4'(BEATS - 1);
 
   // round-robin: the first channel with a full burst from rr on
   logic [NCH-1:0] rdy;
