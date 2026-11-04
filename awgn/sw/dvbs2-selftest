@@ -1,0 +1,126 @@
+#!/bin/sh
+# dvbs2-selftest: end-to-end loopback test of the PL DVB-S2 transmitter and
+# receiver: PRBS transport stream -> dvbs2-tx -> AD9363 loopback -> PL noise
+# source (rx-awgn, sets Es/N0) -> dvbs2-rx -> packet check.
+#
+#   -L digital   AD9363 data-port loopback TX1 -> RX1 (BIST loopback 1): exact
+#                samples, no RF, nothing radiated (default)
+#   -L rf        external RF loopback: TX1 cabled to RX1 through an attenuator
+#                (30 dB or more); TX and RX LO at -f (RX LO + -d), TX attenuation
+#                -a, RX gain -G (default AGC). Without a cable it relies on
+#                coupling between the ports / antennas: it transmits.
+#
+# usage: dvbs2-selftest [-L digital|rf] [-s SYMRATE] [-m MODCOD] [-p]
+#                       [-e "ESN0 ..."] [-t SEC] [-w SEC] [-o NCO_HZ]
+#                       [-f LO_HZ] [-d RX_LO_OFFSET_HZ] [-a TX_ATTEN_DB] [-G RX_GAIN_DB]
+#   -e  Es/N0 points in dB, "off" for no added noise (default "off 1 0 -1 -2")
+#   -t  counting time per point (default 10 s), -w warm-up (default 3 s)
+#   -o  transmitter NCO offset (a carrier offset for the receiver, which is
+#       told nothing about it)
+#
+# Prints per point: Es/N0 set, packets ok / bad / lost, packet error rate, and
+# the receiver's last status line.
+
+L=digital SR=1000000 MC=qpsk1/4 P= ES="off 1 0 -1 -2" T=10 W=3 NCO=0
+LO=2400250000 DLO=0 ATT=40 GAIN=
+FS=12000000
+
+die() { echo "dvbs2-selftest: $*" >&2; exit 1; }
+usage() { sed -n '2,24s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+
+while getopts "L:s:m:pe:t:w:o:f:d:a:G:h" o; do
+	case $o in
+	L) L=$OPTARG ;;
+	s) SR=$OPTARG ;;
+	m) MC=$OPTARG ;;
+	p) P=-p ;;
+	e) ES=$OPTARG ;;
+	t) T=$OPTARG ;;
+	w) W=$OPTARG ;;
+	o) NCO=$OPTARG ;;
+	f) LO=$OPTARG ;;
+	d) DLO=$OPTARG ;;
+	a) ATT=$OPTARG ;;
+	G) GAIN=$OPTARG ;;
+	*) usage ;;
+	esac
+done
+case $L in digital|rf) ;; *) usage ;; esac
+
+DEC=$((FS / (2 * SR)))
+[ $((DEC * 2 * SR)) -eq $FS ] && [ $DEC -ge 1 ] && [ $DEC -le 32 ] ||
+	die "symbol rate must divide $FS / 2 (2 x symbol rate x 1..32)"
+
+phy=
+for d in /sys/bus/iio/devices/iio:device*; do
+	[ "$(cat "$d/name" 2>/dev/null)" = ad9361-phy ] && phy=${d##*/}
+done
+[ -n "$phy" ] || die "no ad9361-phy IIO device"
+grep -q " /sys/kernel/debug " /proc/mounts || mount -t debugfs none /sys/kernel/debug
+LB=/sys/kernel/debug/iio/$phy/loopback
+[ -w "$LB" ] || die "no $LB"
+
+TMP=/tmp/dvbs2-selftest.$$
+mkdir -p "$TMP"
+TXPID=
+cleanup() {
+	[ -n "$TXPID" ] && kill "$TXPID" 2>/dev/null && wait "$TXPID" 2>/dev/null
+	echo 0 > "$LB"
+	rx-awgn -x
+	rm -rf "$TMP"
+}
+trap 'cleanup; exit 130' INT TERM
+
+loopback() { [ $L = digital ] && echo 1 > "$LB"; }
+
+echo 0 > "$LB"
+rx-awgn -x
+TXOPT= RXOPT=
+if [ $L = rf ]; then
+	TXOPT="-f $LO -a $ATT"
+	RXOPT="-f $((LO + DLO))"
+	[ -n "$GAIN" ] && RXOPT="$RXOPT -G $GAIN"
+	echo "RF loopback: TX1 -> RX1, TX LO $LO Hz at -$ATT dB, RX LO $((LO + DLO)) Hz"
+else
+	echo "digital loopback (AD9363 data port TX1 -> RX1)"
+fi
+echo "$MC${P:+ pilots}, $SR S/s, fs $FS, TX NCO offset $NCO Hz, $T s per point"
+
+# configure the AD9363 receive side once, then the transmitter for the whole run
+dvbs2-rx -s $SR -d $DEC -m $MC $P $RXOPT -q -O /dev/null 2>/dev/null &
+pid=$!
+sleep 1
+kill $pid 2>/dev/null
+wait $pid 2>/dev/null
+ts-prbs gen | dvbs2-tx -F $FS -s $SR -m $MC $P -o $NCO $TXOPT -i - 2>"$TMP/tx.log" &
+TXPID=$!
+sleep 1
+kill -0 $TXPID 2>/dev/null || { cat "$TMP/tx.log"; cleanup; die "dvbs2-tx failed"; }
+loopback
+sleep 1
+
+printf "%-6s %-7s %s\n" "Es/N0" "set" "result | receiver"
+for e in $ES; do
+	if [ "$e" = off ]; then
+		rx-awgn -x
+		set_es=-
+	else
+		set_es=$(rx-awgn -q -e "$e" -r $SR -F $FS) || { echo "$e: rx-awgn failed"; continue; }
+	fi
+	# the receiver starts on the noisy signal: acquisition is part of the test
+	rm -f "$TMP/ts"
+	mkfifo "$TMP/ts"
+	ts-prbs check -t $T -w $W < "$TMP/ts" > "$TMP/res" &
+	ck=$!
+	dvbs2-rx -s $SR -d $DEC -m $MC $P $RXOPT -O "$TMP/ts" 2>"$TMP/rx.log" &
+	rx=$!
+	sleep 1
+	loopback                                 # (re)asserted after the receiver's setup
+	wait $ck
+	kill $rx 2>/dev/null
+	wait $rx 2>/dev/null
+	rxs=$(tr '\r' '\n' < "$TMP/rx.log" | grep -v '^ *$' | tail -1)
+	printf "%-6s %-7s %s | %s\n" "$e" "$set_es" "$(cat "$TMP/res")" "$rxs"
+done
+
+cleanup
