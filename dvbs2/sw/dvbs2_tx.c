@@ -441,15 +441,22 @@ int main(int argc, char **argv)
 
 		/* a full frame's worth of data, or a partial frame after flush_ms */
 		while (!stop && (pending >= df_bytes || (pending > 0 && idle_ms >= flush_ms))) {
-			uint8_t *buf = dmabuf + slot * SLOT_BYTES;
+			/* built in normal memory, then copied with aligned words: the
+			 * DMA buffer is mapped uncached (device memory), which takes
+			 * no unaligned accesses */
+			static uint64_t pkt[SLOT_BYTES / 8];
+			uint8_t *buf = (uint8_t *)pkt;
+			volatile uint64_t *dst = (volatile uint64_t *)(dmabuf + slot * SLOT_BYTES);
 			uint8_t frame[BBFRAME_MAX_BYTES];
 			if (!bbframer_build(&bf, ts_next, in, frame))
 				break;
 			uint32_t hdr = 0xB5000000u | (pilots << 4) | rate_idx;
+			unsigned len = (4 + frame_bytes + 7) & ~7u;     /* 64-bit DMA beats */
+			memset(buf, 0, len);
 			memcpy(buf, &hdr, 4);
 			memcpy(buf + 4, frame, frame_bytes);
-			unsigned len = (4 + frame_bytes + 7) & ~7u;     /* 64-bit DMA beats */
-			memset(buf + 4 + frame_bytes, 0, len - 4 - frame_bytes);
+			for (unsigned i = 0; i < len / 8; i++)
+				dst[i] = pkt[i];
 			dma_submit(slot, len);
 			slot = (slot + 1) % NSLOTS;
 			frames++;

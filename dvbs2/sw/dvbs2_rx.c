@@ -303,7 +303,10 @@ static int dma_submit(unsigned slot, struct xfer *x)
 		return 0;                           /* queue full */
 	x->slot = slot;
 	x->id = rd(dmac, DMAC_TRANSFER_ID) & 3;
-	wr(dmac, DMAC_FLAGS, 0);
+	/* TLAST: each transfer is one whole packet. Without it axi_dmac takes the
+	 * packet's tlast for an early end of the transfer and stops accepting
+	 * data until a descriptor with this flag arrives (data_mover.v). */
+	wr(dmac, DMAC_FLAGS, 2);
 	wr(dmac, DMAC_DEST_ADDR, dmabuf_phys + slot * PKT_BYTES);
 	wr(dmac, DMAC_X_LENGTH, PKT_BYTES - 1);
 	wr(dmac, DMAC_Y_LENGTH, 0);
@@ -586,10 +589,16 @@ int main(int argc, char **argv)
 		}
 		/* oldest transfer done? */
 		if (qn && (rd(dmac, DMAC_DONE) >> q[qh].id) & 1) {
-			const uint8_t *p = dmabuf + q[qh].slot * PKT_BYTES;
-			uint64_t h;
-			memcpy(&h, p, 8);
+			/* The buffer is mapped uncached (device memory): no unaligned
+			 * accesses there, so copy the packet out with aligned words. */
+			static uint64_t pkt[PKT_BYTES / 8];
+			const volatile uint64_t *src = (const volatile uint64_t *)(dmabuf + q[qh].slot * PKT_BYTES);
+			uint64_t h = src[0];
 			unsigned len = h & 0xFFFF, cnt = (h >> 16) & 0xFFFF;
+			unsigned nw = len + 8 <= PKT_BYTES ? (len + 8 + 7) / 8 : 1;
+			for (unsigned i = 0; i < nw; i++)
+				pkt[i] = src[i];
+			const uint8_t *p = (const uint8_t *)pkt;
 			int ok = (h >> 49) & 1;          /* BCH: codeword (LDPC converged: bit 48) */
 			if ((h >> 56) != 0xB5 || len != dvbs2_kbch_bytes(rate_idx)) {
 				bad++;
