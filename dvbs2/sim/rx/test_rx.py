@@ -279,10 +279,24 @@ def test_carrier_pilotless_pn(carrier_exe, esn0, seed):
 
 
 RX_SOURCES = ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv", "gen/dvbs2_ldpc_dec_pkg.sv",
-              "dvbs2_async_fifo.sv", "dvbs2_rx_timing.sv", "dvbs2_rx_framesync.sv", "dvbs2_rx_rot.sv",
-              "dvbs2_rx_cordic.sv", "dvbs2_udiv.sv", "dvbs2_rx_carrier.sv", "dvbs2_ldpc_dec.sv",
+              "dvbs2_async_fifo.sv", "dvbs2_sync_fifo.sv", "dvbs2_rx_timing2.sv", "dvbs2_rx_framesync2.sv",
+              "dvbs2_rx_rot.sv", "dvbs2_rx_cordic.sv", "dvbs2_udiv.sv", "dvbs2_rx_carrier2.sv", "dvbs2_ldpc_dec.sv",
               "gen/dvbs2_bch_pkg.sv", "dvbs2_bch_dec.sv", "dvbs2_rx_pls.sv", "dvbs2_rx_llrq.sv", "dvbs2_rx.sv",
               os.path.join(HERE, "axi_mem.sv")]
+
+# tb_rx (two-slot core) plusargs that are per slot (suffix: the slot)
+RX_SLOT_ARGS = {"in", "out", "bytes", "pls", "coef", "period", "modcod", "pilots", "thresh", "xa", "xb", "tkp",
+                "tki", "tinteg0", "pkp", "pki", "plsh", "plsstep", "maxit"}
+
+
+def rx_args(slot, **kw):
+    """tb_rx plusargs running one signal in slot `slot` (the other idle)."""
+    return {f"{k}{slot}" if k in RX_SLOT_ARGS else k: v for k, v in kw.items()}
+
+
+def slot_line(log, slot):
+    """tb_rx's status line of a slot."""
+    return log.split(f"slot {slot}: ")[1].split("\n")[0]
 
 
 @pytest.fixture(scope="module")
@@ -300,20 +314,21 @@ def write_coefs(path, coefs):
 @pytest.mark.parametrize("name,kw", [
     ("p_1_2", dict(rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0)),
     ("np_3_4", dict(rate_idx=6, pilots=False, esn0=6.0, cfo=-0.002, ppm=-80.0, rms=400.0)),
-    ("p_1_2_llrq", dict(rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0, llrq=1)),
+    ("p_1_2_s1", dict(rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0, slot=1)),
+    ("np_3_4_s1", dict(rate_idx=6, pilots=False, esn0=6.0, cfo=-0.002, ppm=-80.0, rms=400.0, slot=1)),
 ])
 def test_rx_end_to_end(rx_exe, name, kw):
-    """Samples -> RTL receiver: the LLRs equal the front-end model, the
-    BBFRAMEs equal the LDPC model and the transmitted BBFRAMEs, and
-    gr-dvbs2rx's LDPC/BCH decodes the RTL's LLRs to the same frames.
-    llrq: the decoder's input through the DDR LLR queue (memory model with
-    stalls and latency): the same result."""
+    """Samples -> RTL receiver, one slot (the other idle): the LLRs equal the
+    front-end model, the BBFRAMEs equal the LDPC model and the transmitted
+    BBFRAMEs, and gr-dvbs2rx's LDPC/BCH decodes the RTL's LLRs to the same
+    frames. The decoder's input comes through the DDR LLR queue (memory model
+    with stalls and latency)."""
     import ldpcdec as ld
     import rxmodel as rf
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
     kw = dict(kw)
-    llrq = kw.pop("llrq", 0)
+    slot = kw.pop("slot", 0)
     rate_idx, pilots = kw["rate_idx"], kw["pilots"]
     x, bb = signal(nframes=4, lead=8, **kw)
     r = fx.receive(x, rate_idx + 1, pilots)
@@ -327,19 +342,20 @@ def test_rx_end_to_end(rx_exe, name, kw):
     rxsim.write_iq(fin, x)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
-    log = rxsim.run(rx_exe, coef=cfile, period=22, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
-                    thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes, pls=fpls,
-                    llrq=llrq, axistall=30, axilat=200, **{"in": fin, "out": fout})
+    log = rxsim.run(rx_exe, **rx_args(slot, coef=cfile, period=22, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
+                                      thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
+                                      pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes,
+                                      pls=fpls, axistall=30, axilat=200, **{"in": fin, "out": fout}))
     print(log)
-    assert "overflows 0," in log
-    if llrq:
-        assert "llrq frames 4 dropped 0 depth max 1 axi err 0," in log
+    line = slot_line(log, slot)
+    assert "overflows 0," in line and "llrq dropped 0," in line
+    assert "llrq frames 4 depth max 1 axi err 0," in log
+    assert " 0 LLR words," in slot_line(log, 1 - slot) and " 0 bytes," in slot_line(log, 1 - slot)
     # PLS decodes: equal to the model, every confident one right
     got_p = [tuple(int(v, 16) for v in l.split()) for l in open(fpls)]
     want_p = [pls_line(d) for d in r["pls"].results]
     print("PLS", want_p)
-    assert got_p == want_p and "skipped 0," in log
+    assert got_p == want_p and "skipped 0," in line
     codes = [d["code"] for d in r["pls"].results if d["conf"]]
     assert len(codes) >= 8 and set(codes) <= {0, fx.pls_code(rate_idx + 1, 0, pilots)}
     assert fx.pls_code(rate_idx + 1, 0, pilots) in codes
@@ -359,7 +375,7 @@ def test_rx_end_to_end(rx_exe, name, kw):
     got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
     nb = kb // 8
     assert len(got_b) == nb * len(llr)
-    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), 0))       # the frames' own tags
+    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), slot))    # the frames' own tags
     for k in range(len(llr)):
         hard, it, conv = dec_m.decode(llr[k])
         out, ok, L = bchdec.decode(hard[:dec_m.code.K], rate_idx)
@@ -371,10 +387,10 @@ def test_rx_end_to_end(rx_exe, name, kw):
         assert ok and np.array_equal(np.unpackbits(g[:, 0].astype(np.uint8)), bb[k]), f"frame {k} not decoded"
 
 
-def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22):
-    """Samples -> RTL receiver and model: the LLRs and the PLS decodes equal
-    the model's. Returns the model result and the BBFRAMEs the RTL decoded
-    (BCH ok), as bit arrays."""
+def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22, slot=0):
+    """Samples -> RTL receiver (slot `slot`, the other idle) and model: the
+    LLRs and the PLS decodes equal the model's. Returns the model result and
+    the BBFRAMEs the RTL decoded (BCH ok), as bit arrays."""
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
     r = fx.receive(x, rate_idx + 1, pilots)
@@ -384,14 +400,15 @@ def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22):
     rxsim.write_iq(fin, x)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
-    log = rxsim.run(rx_exe, coef=cfile, period=period, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
-                    thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes, pls=fpls,
-                    **{"in": fin, "out": fout})
+    log = rxsim.run(rx_exe, **rx_args(slot, coef=cfile, period=period, stall=5, modcod=rate_idx + 1,
+                                      pilots=int(pilots), thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
+                                      pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes,
+                                      pls=fpls, **{"in": fin, "out": fout}))
     print(log)
-    assert "overflows 0," in log and "skipped 0," in log
+    line = slot_line(log, slot)
+    assert "overflows 0," in line and "skipped 0," in line
     cr = r["carrier"]
-    assert f"amp {cr.A}, energy {cr.E}, gain {cr.G}," in log
+    assert f"amp {cr.A}, energy {cr.E}, gain {cr.G}," in line
     got_p = [tuple(int(v, 16) for v in ln.split()) for ln in open(fpls)]
     assert got_p == [pls_line(d) for d in r["pls"].results]
     want = np.concatenate(r["frames"]).reshape(-1, 2) if r["frames"] else np.zeros((0, 2), np.int64)
@@ -403,13 +420,14 @@ def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22):
     nb = m.LDPC[m.RATES[rate_idx]]["kbch"] // 8
     got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
     assert len(got_b) == nb * len(r["frames"])
-    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), 0))
+    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), slot))
     dec = [np.unpackbits(got_b[k * nb:(k + 1) * nb, 0].astype(np.uint8))
            for k in range(len(r["frames"])) if got_b[(k + 1) * nb - 1, 2]]
     return r, dec
 
 
-def test_rx_falselock(rx_exe):
+@pytest.mark.parametrize("slot", [0, 1])
+def test_rx_falselock(rx_exe, slot):
     """Board finding (RX 1.3): a TS of null packets (consecutive PLFRAMEs
     nearly identical) and an RX started mid-frame with the AGC settling from
     above (early metrics up to 50x a header's): the stale search peak is
@@ -422,7 +440,7 @@ def test_rx_falselock(rx_exe):
     tx, bb = fe.tx_signal(10, True, 10, "null")
     start = 28310
     x = fe.rx_input(tx, start, 20.0, 0.002, 20.0, 3, rms=8000)
-    r, dec = rx_rtl(rx_exe, "falselock", x, 10, True)
+    r, dec = rx_rtl(rx_exe, f"falselock{slot}", x, 10, True, slot=slot)
     cl = fe.classify(r, L, start)
     print(cl, r["fs"].events)
     assert not cl[0][2] and all(ok for _, _, ok in cl[1:]) and len(cl) >= 7
@@ -436,7 +454,8 @@ def test_rx_falselock(rx_exe):
     assert got[-2]
 
 
-def test_rx_start_np14(rx_exe):
+@pytest.mark.parametrize("slot", [0, 1])
+def test_rx_start_np14(rx_exe, slot):
     """Model finding (RX 1.3): QPSK 1/4 without pilots at -1 dB, 8 dummy
     frames before the data. QPSK 1/4's header is a differential away from the
     dummy header, so the frame sync's frame type is a coin toss: a dummy
@@ -448,13 +467,14 @@ def test_rx_start_np14(rx_exe):
     x, bb = signal(nframes=4, lead=8, rate_idx=0, pilots=False, esn0=-1.0, seed=0)
     # 80 clocks per symbol: before the acquisition dummy frames tagged as data
     # go to the LDPC decoder too (30 iterations of QPSK 1/4: ~1.65M clocks)
-    r, dec = rx_rtl(rx_exe, "start_np14", x, 0, False, period=40)
+    r, dec = rx_rtl(rx_exe, f"start_np14_{slot}", x, 0, False, period=40, slot=slot)
     got = [any(np.array_equal(d, b) for d in dec) for b in bb]
     print("RTL decoded", got, r["fs"].events)
     assert all(got)
 
 
-def test_rx_falselock_cycle(rx_exe):
+@pytest.mark.parametrize("slot", [0, 1])
+def test_rx_falselock_cycle(rx_exe, slot):
     """Board finding (RX 1.4 as first built): QPSK 1/4 without pilots from a
     TS of null packets, through the ADC and DDC as on the board: after a PLS
     drop the search found the same repeating data again at the dummy length
@@ -463,7 +483,7 @@ def test_rx_falselock_cycle(rx_exe):
     data frame: one acquisition, every frame sent decodes."""
     import falselock_experiment as fe
     x2, bb, start = fe.adc_signal(0, False, 12, 5)
-    r, dec = rx_rtl(rx_exe, "falselock_cycle", x2, 0, False, period=40)
+    r, dec = rx_rtl(rx_exe, f"falselock_cycle{slot}", x2, 0, False, period=40, slot=slot)
     cr = r["carrier"]
     print("acq", cr.n_acq, "retype", cr.n_retype, "f", cr.fhat / 2 ** 32, r["fs"].events)
     assert cr.n_acq == 1 and cr.n_retype == 0 and abs(cr.fhat) < (1 << 20)
@@ -476,7 +496,8 @@ def esn0_est(A, E):
     return 10 * math.log10(A * A / (E - A * A))
 
 
-def test_rx_esn0_restart(rx_exe):
+@pytest.mark.parametrize("slot", [0, 1])
+def test_rx_esn0_restart(rx_exe, slot):
     """Board finding (RX 1.3, pilots off): the amplitude/noise average (1/8
     per known block, one block per frame without pilots) started from a
     header measured before the frequency acquisition and took ~17 frames to
@@ -484,7 +505,7 @@ def test_rx_esn0_restart(rx_exe):
     QPSK 2/3 without pilots, 0.02 cycles/symbol, 20 dB Es/N0: right from the
     first header after the acquisition (1.3: -20 dB there)."""
     x, bb = signal(nframes=2, lead=8, rate_idx=5, pilots=False, esn0=20.0, cfo=0.02, seed=1)
-    r, dec = rx_rtl(rx_exe, "esn0", x, 5, False)
+    r, dec = rx_rtl(rx_exe, f"esn0_{slot}", x, 5, False, slot=slot)
     cr = r["carrier"]
     est = [esn0_est(A, E) for (nhdr, f, fh, th, A, E, G) in cr.log if nhdr >= 3]
     print("Es/N0 after the acquisition", [round(e, 1) for e in est])
@@ -730,13 +751,38 @@ def rx_axi_exe():
                                                   os.path.join(HERE, "tb_rx_axi.sv")])
 
 
-@pytest.mark.parametrize("llrq", [0, 1])
-def test_rx_axi(rx_axi_exe, llrq):
+# tb_rx_axi plusargs that are per slot (suffix: the slot)
+AXI_SLOT_ARGS = {"ddccoef", "rrccoef", "modcod", "pilots", "xa", "xb", "finc", "dec", "ntaps", "shift", "cicr",
+                 "cicshift", "tkp", "tki", "tinteg0", "thresh", "pkp", "pki", "maxit", "plscfg"}
+SLOT_BANK = 0x100                       # register map v2: slot s at 0x100 s, shared at 0x200
+VERSION = 0x0002_0000
+
+
+def axi_args(slot, **kw):
+    """tb_rx_axi plusargs running slot `slot` alone."""
+    a = {f"{k}{slot}" if k in AXI_SLOT_ARGS else k: v for k, v in kw.items()}
+    a.update({"en0": int(slot == 0), "en1": int(slot == 1), "snapslot": slot})
+    return a
+
+
+def read_regs(fregs):
+    """tb_rx_axi's register dump: {address: value}, all lines."""
+    lines = [l.split() for l in open(fregs)]
+    return {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}, lines
+
+
+@pytest.mark.parametrize("mode", ["v2", "v1", "s1"])
+def test_rx_axi(rx_axi_exe, mode):
     """ADC-rate samples (6 per symbol, carrier offset partly removed by the
-    DDC NCO) through the register-configured wrapper: every DMA packet
-    carries a transmitted BBFRAME, equal to the model chain. llrq = 1: the
-    same through the DDR LLR queue (LLRQ_CTRL, memory model with stalls and
-    latency), the LLRQ registers counting the frames."""
+    DDC NCO) through the register-configured wrapper, one slot, the other
+    disabled: every DMA packet carries a transmitted BBFRAME, equal to the
+    model chain, through the DDR LLR queue (memory model with stalls and
+    latency), the LLRQ registers counting the frames. v2: slot 0 configured
+    through map v2 (receiver reset 0x210, slot enable); v1: slot 0 as 1.x
+    software does it (bank 0 alone, CTRL = 2 then 1: the 1.x map is slot 0's
+    bank); s1: slot 1."""
+    slot = int(mode == "s1")
+    base, other = SLOT_BANK * slot, SLOT_BANK * (1 - slot)
     import bchdec
     import grref
     import ldpcdec as ld
@@ -797,25 +843,31 @@ def test_rx_axi(rx_axi_exe, llrq):
     rxsim.write_iq(fin, x)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
-    log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=20,
-                    modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc, dec=dec,
-                    ntaps=len(dcoef), shift=shift, tkp=kp, tki=ki, thresh=fx.fs_threshold(),
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, llrq=llrq, axistall=30, axilat=200,
-                    **{"in": fin, "out": fout})
+    log = rxsim.run(rx_axi_exe, **axi_args(slot, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=20,
+                                           modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc,
+                                           dec=dec, ntaps=len(dcoef), shift=shift, tkp=kp, tki=ki,
+                                           thresh=fx.fs_threshold(), pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p,
+                                           maxit=30, axistall=30, axilat=200, v1=int(mode == "v1"),
+                                           **{"in": fin, "out": fout}))
     print(log)
-    lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
+    regs, lines = read_regs(fregs)
     snap_got = [int(v, 16) for a, v in lines if a.startswith("s")]
     print({hex(k): v for k, v in regs.items()})
-    assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
-    assert regs[0] == 0x0001_0500 and regs[0xE0] == 0x3E80_0000 and regs[0xE4] == 0x000A3F10
-    assert regs[0xDC] == 3 * llrq and regs[0xEC] == 0 and regs[0xF0] == 0
-    assert regs[0xE8] >> 16 == llrq * len(want) and regs[0xE8] & 0x3F == 0      # LLRQ_STAT
-    check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots)
+    b = base
+    assert regs[b + 0x50] == 0 and regs[b + 0x54] == 0 and regs[b + 0x8C] == 0     # nothing lost
+    assert regs[b] == regs[0x200] == regs[other] == VERSION
+    assert regs[0x2E0] == 0x3E80_0000 and regs[0x2E4] == 0x000A3F10
+    assert regs[0x2EC] == 0 and regs[0x2F0] == 0 and regs[b + 0xEC] == 0
+    assert all(regs[b + a] == 0 for a in (0xDC, 0xE0, 0xE4, 0xE8, 0xF0))   # 1.5's LLRQ offsets
+    assert regs[0x2E8] >> 16 == len(want) and regs[0x2E8] & 0x3F == 0       # LLRQ_STAT
+    assert regs[0x210] == (1 << (8 + slot)) and regs[b + 0x10] == 1 and regs[other + 0x10] == 0
+    assert regs[b + 0x84] == regs[b + 0x90] == len(want)                     # LDPC_FRAMES, PKT_SENT
+    assert all(regs[other + a] == 0 for a in (0x80, 0x84, 0x90, 0xB8, 0x64))  # the disabled slot
+    check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots, slot)
     # error counters and the constellation snapshot
     print("raw BER", raw_err / max(raw_bits, 1), "BCH bits", bch_bits)
-    assert (regs[0xAC], regs[0xB0], regs[0xB4]) == (raw_err, raw_bits, bch_bits)
-    assert regs[0xA0] & 3 == 2                                          # done
+    assert (regs[b + 0xAC], regs[b + 0xB0], regs[b + 0xB4]) == (raw_err, raw_bits, bch_bits)
+    assert regs[b + 0xA0] & 0xB == 2 | (slot << 3) and regs[0x2A0] == regs[b + 0xA0]   # done, the slot
     sg = [((v & 0xFFFF) - ((v & 0x8000) << 1), (v >> 16) - ((v >> 31) << 16)) for v in snap_got]
     assert sg == snap, "snapshot differs"
     words = [l.split() for l in open(fout)]
@@ -826,7 +878,7 @@ def test_rx_axi(rx_axi_exe, llrq):
         pkt = data[k * 1024:(k + 1) * 1024]
         h = int(pkt[0])
         assert h >> 56 == 0xB5 and h & 0xFFFF == kb // 8 and (h >> 16) & 0xFFFF == k
-        assert (h >> 32) & 0x1F == rate_idx + 1 and (h >> 37) & 1 == int(pilots) and (h >> 55) & 1 == 0
+        assert (h >> 32) & 0x1F == rate_idx + 1 and (h >> 37) & 1 == int(pilots) and (h >> 55) & 1 == slot
         assert (h >> 40) & 0x3F == it and (h >> 48) & 1 == int(conv)
         assert (h >> 49) & 1 == int(ok) and (h >> 50) & 0x1F == L
         body = pkt[1:].view(np.uint8)[: kb // 8]                      # little endian: byte 0 first
@@ -844,23 +896,25 @@ def pls_word(d, n):
         (int(d["conf"]) << 12) | (d["short"] << 9) | (d["pilots"] << 8) | d["modcod"]
 
 
-def check_pls_regs(regs, lines, pls, modcod, pilots):
-    """The PLS registers of tb_rx_axi equal the model decoder's status, every
-    confident decode is the transmitted code or a dummy, W1C works."""
+def check_pls_regs(regs, lines, pls, modcod, pilots, slot=0):
+    """The PLS registers of tb_rx_axi (slot `slot`) equal the model decoder's
+    status, every confident decode is the transmitted code or a dummy, W1C
+    works."""
     st = pls.status()
     last = st["last"]
+    b = SLOT_BANK * slot
     print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
-    assert regs[0x00] == 0x00010500
-    assert regs[0xB8] == pls_word(last, st["count"])
-    assert regs[0xBC] == pls_word(st["data"], st["data_count"])
-    assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
-    assert (regs[0xC4], regs[0xC8]) == (last["best"], last["second"])
-    assert regs[0xCC] == (st["diff_pilots"] << 16) | st["diff_modcod"]
-    assert regs[0xD0] == st["seen"]
-    assert regs[0xD4] == (pls.step_ << 16) | pls.H
-    assert regs[0xD8] == 0                                # no header skipped
+    assert regs[0x200] == regs[b] == VERSION
+    assert regs[b + 0xB8] == pls_word(last, st["count"])
+    assert regs[b + 0xBC] == pls_word(st["data"], st["data_count"])
+    assert regs[b + 0xC0] == (last["freq"] & 0xFFFF) << 16
+    assert (regs[b + 0xC4], regs[b + 0xC8]) == (last["best"], last["second"])
+    assert regs[b + 0xCC] == (st["diff_pilots"] << 16) | st["diff_modcod"]
+    assert regs[b + 0xD0] == st["seen"]
+    assert regs[b + 0xD4] == (pls.step_ << 16) | pls.H
+    assert regs[b + 0xD8] == 0                            # no header skipped
     w = {a: int(v, 16) for a, v in lines if a[0] == "w"}
-    assert (w["w0"], w["w1"]) == (st["seen"] & 1, 0) and st["seen"] & 1
+    assert (w[f"w0_{slot}"], w[f"w1_{slot}"]) == (st["seen"] & 1, 0) and st["seen"] & 1
     code = fx.pls_code(modcod, 0, pilots)
     assert all(d["code"] in (0, code) for d in pls.results if d["conf"])
     assert st["data_count"] >= 1 and st["data"]["code"] == code and st["diff_modcod"] == st["diff_pilots"] == 0
@@ -948,15 +1002,15 @@ def lowrate_axi(rx_axi_exe, name, dec, adcdiv, x, bb, finc, integ0=0):
     rxsim.write_iq(fin, x)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
-    log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=adcdiv, stall=20,
-                    modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc, dec=cfg["D"],
-                    ntaps=len(cfg["coefs"]), shift=cfg["shift"], cicr=cfg["R"], cicshift=cfg["cic_shift"],
-                    tkp=kp, tki=ki, tinteg0=integ0, thresh=fx.fs_threshold(),
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout})
+    log = rxsim.run(rx_axi_exe, **axi_args(0, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=adcdiv, stall=20,
+                                           modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc,
+                                           dec=cfg["D"], ntaps=len(cfg["coefs"]), shift=cfg["shift"],
+                                           cicr=cfg["R"], cicshift=cfg["cic_shift"], tkp=kp, tki=ki,
+                                           tinteg0=integ0, thresh=fx.fs_threshold(), pkp=r["carrier"].kp_p,
+                                           pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout}))
     print(log)
     os.remove(fin)
-    lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
+    regs, lines = read_regs(fregs)
     assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
     check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots)
     words = [l.split() for l in open(fout)]
@@ -1120,13 +1174,13 @@ def test_rx_axi_hold(rx_axi_exe):
     frame_clk = (32400 + 90 + 792) * 2 * dec * 4                  # ADC samples x adcdiv
     hold = 2 * (8 * 3330 * 2 * dec * 4) + 11 * frame_clk          # ~5 frames decoded
     pkp, pki = fx.pll_gains()
-    log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=10, hold=hold,
-              modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=0, dec=dec,
-              ntaps=len(dcoef), shift=12, tkp=kp, tki=ki, thresh=fx.fs_threshold(),
-              pkp=pkp, pki=pki, maxit=30, **{"in": fin, "out": fout})
+    log = rxsim.run(rx_axi_exe, **axi_args(0, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=10,
+                                           hold=hold, modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb,
+                                           finc=0, dec=dec, ntaps=len(dcoef), shift=12, tkp=kp, tki=ki,
+                                           thresh=fx.fs_threshold(), pkp=pkp, pki=pki, maxit=30,
+                                           **{"in": fin, "out": fout}))
     print(log)
-    lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
+    regs, lines = read_regs(fregs)
     words = [int(l.split()[0], 16) for l in open(fout)]
     assert len(words) % 1024 == 0
     pk = [words[i:i + 1024] for i in range(0, len(words), 1024)]

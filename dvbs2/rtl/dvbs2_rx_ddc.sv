@@ -26,7 +26,8 @@
 // rounding constant can be added in 32 bits.
 
 module dvbs2_rx_ddc #(
-  parameter string LUT_FILE = "nco_lut.mem"
+  parameter string LUT_FILE = "nco_lut.mem",
+  parameter bit    EXT_NCO  = 1'b0          // NCO ROM outside (nco_addr -> nco_data next clock)
 ) (
   input  logic               clk,
   input  logic               rst,
@@ -49,7 +50,12 @@ module dvbs2_rx_ddc #(
   output logic               m_valid,
   output logic signed [15:0] m_i,
   output logic signed [15:0] m_q,
-  output logic [15:0]        st_dropped
+  output logic [15:0]        st_dropped,
+
+  // EXT_NCO: one port of a shared NCO ROM (the receiver's two DDCs share one),
+  // nco_data = ROM[nco_addr] of the clock before (registered read)
+  output logic [9:0]         nco_addr,
+  input  logic [31:0]        nco_data
 );
 
   localparam int CW = 32;                   // CIC width (the output and its rounding fit 32 bits)
@@ -79,9 +85,6 @@ module dvbs2_rx_ddc #(
   // I = x_i c - x_q s in the first clock, Q = x_q c + x_i s in the next:
   // multiplier 1 takes x_i, x_q times c, multiplier 2 x_q, x_i times s.
   // Bypass: c = 2^15, s = 0 (exact).
-  (* rom_style = "block" *) logic [31:0] lut [1024];
-  initial $readmemh(LUT_FILE, lut);
-
   logic        tk, v0, vc, va, vm, vp, vo;
   logic        fa, fm, fp, fo;               // 0: I, 1: Q
   logic [31:0] ph, cs;
@@ -97,9 +100,17 @@ module dvbs2_rx_ddc #(
   assign s_ready = !rst && !tk;
   wire take = s_valid && s_ready;
 
+  assign nco_addr = la;
+  if (EXT_NCO) begin : g_ext_nco
+    assign cs = nco_data;
+  end else begin : g_nco_rom
+    (* rom_style = "block" *) logic [31:0] lut [1024];
+    initial $readmemh(LUT_FILE, lut);
+    always_ff @(posedge clk) cs <= lut[la];
+  end
+
   always_ff @(posedge clk) begin
     if (take) begin xi0 <= s_i; xq0 <= s_q; la <= ph[31:22]; end
-    cs <= lut[la];
     if (v0) begin xi1 <= xi0; xq1 <= xq0; end
     if (vc) begin
       c1 <= $signed(cs[15:0]);

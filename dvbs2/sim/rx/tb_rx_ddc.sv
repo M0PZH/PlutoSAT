@@ -19,6 +19,8 @@ module tb_rx_ddc;
   logic signed [15:0] s_i, s_q, m_i, m_q;
   logic m_valid;
   logic [15:0] st_dropped;
+  logic [9:0]  nco_addr;
+  logic [31:0] nco_data = '0;
 
   dvbs2_rx_ddc #(.LUT_FILE("../../rtl/gen/nco_lut.mem")) dut (.*);
 

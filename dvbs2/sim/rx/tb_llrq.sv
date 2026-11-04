@@ -36,7 +36,7 @@ module tb_llrq;
   logic [7:0]  wstrb;
 
   dvbs2_rx_llrq dut (
-    .clk, .arst, .rst, .en(1'b1), .base, .nfr, .max_it0, .max_it1, .qhi, .it_lo,
+    .clk, .arst, .rst, .en(1'b1), .base, .nfr, .max_it0, .max_it1, .qhi, .it_lo, .clr_dropped(2'b00),
     .s_valid, .s_ready, .s_llr_i, .s_llr_q, .s_first, .s_slot, .s_modcod, .s_pilots,
     .m_valid(q_valid), .m_ready(q_ready), .m_llr_i(q_llr_i), .m_llr_q(q_llr_q), .m_first(q_first),
     .m_rate(q_rate), .m_max_it(q_max_it), .m_slot(q_slot), .m_modcod(q_modcod), .m_pilots(q_pilots),

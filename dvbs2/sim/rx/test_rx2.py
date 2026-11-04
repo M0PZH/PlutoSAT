@@ -515,3 +515,352 @@ def test_fe2_idle1(fe2_exe):
     xa, bba = signal(nframes=3, lead=8, rate_idx=4, pilots=True, esn0=5.0, cfo=-0.005, ppm=30.0)
     out, log = fe2_run(fe2_exe, "idle1", [dict(x=xa, rate_idx=4, pilots=True, period=22), None])
     assert all(decoded(out[0][1], 4, bba))
+
+
+# ---------------------------------------------------------------------------
+# whole receiver, two slots: the core dvbs2_rx (tb_rx) and the wrapper
+# dvbs2_rx_axi (tb_rx_axi, ADC samples holding both signals)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def rx_exe():
+    from test_rx import RX_SOURCES
+    return rxsim.build("tb_rx", RX_SOURCES + [os.path.join(HERE, "tb_rx.sv")])
+
+
+def ldpc_bch_model(llr, rate_idx, max_it=30):
+    """The decoders' model output for one LLR frame: (bytes, iterations, converged, BCH ok, nerr, raw)."""
+    import bchdec
+    import ldpcdec as ld
+    dec = ld.Decoder(rate_idx)
+    hard, it, conv = dec.decode(llr, max_it=max_it)
+    K = dec.code.K
+    out, ok, L = bchdec.decode(hard[:K], rate_idx)
+    return np.packbits(out), it, conv, ok, L, int(np.sum((llr[:K] < 0) != hard[:K]))
+
+
+def core_run(exe, name, slots, stall=5, **common):
+    """slots: per slot None (idle) or dict(x=samples, rate_idx=, pilots=, period=, rst_at=, maxit=).
+    Runs the whole two-slot core; per slot the carrier's LLR frames and PLS decodes
+    must equal fx.receive() of its samples (after a reset: the run from there,
+    before it a prefix), and the decoded frames (tagged with the slot) equal the
+    LDPC/BCH models of the slot's complete LLR frames, in order, except the
+    frames the LLR queue dropped (`drops` per slot: None = none allowed).
+    Returns per slot dict(r=model, llr=RTL LLR frames, dec=decoded frames, line=status) or None."""
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    plus, res = {"stall": stall, "axistall": 20, "axilat": 100}, []
+    plus.update(common)
+    kp, ki = fx.timing_gains()
+    xa, xb = m.gold_init(0)
+    for s in range(2):
+        sl = slots[s]
+        if sl is None:
+            res.append(None)
+            continue
+        cf = os.path.join(WORK, f"core_{name}_coef{s}.hex")
+        write_coefs(cf, fx.timing_coefs(0.35))
+        fin, fout, fpls, fb = (os.path.join(WORK, f"core_{name}_{k}{s}.hex") for k in ("in", "out", "pls", "bytes"))
+        rxsim.write_iq(fin, sl["x"])
+        r = fx.receive(sl["x"], sl["rate_idx"] + 1, sl["pilots"])
+        plus.update({f"coef{s}": cf, f"in{s}": fin, f"out{s}": fout, f"pls{s}": fpls, f"bytes{s}": fb,
+                     f"period{s}": sl["period"], f"modcod{s}": sl["rate_idx"] + 1, f"pilots{s}": int(sl["pilots"]),
+                     f"thresh{s}": fx.fs_threshold(), f"xa{s}": xa, f"xb{s}": xb, f"tkp{s}": kp, f"tki{s}": ki,
+                     f"pkp{s}": r["carrier"].kp_p, f"pki{s}": r["carrier"].ki_p, f"maxit{s}": sl.get("maxit", 30)})
+        if sl.get("rst_at") is not None:
+            plus[f"rst{s}at"] = sl["rst_at"]
+        res.append(r)
+    log = rxsim.run(exe, **plus)
+    print(log)
+    out = []
+    for s in range(2):
+        line = log.split(f"slot {s}: ")[1].split("\n")[0]
+        r, sl = res[s], slots[s]
+        if r is None:
+            assert line.startswith("0 samples,") and " 0 LLR words," in line and " 0 bytes," in line, line
+            out.append(None)
+            continue
+        segs = read_segments(plus[f"out{s}"], (-8, -8, 1, 1))
+        psegs = [[]]
+        for ln in open(plus[f"pls{s}"]):
+            if ln.startswith("reset"):
+                psegs.append([])
+            else:
+                psegs[-1].append(tuple(int(v, 16) for v in ln.split()))
+        nseg = 1 if sl.get("rst_at") is None else 2
+        assert len(segs) == nseg and len(psegs) == nseg
+        want = np.concatenate(r["frames"]).reshape(-1, 2) if r["frames"] else np.zeros((0, 2), np.int64)
+        want_p = [pls_line(d) for d in r["pls"].results]
+        if nseg == 2:
+            g = segs[0]
+            assert len(g) > 0 and np.array_equal(g[:, :2], want[:len(g)]), f"slot {s} before the reset"
+            assert psegs[0] == want_p[:len(psegs[0])]
+        got = segs[-1]
+        assert "overflows 0," in line and "skipped 0," in line, line
+        cr = r["carrier"]
+        assert f"amp {cr.A}, energy {cr.E}, gain {cr.G}," in line, (s, cr.A, cr.E, cr.G)
+        assert psegs[-1] == want_p, f"slot {s}: PLS decodes"
+        assert len(want) <= len(got) < len(want) + 32400, (s, len(got), len(want))
+        bad = np.nonzero(np.any(got[:len(want), :2] != want, axis=1))[0]
+        assert len(bad) == 0, f"slot {s}: {len(bad)} mismatches, first at word {bad[0]}"
+        # the frames sent to the decoder: the complete ones of every segment
+        frames = []
+        for g in segs:
+            n = len(g) // 32400
+            frames += [g[k * 32400:(k + 1) * 32400, :2].astype(np.int8).reshape(64800) for k in range(n)]
+        # decoded frames of the slot
+        rows = rxsim.read_hex_cols(plus[f"bytes{s}"], (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
+        ends = list(np.nonzero(rows[:, 1])[0]) if len(rows) else []
+        got_f, p = [], 0
+        for e in ends:
+            got_f.append(rows[p:e + 1])
+            p = e + 1
+        assert p == len(rows)
+        rate_idx = sl["rate_idx"]
+        assert all(np.all(g[:, 7:] == (rate_idx, rate_idx + 1, int(sl["pilots"]), s)) for g in got_f)
+        drops = int(line.split("llrq dropped ")[1].split(",")[0])
+        if sl.get("drops") is None:
+            assert drops == 0 and len(got_f) == len(frames), (s, drops, len(got_f), len(frames))
+        else:
+            assert len(got_f) + drops == len(frames), (s, drops, len(got_f), len(frames))
+        # in order; with drops, a subsequence of the frames
+        k = 0
+        dec = []
+        for g in got_f:
+            it_got = int(g[-1, 3])
+            while True:
+                assert k < len(frames), f"slot {s}: decoded frame not among the LLR frames"
+                wb, it, conv, ok, L, raw = ldpc_bch_model(frames[k], rate_idx, max_it=it_got if sl.get("cap") else
+                                                           sl.get("maxit", 30))
+                k += 1
+                if len(wb) == len(g) and np.array_equal(g[:, 0], wb):
+                    break
+                assert sl.get("drops") is not None, f"slot {s}: frame {k - 1} differs"
+            assert (g[-1, 2], g[-1, 3], g[-1, 4], g[-1, 5]) == (int(ok), it, int(conv), L), (s, k - 1)
+            if ok:
+                assert g[-1, 6] == raw
+            dec.append(np.unpackbits(g[:, 0].astype(np.uint8)))
+        n_ok = sum(1 for g in got_f if g[-1, 2])
+        assert f"ldpc frames {len(got_f)} failed {sum(1 for g in got_f if not g[-1, 4])}," in line, line
+        assert f"failed {len(got_f) - n_ok}, pls" in line, line
+        out.append(dict(r=r, llr=frames, dec=dec, line=line,
+                        iters=[(int(g[-1, 3]), int(g[-1, 4])) for g in got_f]))
+    assert " axi err 0," in log
+    return out, log
+
+
+def all_decoded(dec, bb):
+    return [any(np.array_equal(d, b) for d in dec) for b in bb]
+
+
+def test_core2_modcods(rx_exe):
+    """Whole core, two slots at once near the total rate limit (30 + 75 clocks per
+    sample: 1.67 + 0.67 MBd): QPSK 1/2 pilots and QPSK 3/4 without pilots, different
+    offsets; each slot equals the single-slot receiver, every BBFRAME decodes."""
+    xa, bba = signal(nframes=4, lead=8, rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0)
+    xb, bbb = signal(nframes=3, lead=8, rate_idx=6, pilots=False, esn0=6.0, cfo=-0.002, ppm=-80.0, rms=400.0)
+    out, log = core_run(rx_exe, "modcods", [dict(x=xa, rate_idx=3, pilots=True, period=30),
+                                             dict(x=xb, rate_idx=6, pilots=False, period=75)])
+    assert all(all_decoded(out[0]["dec"], bba)) and all(all_decoded(out[1]["dec"], bbb))
+
+
+def test_core2_falselock_np14(rx_exe):
+    """The RX 1.4 regressions through the whole core, one in each slot: the null-packet
+    false lock (QPSK 9/10 pilots) in slot 0, the QPSK 1/4 no-pilots start-up in slot 1."""
+    xf, bbf, start = falselock_signal()
+    xn, bbn = np14_signal()
+    out, log = core_run(rx_exe, "fl_np14", [dict(x=xf, rate_idx=10, pilots=True, period=30),
+                                             dict(x=xn, rate_idx=0, pilots=False, period=75)])
+    check_falselock(out[0]["r"], np.concatenate(out[0]["llr"]).reshape(-1, 2), bbf, start)
+    assert all(all_decoded(out[1]["dec"], bbn)), out[1]["r"]["fs"].events
+
+
+def test_core2_np14_falselock(rx_exe):
+    """The same with the slots exchanged."""
+    xf, bbf, start = falselock_signal()
+    xn, bbn = np14_signal()
+    out, log = core_run(rx_exe, "np14_fl", [dict(x=xn, rate_idx=0, pilots=False, period=26),
+                                             dict(x=xf, rate_idx=10, pilots=True, period=150)])
+    assert all(all_decoded(out[0]["dec"], bbn))
+    check_falselock(out[1]["r"], np.concatenate(out[1]["llr"]).reshape(-1, 2), bbf, start)
+
+
+def test_core2_reset1(rx_exe):
+    """Slot 1 reset in the middle of a data frame while slot 0 runs: slot 0 equals the
+    model and decodes as if nothing happened; slot 1's cut frame is not decoded, its
+    frames after the reset are (equal to the model of its input from the start)."""
+    xa, bba = signal(nframes=3, lead=8, rate_idx=3, pilots=True, esn0=4.0, cfo=0.003)
+    xb, bbb = signal(nframes=3, lead=8, rate_idx=5, pilots=False, esn0=7.0, cfo=-0.004, seed=3)
+    out, log = core_run(rx_exe, "reset1", [dict(x=xa, rate_idx=3, pilots=True, period=30),
+                                            dict(x=xb, rate_idx=5, pilots=False, period=75, rst_at=95000)])
+    assert all(all_decoded(out[0]["dec"], bba)) and all(all_decoded(out[1]["dec"], bbb))
+
+
+def test_core2_idle1(rx_exe):
+    """Slot 1 idle, slot 0 at 2.27 MBd (44 clocks per symbol): the single-slot case."""
+    xa, bba = signal(nframes=3, lead=8, rate_idx=4, pilots=True, esn0=5.0, cfo=-0.005, ppm=30.0)
+    out, log = core_run(rx_exe, "idle1", [dict(x=xa, rate_idx=4, pilots=True, period=22), None])
+    assert all(all_decoded(out[0]["dec"], bba))
+
+
+def test_core2_drop(rx_exe):
+    """LLR queue full with two slots (1.47 + 0.67 MBd): rings of one frame per slot
+    (LLRQ_CFG frames per slot = 1) and the decoder held at 60 iterations of frames that
+    do not converge (-1 dB QPSK 1/2): frames are dropped and counted per slot, the decoded ones are
+    the slot's frames in order, each equal to the model."""
+    xa, bba = signal(nframes=4, lead=8, rate_idx=3, pilots=True, esn0=-1.0, cfo=0.004, ppm=60.0, seed=11)
+    xb, bbb = signal(nframes=4, lead=8, rate_idx=3, pilots=True, esn0=-1.0, cfo=-0.003, ppm=20.0, seed=12)
+    out, log = core_run(rx_exe, "drop", [dict(x=xa, rate_idx=3, pilots=True, period=34, maxit=60, drops=1),
+                                          dict(x=xb, rate_idx=3, pilots=True, period=75, maxit=60, drops=1)],
+                        llrqnfr=1)
+    drops = [int(o["line"].split("llrq dropped ")[1].split(",")[0]) for o in out]
+    print("drops", drops)
+    assert all(d >= 1 for d in drops)
+
+
+def test_core2_itcap(rx_exe):
+    """Shared iteration budget with two slots: QHI = 0, MAX_IT_LO = 3: while a frame
+    waits in the queue the one being decoded stops at 3 iterations (or where it
+    stands, if later). Every frame is decoded (nothing dropped), each equal to the
+    model at its iteration count, and some were capped."""
+    xa, bba = signal(nframes=4, lead=8, rate_idx=3, pilots=True, esn0=0.5, cfo=0.004, ppm=60.0, seed=13)
+    xb, bbb = signal(nframes=4, lead=8, rate_idx=4, pilots=True, esn0=1.5, cfo=-0.003, ppm=20.0, seed=14)
+    out, log = core_run(rx_exe, "itcap", [dict(x=xa, rate_idx=3, pilots=True, period=34, maxit=60, cap=True),
+                                           dict(x=xb, rate_idx=4, pilots=True, period=75, maxit=60, cap=True)],
+                        llrqqhi=0, llrqitlo=3)
+    assert "depth max 1 " not in log and "depth max 0 " not in log    # frames waited
+    its = out[0]["iters"] + out[1]["iters"]
+    print("iterations, converged", its)
+    assert any(it < 60 and not conv for it, conv in its)                 # capped
+
+
+@pytest.fixture(scope="module")
+def rx_axi_exe():
+    from test_rx import RX_SOURCES
+    return rxsim.build("tb_rx_axi", RX_SOURCES + ["dvbs2_rx_ddc.sv", "dvbs2_rx_axi.sv",
+                                                  os.path.join(HERE, "tb_rx_axi.sv")])
+
+
+def two_signals(specs, fs=12e6, seed=5, rms=500.0):
+    """ADC samples (12 MS/s, 12 bit) holding one DVB-S2 signal per spec dict(rate_idx,
+    pilots, dec (symbol rate fs / (2 dec)), off (Hz from the LO), gold, nframes, lead,
+    esn0, ppm), with one AWGN floor (each signal's power set for its Es/N0).
+    Returns x and the BBFRAMEs per signal."""
+    import grref
+    import rxmodel as rf
+    import txmodel as m
+    rng = np.random.default_rng(seed)
+    ys, bbs = [], []
+    for k, sp in enumerate(specs):
+        ri = sp["rate_idx"]
+        kb = m.LDPC[m.RATES[ri]]["kbch"]
+        ts = rng.integers(0, 256, ((sp["nframes"] + 1) * kb // 1504 + 3, 188), dtype=np.uint8)
+        ts[:, 0] = 0x47
+        bb = grref.bbheader(ts.ravel(), m.RATES[ri])[: sp["nframes"] * kb].reshape(sp["nframes"], kb)
+        g = sp.get("gold", 0)
+        frames = [m.dummy_plframe_signs(g)] * sp["lead"] + \
+                 [m.plframe_signs(m.fec_frame(b, ri), ri + 1, sp["pilots"], g) for b in bb] + \
+                 [m.dummy_plframe_signs(g)] * 2
+        tx = m.rrc_interp(m.signs_to_iq(np.concatenate(frames)), m.rrc_coefs(8, 0.35, 16), 8, 16)
+        sps = 2 * sp["dec"]
+        y = rf.channel(tx, 8, sps, sp["off"] / (fs / sps), sp.get("ppm", 20.0), 0.3, 300.0, seed + k)
+        # Es/N0 with unit noise power per sample: Es = P sps
+        y *= np.sqrt(10 ** (sp["esn0"] / 10) / sps / np.mean(np.abs(y) ** 2))
+        ys.append(y)
+        bbs.append(bb)
+    n = max(len(y) for y in ys)
+    x = np.sqrt(0.5) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    for y in ys:
+        x[:len(y)] += y
+    x *= rms / np.sqrt(np.mean(np.abs(x) ** 2) / 2)
+    return np.clip(np.round(np.stack([x.real, x.imag], 1)), -2048, 2047).astype(np.int64), bbs
+
+
+def test_axi2_two_signals(rx_axi_exe):
+    """dvbs2_rx_axi with both slots on one ADC stream near the total rate limit: slot 0
+    1.5 MBd QPSK 1/2 pilots 2.6 MHz below the LO, slot 1 667 kBd QPSK 3/4 without pilots
+    (another Gold code) 2 MHz above it (2.17 MBd together), each slot configured through
+    its register bank as dvbs2-rx does it (ddc_config). Every DMA packet of each slot
+    (header bit 55) equals the model chain of that slot and carries a transmitted
+    BBFRAME, each slot's counters and PLS registers equal its model, the frame
+    counters run per slot, nothing is lost; the snapshot is slot 1's."""
+    import txmodel as m
+    from test_rx import check_pls_regs, read_regs, write_coefs as wc, SLOT_BANK, VERSION
+    os.makedirs(WORK, exist_ok=True)
+    fs = 12e6
+    specs = [dict(rate_idx=3, pilots=True, dec=4, off=-2.6e6, gold=0, nframes=6, lead=8, esn0=4.0, ppm=30.0),
+             dict(rate_idx=6, pilots=False, dec=9, off=2.0e6, gold=5, nframes=2, lead=8, esn0=8.0, ppm=-40.0)]
+    x, bbs = two_signals(specs, fs)
+    plus = dict(adcdiv=4, stall=20, axistall=30, axilat=200, en0=1, en1=1, snapslot=1)
+    want, snaps = [], []
+    kp, ki = fx.timing_gains()
+    llr0 = fx.Carrier._llr
+    for s, sp in enumerate(specs):
+        cfg = fx.ddc_config(sp["dec"])
+        finc = (-round(sp["off"] / fs * 2 ** 32)) & 0xFFFFFFFF
+        x2 = fx.ddc(x, cfg["coefs"], cfg["D"], finc, cfg["shift"], cfg["R"], cfg["cic_shift"])
+        snap = []
+
+        def llr_rec(self, buf, y, snap=snap):
+            if len(snap) < 1024:
+                snap.append((int(y[0]), int(y[1])))
+            llr0(self, buf, y)
+        fx.Carrier._llr = llr_rec
+        try:
+            r = fx.receive(x2, sp["rate_idx"] + 1, sp["pilots"], gold=sp["gold"])
+        finally:
+            fx.Carrier._llr = llr0
+        snaps.append(snap)
+        w = [ldpc_bch_model(f, sp["rate_idx"]) for f in r["frames"]]
+        print(f"slot {s}: {len(r['frames'])} frames, ok {[v[3] for v in w]}")
+        want.append((r, w))
+        fddc = os.path.join(WORK, f"axi2_ddc{s}.hex")
+        with open(fddc, "w") as f:
+            for v in cfg["coefs"]:
+                f.write(f"{int(v) & 0x3FFFF:05x}\n")
+        frrc = os.path.join(WORK, f"axi2_rrc{s}.hex")
+        wc(frrc, fx.timing_coefs(0.35))
+        xa, xb = m.gold_init(sp["gold"])
+        plus.update({f"ddccoef{s}": fddc, f"rrccoef{s}": frrc, f"modcod{s}": sp["rate_idx"] + 1,
+                     f"pilots{s}": int(sp["pilots"]), f"xa{s}": xa, f"xb{s}": xb, f"finc{s}": finc,
+                     f"dec{s}": cfg["D"], f"ntaps{s}": len(cfg["coefs"]), f"shift{s}": cfg["shift"],
+                     f"cicr{s}": cfg["R"], f"cicshift{s}": cfg["cic_shift"], f"tkp{s}": kp, f"tki{s}": ki,
+                     f"thresh{s}": fx.fs_threshold(), f"pkp{s}": r["carrier"].kp_p, f"pki{s}": r["carrier"].ki_p,
+                     f"maxit{s}": 30})
+    fin, fout, fregs = (os.path.join(WORK, f"axi2_{k}.hex") for k in ("in", "out", "regs"))
+    rxsim.write_iq(fin, x)
+    log = rxsim.run(rx_axi_exe, regs=fregs, **plus, **{"in": fin, "out": fout})
+    print(log)
+    os.remove(fin)
+    regs, lines = read_regs(fregs)
+    print({hex(k): v for k, v in regs.items() if v})
+    words = [l.split() for l in open(fout)]
+    data = np.array([int(w, 16) for w, _ in words], dtype=np.uint64)
+    assert len(data) % 1024 == 0
+    pk = data.reshape(-1, 1024)
+    assert regs[0x200] == VERSION and regs[0x2EC] == 0 and regs[0x2F0] == 0
+    assert regs[0x2E8] >> 16 == sum(len(w) for _, w in want)
+    for s, ((r, w), sp) in enumerate(zip(want, specs)):
+        b = SLOT_BANK * s
+        mine = [p for p in pk if (int(p[0]) >> 55) & 1 == s]
+        kb = len(bbs[s][0])
+        assert len(mine) == len(w) == regs[b + 0x90] == regs[b + 0x84], (s, len(mine), len(w))
+        assert regs[b + 0x50] == 0 and regs[b + 0x54] == 0 and regs[b + 0x8C] == 0 and regs[b + 0xEC] == 0
+        for k, (p, (wb, it, conv, ok, L, raw)) in enumerate(zip(mine, w)):
+            h = int(p[0])
+            assert h >> 56 == 0xB5 and h & 0xFFFF == kb // 8 and (h >> 16) & 0xFFFF == k
+            assert (h >> 32) & 0x1F == sp["rate_idx"] + 1 and (h >> 37) & 1 == int(sp["pilots"])
+            assert (h >> 40) & 0x3F == it and (h >> 48) & 1 == int(conv) and (h >> 49) & 1 == int(ok)
+            assert (h >> 50) & 0x1F == L
+            body = p[1:].view(np.uint8)[: kb // 8]
+            assert np.array_equal(body, wb), f"slot {s} packet {k} body"
+        dec = [np.unpackbits(p[1:].view(np.uint8)[: kb // 8]) for p in mine]
+        got = all_decoded(dec, bbs[s])
+        print(f"slot {s} decoded", got)
+        assert all(got)
+        check_pls_regs(regs, lines, r["pls"], sp["rate_idx"] + 1, sp["pilots"], s)
+        cr = r["carrier"]
+        assert (regs[b + 0x74], regs[b + 0x78], regs[b + 0x7C]) == (cr.A & 0xFFFFFFFF, (cr.E >> 4) & 0xFFFFFFFF, cr.G)
+    snap_got = [int(v, 16) for a, v in lines if a.startswith("s")]
+    sg = [((v & 0xFFFF) - ((v & 0x8000) << 1), (v >> 16) - ((v >> 31) << 16)) for v in snap_got]
+    assert regs[0x2A0] & 0xB == 2 | 8 and sg == snaps[1], "snapshot (slot 1)"

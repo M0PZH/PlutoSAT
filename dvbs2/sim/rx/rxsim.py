@@ -6,7 +6,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RTL = os.path.join(HERE, "..", "..", "rtl")
-BUILD = os.path.join(HERE, "build")
+BUILD = os.environ.get("RXSIM_BUILD", os.path.join(HERE, "build"))   # (one per parallel run)
 
 
 def build(top, sources, params=(), defines=()):

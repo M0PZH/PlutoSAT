@@ -1,6 +1,7 @@
-// Verilog-2001 top of the DVB-S2 receiver for Vivado block-design module
-// reference (a module reference top cannot be SystemVerilog). See
-// dvbs2_rx_axi.sv for the register map and the DMA packet format. Add
+// Verilog-2001 top of the DVB-S2 receiver (two receive slots) for Vivado
+// block-design module reference (a module reference top cannot be
+// SystemVerilog). See dvbs2_rx_axi.sv for the register map (10 address
+// bits: slot banks 0x000, 0x100, shared 0x200) and the DMA packet format. Add
 // rtl/*.sv, rtl/gen/*.sv and rtl/gen/{nco_lut,ldpc_dec_rom}.mem to the
 // project together with this file.
 // m_axi: the LLR queue's 64-bit AXI3 master (dvbs2_rx_llrq.sv), for a Zynq
@@ -17,7 +18,7 @@ module dvbs2_rx_bd #(
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 s_axi_aresetn RST" *)
   (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
   input  wire        s_axi_aresetn,
-  input  wire [7:0]  s_axi_awaddr,
+  input  wire [9:0]  s_axi_awaddr,
   input  wire [2:0]  s_axi_awprot,
   input  wire        s_axi_awvalid,
   output wire        s_axi_awready,
@@ -28,7 +29,7 @@ module dvbs2_rx_bd #(
   output wire [1:0]  s_axi_bresp,
   output wire        s_axi_bvalid,
   input  wire        s_axi_bready,
-  input  wire [7:0]  s_axi_araddr,
+  input  wire [9:0]  s_axi_araddr,
   input  wire [2:0]  s_axi_arprot,
   input  wire        s_axi_arvalid,
   output wire        s_axi_arready,

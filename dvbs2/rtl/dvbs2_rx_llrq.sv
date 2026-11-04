@@ -53,6 +53,7 @@ module dvbs2_rx_llrq #(
   input  logic [5:0]  max_it1,               // ... slot 1
   input  logic [5:0]  qhi,                   // cap while st_depth > qhi
   input  logic [5:0]  it_lo,                 // ... at it_lo iterations
+  input  logic [1:0]  clr_dropped,           // clear st_dropped<s> (the slot's reset)
 
   // LLR words from the front end
   input  logic        s_valid,
@@ -466,6 +467,8 @@ module dvbs2_rx_llrq #(
       end
       for (int s = 0; s < 2; s++) occ[s] <= occ[s] + 5'(occ_inc[s]) - 5'(occ_dec[s]);
     end
+    if (clr_dropped[0]) st_dropped0 <= '0;
+    if (clr_dropped[1]) st_dropped1 <= '0;
   end
 
   // a ring entry is free once its last beat is read
