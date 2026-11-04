@@ -1,21 +1,24 @@
 """Spectrum analyser: bit-exact model of rtl/fft_*.sv around the Xilinx FFT.
 
-Per frame (4096 consecutive samples x[n] = i[n] + j q[n] of one source):
+Per frame (N = 4096 >> LEN consecutive samples x[n] = i[n] + j q[n] of one
+source; N = 4096, 2048, 1024 or 512, L = log2 N):
 
-  window   y[n] = (x[n] * w[n] + 2^16) >> 17          (each of I, Q; floor)
-           w[n] = w[4095 - n] = WIN[n], n < 2048: 18-bit unsigned, 2^17 = 1.0
-           (reset contents: symmetric 4-term Blackman-Harris, rtl/gen/fft_win.mem)
-  FFT      X[k] = xfft(y) with the scale schedule SCALE (12 radix-2 stages,
-           2 bits per stage, stage 0 in bits [1:0]; total shift S = sum):
-           ~ sum_n y[n] exp(-2 pi j n k / 4096) / 2^S, 16-bit, convergent
-           rounding in every stage. Bit-exact: the Xilinx C model (xfft_cmodel);
-           float reference: numpy (fft_ref).
+  window   y[n] = (x[n] * w[n 4096 / N] + 2^16) >> 17   (each of I, Q; floor)
+           w[m] = w[4095 - m] = WIN[m], m < 2048: 18-bit unsigned, 2^17 = 1.0
+           (reset contents: symmetric 4-term Blackman-Harris, rtl/gen/fft_win.mem);
+           a shorter frame takes every (4096 / N)-th sample of the 4096-point window
+  FFT      X[k] = xfft(y) with the scale schedule SCALE (L radix-2 stages,
+           2 bits per stage, stage 0 in bits [1:0], the bits above stage L-1
+           ignored; total shift S = sum):
+           ~ sum_n y[n] exp(-2 pi j n k / N) / 2^S, 16-bit, convergent
+           rounding in every stage. Bit-exact: the Xilinx C model (xfft_cmodel,
+           run-time transform length); float reference: numpy (fft_ref).
   power    p[k] = re(X[k])^2 + im(X[k])^2               (32-bit unsigned)
   average  A[k] = sum over NAVG frames of p[k]          (40-bit, no overflow
                                                          for NAVG <= 256)
-  readout  R[j] = min(A[k] >> RSHIFT, 2^32 - 1),  j = k ^ 2048
-           (FFT-shifted: j = 0 is -fs/2, j = 2048 is DC, j = 4095 is
-           +fs/2 - fs/4096; frequency of word j: (j - 2048) fs / 4096)
+  readout  R[j] = min(A[k] >> RSHIFT, 2^32 - 1),  j = k ^ (N/2)
+           (FFT-shifted: j = 0 is -fs/2, j = N/2 is DC, j = N-1 is
+           +fs/2 - fs/N; frequency of word j: (j - N/2) fs / N)
 """
 import ctypes
 import math
@@ -24,9 +27,11 @@ import sys
 
 import numpy as np
 
-N = 4096
+N = 4096                       # largest transform (the window table's length)
 LOG2N = 12
+LOG2N_MIN = 9
 HALF = N // 2
+LENS = (4096, 2048, 1024, 512)  # CTRL.LEN 0..3
 WBITS = 17                     # window: 2^17 = 1.0
 ACC_BITS = 40
 NAVG_MAX = 256
@@ -56,9 +61,11 @@ def window_half(kind="blackmanharris"):
     return np.clip(np.round(w * (1 << WBITS)), 0, 1 << WBITS).astype(np.int64)
 
 
-def window_full(half):
+def window_full(half, n=N):
+    """The window of an n-point frame: every (4096 / n)-th sample of the
+    4096-point symmetric window."""
     half = np.asarray(half, np.int64)
-    return np.concatenate([half, half[::-1]])
+    return np.concatenate([half, half[::-1]])[::N // n]
 
 
 def write_win_mem(path=WIN_MEM, kind="blackmanharris"):
@@ -70,7 +77,7 @@ def write_win_mem(path=WIN_MEM, kind="blackmanharris"):
 
 def apply_window(i, q, half):
     """Integer windowing exactly as the RTL: (x * w + 2^16) >> 17."""
-    w = window_full(half)
+    w = window_full(half, len(i))
     i = np.asarray(i, np.int64)
     q = np.asarray(q, np.int64)
     r = 1 << (WBITS - 1)
@@ -78,17 +85,23 @@ def apply_window(i, q, half):
 
 
 # ---------------------------------------------------------------- scale schedule
-def sched_list(word):
-    """SCALE register -> per-stage shifts (stage 0 first)."""
-    return [(word >> (2 * s)) & 3 for s in range(LOG2N)]
+def sched_list(word, log2n=LOG2N):
+    """SCALE register -> per-stage shifts (stage 0 first) of a 2^log2n-point FFT."""
+    return [(word >> (2 * s)) & 3 for s in range(log2n)]
 
 
 def sched_word(stages):
     return sum((v & 3) << (2 * s) for s, v in enumerate(stages))
 
 
-def sched_shift(word):
-    return sum(sched_list(word))
+def sched_shift(word, log2n=LOG2N):
+    return sum(sched_list(word, log2n))
+
+
+def log2(n):
+    l = int(n).bit_length() - 1
+    assert 1 << l == n and LOG2N_MIN <= l <= LOG2N, n
+    return l
 
 
 SCALE_RX = 0x555400     # 12-bit ADC data (reset value): stages 0..4 unscaled, total shift 7
@@ -143,21 +156,24 @@ class XfftCModel:
         lib.xilinx_ip_xfft_v9_1_create_state.argtypes = [_G]
         lib.xilinx_ip_xfft_v9_1_bitacc_simulate.argtypes = [ctypes.c_void_p, _I, ctypes.POINTER(_O)]
         g = lib.xilinx_ip_xfft_v9_1_get_default_generics()
-        g.C_NFFT_MAX, g.C_ARCH, g.C_HAS_NFFT, g.C_USE_FLT_PT = LOG2N, 4, 0, 0
+        g.C_NFFT_MAX, g.C_ARCH, g.C_HAS_NFFT, g.C_USE_FLT_PT = LOG2N, 4, 1, 0
         g.C_INPUT_WIDTH, g.C_TWIDDLE_WIDTH = 16, 16
         g.C_HAS_SCALING, g.C_HAS_BFP, g.C_HAS_ROUNDING, g.C_NSSR = 1, 0, int(rounding), 1
         self.lib = lib
         self.state = lib.xilinx_ip_xfft_v9_1_create_state(g)
 
     def __call__(self, yi, yq, scale):
-        """Integer input (16-bit) -> (integer complex output, overflow)."""
+        """Integer input (16-bit, N = len(yi) points) -> (integer complex
+        output, overflow)."""
+        n = len(yi)
+        l = log2(n)
         re = np.ascontiguousarray(np.asarray(yi, np.float64) / 32768.0)
         im = np.ascontiguousarray(np.asarray(yq, np.float64) / 32768.0)
-        sch = (ctypes.c_int * LOG2N)(*sched_list(scale))
-        ore = np.zeros(N)
-        oim = np.zeros(N)
-        inp = _I(LOG2N, re.ctypes.data_as(_PD), N, im.ctypes.data_as(_PD), N, sch, LOG2N, 1)
-        out = _O(ore.ctypes.data_as(_PD), N, oim.ctypes.data_as(_PD), N, 0, 0)
+        sch = (ctypes.c_int * l)(*sched_list(scale, l))
+        ore = np.zeros(n)
+        oim = np.zeros(n)
+        inp = _I(l, re.ctypes.data_as(_PD), n, im.ctypes.data_as(_PD), n, sch, l, 1)
+        out = _O(ore.ctypes.data_as(_PD), n, oim.ctypes.data_as(_PD), n, 0, 0)
         if self.lib.xilinx_ip_xfft_v9_1_bitacc_simulate(self.state, inp, ctypes.byref(out)):
             raise RuntimeError("xfft C model failed")
         xr = np.round(ore * 32768).astype(np.int64)
@@ -178,43 +194,49 @@ def xfft_cmodel(yi, yq, scale):
 # ---------------------------------------------------------------- float reference
 def fft_ref(yi, yq, scale):
     """numpy: DFT of the windowed samples scaled by the schedule (complex float)."""
-    return np.fft.fft(np.asarray(yi, float) + 1j * np.asarray(yq, float)) / 2.0 ** sched_shift(scale)
+    return np.fft.fft(np.asarray(yi, float) + 1j * np.asarray(yq, float)) / \
+        2.0 ** sched_shift(scale, log2(len(yi)))
 
 
-def fft_err_sigma(scale):
+def fft_err_sigma(scale, log2n=LOG2N):
     """Standard deviation of the xfft rounding error of one output component,
     in output LSBs (derivation in README.md "Verification"):
 
-    radix-2 stage s (s = 0..11) rounds its butterfly outputs to the 16-bit
+    radix-2 stage s (s = 0..L-1, L = log2n) rounds its butterfly outputs to the 16-bit
     grid after shifting by b_s bits: each output gets an independent error of
     variance (1 - 4^-b_s) / 12 (convergent rounding of b_s dropped bits;
-    0 when b_s = 0) plus the twiddle product rounding (1/12; stages 1..11,
+    0 when b_s = 0) plus the twiddle product rounding (1/12; stages 1..L-1,
     stage 0 has only trivial twiddles). The error made in stage s reaches an
-    output through the 2^(11 - s) paths of the remaining stages, each scaled by
-    2^-(b_{s+1} + ... + b_11): variance gain 2^(11 - s) / 4^(B_s)."""
-    b = sched_list(scale)
+    output through the 2^(L-1 - s) paths of the remaining stages, each scaled by
+    2^-(b_{s+1} + ... + b_{L-1}): variance gain 2^(L-1 - s) / 4^(B_s)."""
+    b = sched_list(scale, log2n)
     var = 0.0
-    for s in range(LOG2N):
+    for s in range(log2n):
         v = (1 - 4.0 ** -b[s]) / 12 + (1 / 12 if s > 0 else 0)
         rest = sum(b[s + 1:])
-        var += v * 2.0 ** (LOG2N - 1 - s) / 4.0 ** rest
+        var += v * 2.0 ** (log2n - 1 - s) / 4.0 ** rest
     return math.sqrt(var)
 
 
-# twiddle factors are 16-bit (|error| <= 2^-16 per component and stage): a
-# relative magnitude error bound over 12 stages
-TWIDDLE_REL = LOG2N * 2.0 ** -15
+def twiddle_rel(log2n=LOG2N):
+    """Twiddle factors are 16-bit (|error| <= 2^-16 per component and stage):
+    a relative magnitude error bound over log2n stages."""
+    return log2n * 2.0 ** -15
+
+
+TWIDDLE_REL = twiddle_rel()
 
 
 def power_tolerance(xref_frames, scale, k_sigma=7.0):
     """Per-bin bound on |sum_f |X_rtl|^2 - sum_f |X_ref|^2| (float reference):
     |X_rtl - X_ref| <= E = k sigma sqrt(2) + TWIDDLE_REL |X_ref|  (complex),
     so ||X_rtl|^2 - |X_ref|^2| <= 2 |X_ref| E + E^2 per frame."""
-    sig = fft_err_sigma(scale)
     tol = 0.0
     for X in xref_frames:
+        l = log2(len(X))
+        sig = fft_err_sigma(scale, l)
         a = np.abs(X)
-        e = k_sigma * sig * math.sqrt(2) + TWIDDLE_REL * a
+        e = k_sigma * sig * math.sqrt(2) + twiddle_rel(l) * a
         tol = tol + 2 * a * e + e * e
     return tol
 
@@ -226,9 +248,9 @@ def power(xr, xi):
     return xr * xr + xi * xi
 
 
-def shift_index():
-    """Readout word j holds bin k = j ^ 2048."""
-    return np.arange(N) ^ HALF
+def shift_index(n=N):
+    """Readout word j holds bin k = j ^ (n/2)."""
+    return np.arange(n) ^ (n // 2)
 
 
 def readout(acc, rshift):
@@ -237,14 +259,15 @@ def readout(acc, rshift):
     v = np.asarray(acc, np.int64) >> rshift
     sat = bool(np.any(v > 0xFFFFFFFF))
     v = np.minimum(v, 0xFFFFFFFF)
-    return v[shift_index()], sat
+    return v[shift_index(len(v))], sat
 
 
 def spectrum(frames, scale, rshift, win=None, cmodel=True):
-    """frames: list of (i, q) sample arrays of 4096. Returns (result words,
-    saturated, fft overflow, accumulator) using the bit-exact C model."""
+    """frames: list of (i, q) sample arrays of N (all the same length).
+    Returns (result words, saturated, fft overflow, accumulator) using the
+    bit-exact C model."""
     win = window_half() if win is None else win
-    acc = np.zeros(N, np.int64)
+    acc = np.zeros(len(frames[0][0]), np.int64)
     ovf = False
     for i, q in frames:
         yi, yq = apply_window(i, q, win)
@@ -256,12 +279,19 @@ def spectrum(frames, scale, rshift, win=None, cmodel=True):
     return res, sat, ovf, acc
 
 
-def to_db(words, rshift, navg, scale, full_scale=2048, win=None):
-    """Result words -> dB relative to a full-scale complex tone of amplitude
-    `full_scale` (2048 for the 12-bit ADC) centred on a bin."""
+def window_sum(n=N, win=None):
+    """sum of the n-point window / 2^17 (coherent gain * n): 1469.08 for the
+    reset window at 4096 points, 367.27 at 1024."""
     win = window_half() if win is None else win
-    cg = window_full(win).sum() / 2.0 ** WBITS          # coherent gain * N
-    ref = (full_scale * cg / 2.0 ** sched_shift(scale)) ** 2
+    return window_full(win, n).sum() / 2.0 ** WBITS
+
+
+def to_db(words, rshift, navg, scale, full_scale=2048, win=None):
+    """Result words (N = len(words)) -> dB relative to a full-scale complex
+    tone of amplitude `full_scale` (2048 for the 12-bit ADC) centred on a bin."""
+    n = len(words)
+    cg = window_sum(n, win)
+    ref = (full_scale * cg / 2.0 ** sched_shift(scale, log2(n))) ** 2
     p = np.asarray(words, float) * 2.0 ** rshift / navg
     return 10 * np.log10(np.maximum(p, 1e-3) / ref)
 

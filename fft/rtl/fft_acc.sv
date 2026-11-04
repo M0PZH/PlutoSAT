@@ -1,17 +1,21 @@
 // Power and averaging of the FFT output (model: model/fftspec.py).
 //
-// Per output bin k (natural order, one per clock or slower):
+// Per output bin k < N (natural order, one per clock or slower;
+// N = 4096 >> len):
 //   p = re^2 + im^2                                  (32-bit)
-//   A[j] = (first frame ? 0 : A[j]) + p,  j = k ^ 2048 (FFT-shifted address)
-// in a 4096 x 40 accumulator RAM. In the last frame of an average the result
-// word min((A[j] + p) >> rsh, 2^32 - 1) is written instead:
+//   A[j] = (first frame ? 0 : A[j]) + p,  j = k ^ (N/2) (FFT-shifted address)
+// in a 4096 x 40 accumulator RAM (words 0..N-1 used). In the last frame of
+// an average the result word min((A[j] + p) >> rsh, 2^32 - 1) is written
+// instead:
 //   DOUBLE_BUF = 0: back into the accumulator RAM, which is also the result
 //                   buffer (read port shared with rd_addr when idle);
 //   DOUBLE_BUF = 1: into a separate 4096 x 32 result RAM (read port rd_addr
 //                   only), so the next average can run while the ARM reads,
 //                   unless keep (the previous result is still unread) is set
 //                   when the last frame starts: then the average is dropped.
-// rd_data is valid two clocks after rd_addr.
+// rd_data is valid two clocks after rd_addr. The caller holds the FFT
+// output off (s_valid low) while it reads a result that a beat would
+// overwrite: s_lastf tells whether the next beat belongs to the last frame.
 
 module fft_acc #(
   parameter bit DOUBLE_BUF = 1'b0
@@ -21,6 +25,7 @@ module fft_acc #(
 
   input  logic        restart,        // an average starts: frame counter to 0
   input  logic [7:0]  nm1,            // frames per average - 1
+  input  logic [1:0]  len,            // N = 4096 >> len
   input  logic [3:0]  rsh,            // result right shift, 0..8
   input  logic        keep,           // DOUBLE_BUF: do not overwrite the result
 
@@ -32,7 +37,8 @@ module fft_acc #(
   output logic        avg_end,        // pulse: the last frame is written
   output logic        avg_pub,        // with avg_end: the result was written
   output logic        sat,            // pulse: a result word saturated
-  output logic        order_err,      // pulse: tlast not at bin 4095
+  output logic        order_err,      // pulse: tlast not at bin N-1
+  output logic        s_lastf,        // the next input beat is in the last frame
 
   input  logic [11:0] rd_addr,
   output logic [31:0] rd_data
@@ -42,14 +48,16 @@ module fft_acc #(
   logic [11:0] k;
   logic [7:0]  f;
   logic        wr_res;
+  wire         k_last = (k | ~(12'hFFF >> len)) == 12'hFFF;
+  assign s_lastf = f == nm1;
   always_ff @(posedge clk) begin
     order_err <= 1'b0;
     if (srst || restart) begin
       k <= '0; f <= '0; wr_res <= 1'b1;
     end else if (s_valid) begin
-      k <= k + 1'b1;
-      order_err <= s_last != (k == 12'hFFF);
-      if (k == 12'hFFF) f <= (f == nm1) ? 8'd0 : f + 1'b1;
+      k <= k_last ? 12'd0 : k + 1'b1;
+      order_err <= s_last != k_last;
+      if (k_last) f <= (f == nm1) ? 8'd0 : f + 1'b1;
       if (k == 12'h000 && f == nm1) wr_res <= !(DOUBLE_BUF && keep);
     end
   end
@@ -61,12 +69,12 @@ module fft_acc #(
   logic signed [15:0] re0, im0;
   always_ff @(posedge clk) begin
     v0 <= s_valid && !srst;
-    j0 <= {~k[11], k[10:0]};
+    j0 <= k ^ (12'h800 >> len);
     re0 <= s_data[15:0];
     im0 <= s_data[31:16];
     first0 <= f == 8'd0;
     lastf0 <= f == nm1;
-    lastk0 <= k == 12'hFFF;
+    lastk0 <= k_last;
   end
 
   logic [39:0] acc_q2;

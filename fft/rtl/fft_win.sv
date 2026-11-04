@@ -1,7 +1,10 @@
-// Window: y = (x * w[n] + 2^16) >> 17 for I and Q (model: model/fftspec.py).
-// Half table w[n] = w[4095 - n] = WIN[n], n < 2048, 18-bit unsigned
+// Window: y = (x * w[m] + 2^16) >> 17 for I and Q (model: model/fftspec.py).
+// Half table w[m] = w[4095 - m] = WIN[m], m < 2048, 18-bit unsigned
 // (2^17 = 1.0, values above 2^17 overflow), one 36 Kb block RAM written by
 // the ARM and initialised from WIN_FILE (Blackman-Harris). Latency 6 clocks.
+// Transform length N = 4096 >> len: sample n of a frame takes the 4096-point
+// window at m = n * 2^len (every 2^len-th sample, the same window shape:
+// Blackman-Harris keeps its -92 dB sidelobes and ENBW 2.005 bins).
 
 module fft_win #(
   parameter string WIN_FILE = "fft_win.mem"
@@ -13,8 +16,10 @@ module fft_win #(
   input  logic [10:0]        wa,
   input  logic [17:0]        wd,
 
+  input  logic [1:0]         len,            // N = 4096 >> len
+
   input  logic               in_v,
-  input  logic [11:0]        in_n,
+  input  logic [11:0]        in_n,           // sample index in the frame, < N
   input  logic signed [15:0] in_i,
   input  logic signed [15:0] in_q,
 
@@ -24,18 +29,19 @@ module fft_win #(
   output logic signed [15:0] out_q
 );
 
-  // stage 0: input register, table address (mirrored in the upper half)
+  // stage 0: input register, 4096-point index m = n << len, table address
+  // (mirrored in the upper half)
   logic               v0, l0;
-  logic [11:0]        n0;
+  logic [11:0]        m0;
   logic signed [15:0] i0, q0;
   always_ff @(posedge clk) begin
     v0 <= in_v && !srst;
-    n0 <= in_n;
-    l0 <= in_n == 12'hFFF;
+    m0 <= in_n << len;
+    l0 <= (in_n | ~(12'hFFF >> len)) == 12'hFFF;
     i0 <= in_i;
     q0 <= in_q;
   end
-  wire [10:0] ra = n0[11] ? ~n0[10:0] : n0[10:0];
+  wire [10:0] ra = m0[11] ? ~m0[10:0] : m0[10:0];
 
   logic [17:0] w2;
   xpm_memory_sdpram #(
