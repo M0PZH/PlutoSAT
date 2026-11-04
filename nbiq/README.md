@@ -4,7 +4,7 @@ Five independent receive channels in the PL, each tuned and filtered on its
 own and written to its own ring buffer in DDR. The ARM gets ready-made
 narrowband IQ (SSB, CW, beacons, a transponder overview, ...) without
 touching the 12 MSPS stream. The station plan: four 48 kHz user channels
-(R 125) and a 500 kHz overview of the QO-100 narrowband transponder (R 12),
+(R 125) and a 600 kS/s overview of the QO-100 narrowband transponder (R 10),
 all from rx1; any channel can take any rate and either receive channel.
 
 ```
@@ -42,7 +42,7 @@ the sum of `fout × (npairs + 1)` stays below 90 % of the clock, and checks
 the limits of the job FIFO and the sample buffers (`model/nbiq.py`
 `fir_check()`, explained in the header of `rtl/nbiq_fir.sv`); the share
 always meets them. The station plan uses 43 % of the engine (4 × 48 k ×
-128 + 500 k × 36 clocks per second).
+128 + 600 k × 30 clocks per second).
 
 ## Files
 
