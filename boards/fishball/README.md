@@ -32,7 +32,7 @@ drivers create no IIO buffer then); the devicetrees in `linux/` and from
 | S_AXI_HP0 | reserved: future IQ transmit DMA (memory -> DAC, up to 12 MS/s IQ, narrow- or wideband) | 64 |
 | S_AXI_HP1 | reserved: the second DATV receiver's LDPC LLR frame queue (DDR ring, ~20 MB/s read + write, ~2 MB) | 64 |
 | S_AXI_HP2 | `nbiq` ring writer (`DW` 64), 5 channels into 4 MB @ 0x3EB00000 | 64 |
-| S_AXI_HP3 | FFT result DMA `axi_fft_dma` (stream -> memory, 0x7C4A0000, 1 MB @ 0x3EA00000); wired automatically once `fft_bd` has a result stream `m_axis` | 64 |
+| S_AXI_HP3 | FFT result DMA `axi_fft_dma` (stream -> memory, 0x7C4A0000, 1 MB @ 0x3EA00000) | 64 |
 | S_AXI_GP0 | DVB-S2 RX DMA `axi_dvbs2_rx_dma` (stream -> memory, 0x7C490000) | 32 |
 | S_AXI_GP1 | DVB-S2 TX DMA `axi_dvbs2_dma` (memory -> stream, 0x7C480000) | 32 |
 | S_AXI_ACP | spare | |

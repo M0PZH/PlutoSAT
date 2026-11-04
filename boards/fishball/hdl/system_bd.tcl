@@ -12,7 +12,7 @@
 ##   S_AXI_HP0  reserved: future IQ transmit DMA (memory -> DAC)
 ##   S_AXI_HP1  reserved: second DATV receiver's LDPC LLR frame queue
 ##   S_AXI_HP2  nbiq ring writer (64-bit)
-##   S_AXI_HP3  FFT result DMA (wired below once fft_bd has m_axis)
+##   S_AXI_HP3  FFT result DMA (64-bit)
 ##   S_AXI_GP0  DVB-S2 RX DMA (32-bit)       S_AXI_GP1  DVB-S2 TX DMA (32-bit)
 ##   S_AXI_ACP  spare
 ## The HP ports stay in their 64-bit mode: a board that keeps its own FSBL
@@ -417,10 +417,9 @@ create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
 ad_cpu_interconnect 0x7C520000 nbiq
 ad_cpu_interrupt ps-8 mb-8 nbiq/irq
 
-# Spectrum analyser (fft/): averaged 4096-bin spectra of rx0, rx1 or an
-# nbiq channel (the tap), read by the ARM over AXI-Lite (UIO "fft"), and,
-# once fft_bd has a result stream (m_axis), written to memory by
-# axi_fft_dma through S_AXI_HP3
+# Spectrum analyser (fft/): averaged 512- to 4096-bin spectra of rx0, rx1 or an
+# nbiq channel (the tap), read by the ARM over AXI-Lite (UIO "fft") or
+# written to memory by axi_fft_dma through S_AXI_HP3
 
 set fft_dir [file normalize [file join $ad_hdl_dir .. fft]]
 source [file join $fft_dir ip fft_xfft.tcl]
@@ -446,40 +445,38 @@ ad_connect nbiq/tap_q             fft/tap_q
 ad_cpu_interconnect 0x7C540000 fft
 ad_cpu_interrupt ps-7 mb-7 fft/irq
 
-# FFT result DMA (stream -> memory, S_AXI_HP3, 64-bit), only when fft_bd
-# has an AXI-Stream master m_axis (the result stream, in fft's s_axi_aclk =
-# sys_cpu_clk domain). Registers 0x7C4A0000, irq ps-13; its buffer is the
-# fft-buffer the device tree reserves (1 MB @ 0x3EA00000, mapped by the
-# fft UIO node next to these registers).
-if {[get_bd_intf_pins -quiet fft/m_axis] ne ""} {
-  set fft_tdata_bits [expr {8 * [get_property CONFIG.TDATA_NUM_BYTES [get_bd_intf_pins fft/m_axis]]}]
-  ad_ip_instance axi_dmac axi_fft_dma
-  ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_SRC 1
-  ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_DEST 0
-  ad_ip_parameter axi_fft_dma CONFIG.CYCLIC 0
-  ad_ip_parameter axi_fft_dma CONFIG.SYNC_TRANSFER_START 0
-  ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_SRC 0
-  ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_DEST 0
-  ad_ip_parameter axi_fft_dma CONFIG.DMA_2D_TRANSFER 0
-  ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_SRC $fft_tdata_bits
-  ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_DEST 64
+# FFT result DMA (stream -> memory, S_AXI_HP3, 64-bit): one packet per
+# result from fft/m_axis (CTRL.STREAM; s_axi_aclk = sys_cpu_clk domain), see
+# fft/README.md "Result stream". Registers 0x7C4A0000, irq ps-13; buffer:
+# fft-buffer in the device tree (1 MB @ 0x3EA00000), map1/map2 of the fft
+# UIO node.
 
-  ad_connect sys_cpu_clk axi_fft_dma/s_axis_aclk
-  ad_connect fft/m_axis axi_fft_dma/s_axis
+ad_ip_instance axi_dmac axi_fft_dma
+ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_SRC 1
+ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_DEST 0
+ad_ip_parameter axi_fft_dma CONFIG.CYCLIC 0
+ad_ip_parameter axi_fft_dma CONFIG.SYNC_TRANSFER_START 0
+ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_SRC 0
+ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_DEST 0
+ad_ip_parameter axi_fft_dma CONFIG.DMA_2D_TRANSFER 0
+ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_SRC 64
+ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_DEST 64
 
-  ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP3 {1}
-  ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {64}
-  ad_connect sys_cpu_clk sys_ps7/S_AXI_HP3_ACLK
-  ad_connect axi_fft_dma/m_dest_axi sys_ps7/S_AXI_HP3
-  create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
-                      [get_bd_addr_spaces axi_fft_dma/m_dest_axi] \
-                      [get_bd_addr_segs sys_ps7/S_AXI_HP3/HP3_DDR_LOWOCM] \
-                      SEG_sys_ps7_HP3_DDR_LOWOCM
-  ad_connect sys_cpu_clk axi_fft_dma/m_dest_axi_aclk
-  ad_connect sys_cpu_resetn axi_fft_dma/m_dest_axi_aresetn
+ad_connect sys_cpu_clk axi_fft_dma/s_axis_aclk
+ad_connect fft/m_axis axi_fft_dma/s_axis
 
-  ad_cpu_interconnect 0x7C4A0000 axi_fft_dma
-  ad_cpu_interrupt ps-13 mb-13 axi_fft_dma/irq
-}
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP3 {1}
+ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {64}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_HP3_ACLK
+ad_connect axi_fft_dma/m_dest_axi sys_ps7/S_AXI_HP3
+create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
+                    [get_bd_addr_spaces axi_fft_dma/m_dest_axi] \
+                    [get_bd_addr_segs sys_ps7/S_AXI_HP3/HP3_DDR_LOWOCM] \
+                    SEG_sys_ps7_HP3_DDR_LOWOCM
+ad_connect sys_cpu_clk axi_fft_dma/m_dest_axi_aclk
+ad_connect sys_cpu_resetn axi_fft_dma/m_dest_axi_aresetn
+
+ad_cpu_interconnect 0x7C4A0000 axi_fft_dma
+ad_cpu_interrupt ps-13 mb-13 axi_fft_dma/irq
 
 ad_cpu_interconnect 0x7C530000 rx_awgn

@@ -14,7 +14,7 @@ size = 0x10000
 id = { offset = 0x004, value = 0x46465453 }        # "FFTS"
 version = { offset = 0x000, value = 0x00010100 }
 rtl = "fft/rtl/fft_axi.sv"
-maps = ["regs"]
+maps = ["regs", "dmac", "ring"]
 
 [[const]]
 name = "N"

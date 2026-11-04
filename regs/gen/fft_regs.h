@@ -8,6 +8,8 @@
 #define FFT_ID_VALUE 0x46465453u
 #define FFT_VERSION_VALUE 0x00010100u
 #define FFT_MAP_REGS 0
+#define FFT_MAP_DMAC 1
+#define FFT_MAP_RING 2
 
 /* Largest FFT length (bins, RESULT words; CTRL.LEN = 0, the reset value) */
 #define FFT_N 4096

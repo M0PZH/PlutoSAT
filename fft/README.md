@@ -390,10 +390,9 @@ ad_cpu_interrupt ps-7 mb-7 fft/irq
 ```
 
 Result stream (optional; without it tie `fft/m_axis_tready` to 0): an
-axi_dmac stream -> memory as for dvbs2_rx, to S_AXI_HP3. HP3 already
-carries `axi_dvbs2_dma/m_src_axi` (reads only); the fft DMA only writes, so
-an AXI interconnect (2 slaves, 1 master) in front of HP3 is enough. A
-sketch (instance name, register address and interrupt are placeholders):
+axi_dmac stream -> memory as for dvbs2_rx. In the fishball design it is
+`axi_fft_dma` at 0x7C4A0000, irq ps-13, with S_AXI_HP3 (64-bit) to itself
+(`boards/fishball/README.md`, "AXI ports"):
 
 ```tcl
 ad_ip_instance axi_dmac axi_fft_dma
@@ -410,13 +409,15 @@ ad_connect sys_cpu_clk axi_fft_dma/s_axis_aclk
 ad_connect fft/m_axis axi_fft_dma/s_axis
 ad_connect sys_cpu_clk axi_fft_dma/m_dest_axi_aclk
 ad_connect sys_cpu_resetn axi_fft_dma/m_dest_axi_aresetn
-# m_dest_axi -> S_AXI_HP3 (shared with axi_dvbs2_dma/m_src_axi), address
-# segment HP3_DDR_LOWOCM as for the other DMAs
+# m_dest_axi -> S_AXI_HP3, address segment HP3_DDR_LOWOCM as for the
+# other DMAs (see system_bd.tcl)
 ad_cpu_interconnect 0x7C4A0000 axi_fft_dma
+ad_cpu_interrupt ps-13 mb-13 axi_fft_dma/irq
 ```
 
 The UIO node then gets the DMA registers and a reserved DDR ring as maps 1
-and 2 (as dvbs2-rx); 16400 bytes per slot, e.g. 32 slots (525 KB). The
+and 2 (`dmac`, `ring` in regs/fft.toml; the fishball reserves 1 MB at
+0x3EA00000); 16400 bytes per slot, e.g. 32 slots (525 KB). The
 `axi_dmac` interrupt is not needed (software polls TRANSFER_DONE or uses
 the fft DONE interrupt, which comes ~N clocks before the packet is in
 memory).
@@ -447,7 +448,9 @@ Device tree (ps-7 = IRQ_F2P[7] = GIC SPI 36):
 	/* spectrum analyser (fft/) */
 	fft@7c540000 {
 		compatible = "generic-uio";
-		reg = <0x7c540000 0x10000>;
+		reg = <0x7c540000 0x10000>,     /* fft registers */
+		      <0x7c4a0000 0x10000>,     /* axi_fft_dma */
+		      <0x3ea00000 0x00100000>;  /* result ring (reserved-memory) */
 		interrupt-parent = <&intc>;
 		interrupts = <0 36 IRQ_TYPE_LEVEL_HIGH>;
 	};
