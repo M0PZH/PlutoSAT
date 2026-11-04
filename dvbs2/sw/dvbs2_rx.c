@@ -647,8 +647,13 @@ int main(int argc, char **argv)
 		}
 		snprintf(v, sizeof(v), "%.0f", fs);
 		iio_set(phy, "in_voltage_sampling_frequency", v);
-		snprintf(v, sizeof(v), "%.0f", fmax(sr * (1 + rolloff) * 1.2, 200e3));
-		iio_set(phy, "in_voltage_rf_bandwidth", v);
+		/* at the system rate (12 MS/s) the AD9363's analog filter is shared
+		 * with the other receive users (nbiq, the spectrum): leave it; narrow
+		 * it only when the ADC rate was chosen for this receiver (-F, -d) */
+		if (fabs(fs - 12e6) > 1.0) {
+			snprintf(v, sizeof(v), "%.0f", fmax(sr * (1 + rolloff) * 1.2, 200e3));
+			iio_set(phy, "in_voltage_rf_bandwidth", v);
+		}
 		if (freq > 0) {
 			snprintf(v, sizeof(v), "%.0f", freq);
 			iio_set(phy, "out_altvoltage0_RX_LO_frequency", v);
