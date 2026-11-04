@@ -658,7 +658,8 @@ tested offset up to +-2 % (`sr_offset_experiment.py --preset`).
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_rx` (module reference
 `ip/dvbs2_rx_bd.v`) at 0x7C510000, fed from `axi_ad9361` channel 0 (through
 `rx_awgn`), and `axi_dvbs2_rx_dma` (stream -> memory, 32-bit on S_AXI_GP0)
-at 0x7C490000, IRQ ps-9. Everything after the ADC sample FIFO runs on
+at 0x7C490000, IRQ ps-9; the LLR queue's AXI master (`m_axi`) is on
+S_AXI_HP1 (64-bit). Everything after the ADC sample FIFO runs on
 `sys_cpu_clk`. Register map and packet format: header of
 `rtl/dvbs2_rx_axi.sv`. Each decoded BBFRAME becomes one 8 KB DMA packet
 (status word + BBFRAME); with both packet slots full a frame is dropped and
@@ -678,7 +679,8 @@ every decimation. `test_rx_axi_sr_offset` runs decimation 18 with the
 transmitter at 333000 S/s (-1000 ppm, TIMING_INTEG preset) and at +1000 ppm
 (pulled in from 0).
 
-Linux: UIO device `dvbs2-rx` (registers, DMA, 1 MB buffer at 0x3EF00000)
+Linux: UIO device `dvbs2-rx` (registers, DMA, 1 MB buffer at 0x3EF00000;
+map3: the LLR queue's 2 MB at 0x3E800000, used by the PL only)
 and `dvbs2-rx` in the same buildroot package as `dvbs2-tx`:
 
 ```
@@ -703,6 +705,11 @@ output, or the timing loop output with `--constellation-raw`) every second.
 With a core >= VERSION 0x0001_0200 the status line ends with the last
 confident PLS decode of a data header (`, PLS qpsk3/4 pilots`, `!` when it
 is not the configured MODCOD/pilots, `, PLS -` before the first).
+`--llr-queue` (core >= VERSION 0x0001_0500) decodes through the DDR LLR
+queue ([LLR queue](#llr-queue-ddr)); it refuses to start unless the UIO
+device has the reserved 2 MB as map3, and the status line then ends with
+`, LLRQ frames/waiting(most)/dropped/AXI errors`. On such a core dvbs2-rx
+always writes LLRQ_CTRL, so the queue is off unless asked for.
 
 `--detect` detects the MODCOD and pilots instead of receiving. The frame
 sync needs the right pilots (they set the frame length, and its correlation
@@ -726,6 +733,58 @@ in a dummy frame).
 ```
 dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
 ```
+
+### LLR queue (DDR)
+
+`dvbs2_rx_llrq` (docs/rx2_design.md sections 6.1, 6.2, 7.3) queues the
+carrier's LLR frames in DDR between the carrier and the LDPC decoder: the
+path of the second receive slot, where two front ends share one decoder.
+Off by default; `LLRQ_CTRL` = 1 and a soft reset put today's receiver
+(slot 0) on it, with the same decoded frames.
+
+```
+carrier ─► packer ─► staging (32 beats/slot) ─► AXI write bursts ─► DDR ring[slot][frame] (S_AXI_HP1)
+DDR ─► AXI read bursts ─► read FIFO (64 beats) ─► LDPC decoder (frames in completion order)
+```
+
+* Layout: 2 MB at `LLRQ_BASE` (0x3E800000, reserved by the device tree as
+  `dvbs2-llr-buffer`, map3 of the `dvbs2-rx` UIO device): slot s, frame f
+  at base + s x 1 MB + f x 64 KB, the frame's 64800 LLR bytes in bit order.
+  16-beat (128-byte) bursts of 64 bits, the last of a frame 4 beats; up to 4
+  write bursts and 64 read beats in flight; ID 0, in-order responses.
+* A frame is in the queue when the response of its last write burst is
+  back; its descriptor {slot, frame} then joins one FIFO, and the reader
+  streams the frames to the decoder in that order, each with its rate, its
+  slot's `LDPC_MAX_IT` and its tag {slot, pilots, MODCOD}. A ring entry is
+  free when its last read beat is in. A frame that starts while its slot's
+  ring is full (`LLRQ_CFG` frames per slot, default 16) is dropped and
+  counted (`LLRQ_DROPPED`).
+* Shared iteration budget: while more than QHI frames wait (`LLRQ_STAT`
+  [5:0]: complete frames + the one being read), the decoder stops each
+  frame at MAX_IT_LO iterations (checked after each iteration).
+* Soft reset: the AXI transfers in flight finish first (a burst is never cut
+  short; responses and read data are taken and ignored), then the queue
+  starts empty.
+* LDPC and BCH decoders: the rate, iteration limit and tag are per frame
+  (taken with the frame's first word, kept per APP buffer), so consecutive
+  frames may differ; the packet header's MODCOD/pilots are the frame's own
+  and bit 55 its slot.
+
+Tests: `sim/rx/test_llrq.py` (the queue and the LDPC decoder, the AXI
+side on `sim/rx/axi_mem.sv`, a memory model whose writes become visible
+only with their response, random stalls and latency, protocol checks):
+both slots at 2.38 MBd in total, heavy backpressure, drops when over
+budget, the iteration cap, abandoned frames, a soft reset with transfers in
+flight; every frame equal to `model/ldpcdec.py` at its iteration count and
+with its tag. `test_rx.py`: `test_ldpc_mixed`, `test_ldpc_itcap`,
+`test_bch_mixed` (per-frame rate), `test_rx_end_to_end[p_1_2_llrq]` and
+`test_rx_axi[1]` (the whole receiver through the queue, the same frames).
+
+Resources (`syn/ooc.tcl 100 dvbs2_rx_llrq`, xc7z020-2): 717 LUTs (250 of
+them distributed RAM: staging 2 x 32, read FIFO 64 beats), 490 FFs, no
+block RAM, no DSP, WNS +2.66 ns. The whole wrapper (`dvbs2_rx_axi`): 21367
+-> 22105 LUTs, 12877 -> 13361 FFs, 98 BRAM tiles and 73 DSPs as before, WNS
++0.82 -> +0.76 ns.
 
 ## Loopback self-test on the board
 

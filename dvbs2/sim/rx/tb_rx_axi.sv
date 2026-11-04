@@ -4,6 +4,8 @@
 //   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall= +hold=
 //   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift= +cicr= +cicshift=
 //                    +tkp= +tki= +tinteg0= +thresh= +pkp= +pki= +maxit= +plscfg= (PLS_CFG, 0: default)
+//                    +llrq=1 (LLRQ_CTRL: through the DDR LLR queue, axi_mem +axistall= +axilat=)
+//                    +llrqcfg= (LLRQ_CFG, 0: default)
 `timescale 1ps/1ps
 module tb_rx_axi;
   logic clk = 0, adc_clk = 0, aresetn = 0;
@@ -19,6 +21,14 @@ module tb_rx_axi;
   logic        tvalid, tready = 0, tlast;
   logic        adc_valid = 0;
   logic [15:0] adc_i, adc_q;
+  logic [31:0] m_axi_awaddr, m_axi_araddr;
+  logic [3:0]  m_axi_awlen, m_axi_arlen, m_axi_awcache, m_axi_arcache;
+  logic [2:0]  m_axi_awsize, m_axi_arsize;
+  logic [1:0]  m_axi_awburst, m_axi_arburst, m_axi_bresp, m_axi_rresp;
+  logic        m_axi_awvalid, m_axi_awready, m_axi_wlast, m_axi_wvalid, m_axi_wready, m_axi_bvalid, m_axi_bready;
+  logic        m_axi_arvalid, m_axi_arready, m_axi_rlast, m_axi_rvalid, m_axi_rready;
+  logic [63:0] m_axi_wdata, m_axi_rdata;
+  logic [7:0]  m_axi_wstrb;
 
   dvbs2_rx_axi #(.LUT_FILE("../../rtl/gen/nco_lut.mem"), .LDPC_ROM_FILE("../../rtl/gen/ldpc_dec_rom.mem"),
                  .PKT_WORDS(1024)) dut (
@@ -29,7 +39,20 @@ module tb_rx_axi;
     .s_axi_araddr(araddr), .s_axi_arvalid(arvalid), .s_axi_arready(arready),
     .s_axi_rdata(rdata), .s_axi_rresp(rresp), .s_axi_rvalid(rvalid), .s_axi_rready(rready),
     .m_axis_tdata(tdata), .m_axis_tvalid(tvalid), .m_axis_tready(tready), .m_axis_tlast(tlast),
-    .adc_clk(adc_clk), .adc_valid(adc_valid), .adc_data_i(adc_i), .adc_data_q(adc_q));
+    .adc_clk(adc_clk), .adc_valid(adc_valid), .adc_data_i(adc_i), .adc_data_q(adc_q), .m_axi_awaddr,
+    .m_axi_awlen, .m_axi_awsize, .m_axi_awburst, .m_axi_awcache, .m_axi_awvalid, .m_axi_awready, .m_axi_wdata,
+    .m_axi_wstrb, .m_axi_wlast, .m_axi_wvalid, .m_axi_wready, .m_axi_bresp, .m_axi_bvalid, .m_axi_bready,
+    .m_axi_araddr, .m_axi_arlen, .m_axi_arsize, .m_axi_arburst, .m_axi_arcache, .m_axi_arvalid,
+    .m_axi_arready, .m_axi_rdata, .m_axi_rresp, .m_axi_rlast, .m_axi_rvalid, .m_axi_rready);
+
+  axi_mem u_mem (
+    .clk, .rst(!aresetn), .awaddr(m_axi_awaddr), .awlen(m_axi_awlen), .awsize(m_axi_awsize),
+    .awburst(m_axi_awburst), .awvalid(m_axi_awvalid), .awready(m_axi_awready),
+    .wdata(m_axi_wdata), .wstrb(m_axi_wstrb), .wlast(m_axi_wlast), .wvalid(m_axi_wvalid), .wready(m_axi_wready),
+    .bresp(m_axi_bresp), .bvalid(m_axi_bvalid), .bready(m_axi_bready),
+    .araddr(m_axi_araddr), .arlen(m_axi_arlen), .arsize(m_axi_arsize), .arburst(m_axi_arburst),
+    .arvalid(m_axi_arvalid), .arready(m_axi_arready), .rdata(m_axi_rdata), .rresp(m_axi_rresp),
+    .rlast(m_axi_rlast), .rvalid(m_axi_rvalid), .rready(m_axi_rready));
 
   // the DUT's awready/wready/arready are high while it is idle
   task automatic axi_write(input logic [7:0] a, input logic [31:0] d);
@@ -96,6 +119,8 @@ module tb_rx_axi;
     axi_write(8'h44, arg("pki", 0));
     axi_write(8'h48, arg("maxit", 30));
     if (arg("plscfg", 0) != 0) axi_write(8'hD4, arg("plscfg", 0));
+    if (arg("llrqcfg", 0) != 0) axi_write(8'hE4, arg("llrqcfg", 0));
+    axi_write(8'hDC, arg("llrq", 0));
     fc = $fopen(fddc, "r");
     axi_write(8'h28, 0);
     for (int a = 0; a < arg("ntaps", 2); a++) begin
@@ -149,7 +174,7 @@ module tb_rx_axi;
     wait (eof);
     wait (idle > 3000000);
     fr = $fopen(fregs, "w");
-    for (int a = 'h50; a <= 'hD8; a += 4) begin
+    for (int a = 'h50; a <= 'hF0; a += 4) begin
       if (a == 'hA8) continue;
       axi_read(8'(a), r);
       $fdisplay(fr, "%02h %08h", a, r);

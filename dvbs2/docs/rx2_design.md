@@ -2,10 +2,11 @@
 
 Status: **final** study and prototypes, 2026-11-04. The carrier buffer fix
 (section 2 item 5) is merged into master (commit 1349130, branch
-`wt/carrier-bram`). Nothing else is integrated. The implementation is a
-separate, later task, which starts once the PLS decoder and the AXI-port
-re-plan have landed. All prototype RTL, tests and OOC runs are in this
-directory (`rx2/`).
+`wt/carrier-bram`). Implementation steps 2 and 3 (section 12) are done on
+branch `wt/rx2-queue`: the per-frame rate and tag through the LDPC and BCH
+decoders, and the DDR LLR queue (`rtl/dvbs2_rx_llrq.sv`), usable today for
+the one slot (section 7.3). All prototype RTL, tests and OOC runs are in
+this directory (`rx2/`).
 
 **Decided by the user (2026-11-04):**
 
@@ -272,7 +273,8 @@ DDR LLR queue:
   staging FIFO, then out in 128-byte AXI bursts to `ring[slot][frame]`.
   Each frame slot is 64 KB (64800 bytes used). The ring has 8..16 frames per
   slot, 2 MB in total, e.g. reserved at 0x3E900000 just below nbiq's buffer
-  at 0x3EB00000.
+  at 0x3EB00000. (Implemented: **0x3E800000**, below the FFT result buffer
+  at 0x3EA00000, which the AXI-port re-plan put at the old place.)
 * Port: its own **HP port** (HP1, freed by removing axi_ad9361_adc_dma;
   64-bit AXI3). Bandwidth is 2 x 2.38 MBd x 2 bytes = 9.5 MB/s, well under
   1 % of the port. S_AXI_GP1 also remains free as a fallback.
@@ -363,6 +365,81 @@ At most 71.5 packets/s of 8 KB, about 0.6 MB/s, so one stream has plenty
 of room. With two slots, the two packet slots in the buffer suffice:
 draining takes about 10 µs, and software keeps 4 transfers queued. A
 second interrupt is not needed (ps-9 as today).
+
+### 7.3 LLR queue: the interface from the front end, as implemented
+
+(Steps 2-3; the agreement for the two-slot carrier of steps 4-5.)
+`rtl/dvbs2_rx_llrq.sv` takes the front end's LLR words on one stream for
+both slots, in the `clk` domain (100 MHz):
+
+| Signal | Width | Meaning |
+| --- | ---: | --- |
+| `s_valid` / `s_ready` | 1 / 1 | a word is taken when both are high |
+| `s_llr_i`, `s_llr_q` | 8 + 8 | the two LLRs of bits 2n and 2n + 1 of the frame (today's carrier output) |
+| `s_first` | 1 | word 0 of a frame |
+| `s_slot` | 1 | the word's slot |
+| `s_modcod`, `s_pilots` | 5 + 1 | the frame's MODCOD and pilots; taken with `s_first` only (QPSK normal frames: the LDPC rate is MODCOD - 1) |
+
+Rules:
+
+* A slot's frame is exactly 32400 words, `s_first` on word 0 (the
+  carrier's `m_first`; `m_last` is not needed). The words of the two slots
+  may interleave in any way, word by word.
+* Frames that are not to be decoded are not sent (as today: frames begun
+  before the acquisition). A frame can only be abandoned by starting the
+  slot's next one (`s_first` before its last word), e.g. after a per-slot
+  reset of the front end. The abandoned frame is not decoded, and the
+  queue needs nothing else for a per-slot reset.
+* `s_ready` may depend on `s_valid`, `s_first` and `s_slot` in the same
+  clock (it drops for an `s_first` that abandons a frame while the queue
+  pads that frame's last burst, up to 16 beats); `s_valid` must not
+  depend on `s_ready`. The queue stalls the front end only when a slot's
+  staging buffer (32 beats = 128 words) is full, i.e. when the DDR write
+  latency exceeds what the 1-word-per-clock bursts of the carrier leave.
+  In simulation: no stall at 2.38 MBd in total with 1440-word bursts and
+  up to 120 clocks memory latency; with the input at nearly one word per
+  clock, 70 % stalls on every AXI channel and up to 400 clocks latency, at
+  most 70 clocks in a row. The timing input FIFO (512 samples) absorbs ~10k
+  clocks.
+
+Towards the decoder the queue sends each frame with its own rate,
+iteration limit (`LDPC_MAX_IT` of its slot) and tag {slot, pilots, MODCOD},
+which the LDPC and BCH decoders carry to the packet header (word 0: MODCOD,
+pilots, bit 55 slot). Without the queue (`LLRQ_CTRL` = 0, the default)
+the carrier feeds the decoder directly, with the configured MODCOD/pilots
+as the tag, as before.
+
+**Validation with one slot:** the queue works for slot 0 of today's
+single-slot receiver. Software writes `LLRQ_CTRL` = 1 (0xDC; it takes effect
+at the next soft reset), then the soft reset (`CTRL` = 2), then enables the
+receiver as usual. The decoded frames are the same as without the queue
+(`test_rx_end_to_end[p_1_2_llrq]`, `test_rx_axi[1]`). `LLRQ_STAT` (0xE8)
+shows the frames passing through DDR and the waiting depth, `LLRQ_DROPPED`
+(0xEC) the frames dropped because the ring was full, `LLRQ_AXI_ERR` (0xF0)
+error responses. The device tree must reserve the region
+(`dvbs2-llr-buffer@3e800000`, `deploy.sh --boot`; `pl-load.sh` warns if it
+does not), otherwise the PL writes into Linux memory. With map v2 (step 6)
+these registers move into the shared bank (0x2DC..0x2F0 suggested).
+
+Registers (today's map, `rtl/dvbs2_rx_axi.sv`): `LLRQ_CTRL` 0xDC [0]
+enable; `LLRQ_BASE` 0xE0 [31:21] (default 0x3E80_0000); `LLRQ_CFG` 0xE4
+[4:0] frames per slot ring (1..16, default 16), [13:8] QHI (default 63,
+no cap), [21:16] MAX_IT_LO (default 10); `LLRQ_STAT` 0xE8; `LLRQ_DROPPED`
+0xEC [15:0] slot 0, [31:16] slot 1; `LLRQ_AXI_ERR` 0xF0. VERSION
+0x0001_0500.
+
+Cost (OOC, 100 MHz): the queue 717 LUTs (250 as distributed RAM), 490
+FFs, **0 BRAM**, 0 DSP, WNS +2.66 ns; `dvbs2_rx_axi` with it +738 LUTs, +484
+FFs, the same 98 BRAM tiles, WNS +0.82 -> +0.76 ns (section 8 estimated
++1300 LUTs and +1.5 tiles). The per-frame rate in the LDPC decoder costs
+nothing measurable (OOC 7559 -> 7326 LUTs, placement noise; +37 FFs).
+Full fishball build with the queue on S_AXI_HP1: 39054 LUTs (73.4 %),
+35724 FFs, 130.5 of 140 BRAM tiles, 139 DSPs, WNS +0.203 ns (before:
+about 37.9k LUTs, 130.5 tiles, 139 DSPs, WNS +0.003 ns).
+
+The iteration cap is evaluated at the end of every iteration: a frame
+already past MAX_IT_LO when the queue grows stops after the iteration in
+progress (it_lo <= iterations < its limit).
 
 ## 8. Resource budget, today vs after
 
@@ -472,8 +549,8 @@ probably a few hundred LUT, no BRAM).
 | --- | --- | --- | --- |
 | 0 | Carrier seg/zbuf as BRAM + the M_HZ2 pipeline stage, on today's single-slot RX; full build. Gives LUT headroom. | 0.5 d | none (can go now, coordinate with the PLS worker) |
 | 1 | Wait for the PLS decoder to merge; re-run the RX tests | n/a | |
-| 2 | LDPC/BCH: rate and {slot, modcod, pilots} per frame; tests | 1 d | 1 |
-| 3 | DDR LLR queue (writer, reader, descriptors, drop counter, iteration cap), HP1 (after the IIO DMA removal), DT reserved-memory; Verilator AXI memory model; tests | 2.5-3 d | 2 |
+| 2 | LDPC/BCH: rate and {slot, modcod, pilots} per frame; tests (**done**, `wt/rx2-queue`) | 1 d | 1 |
+| 3 | DDR LLR queue (writer, reader, descriptors, drop counter, iteration cap), HP1 (after the IIO DMA removal), DT reserved-memory; Verilator AXI memory model; tests (**done**, `wt/rx2-queue`; section 7.3) | 2.5-3 d | 2 |
 | 4 | timing2 production (per-slot reset is in the prototype but untested; coefficient bank addressing; README) | 0.5 d | |
 | 5 | framesync2 / carrier2 from the generators on post-PLS RTL; hand-review the context lists; per-slot reset of the shadow set; tests | 2.5-3 d | 1 |
 | 6 | Second DDC (shared NCO ROM), synchronous input FIFOs, `dvbs2_rx2` core, `dvbs2_rx_axi` map v2, packet slot bit, snapshot slot select; `tb_rx_axi` with 2 signals | 2 d | 3-5 |

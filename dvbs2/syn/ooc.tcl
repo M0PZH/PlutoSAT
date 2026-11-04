@@ -1,6 +1,7 @@
 # Out-of-context implementation of the DVB-S2 cores for resource/timing numbers.
 #   vivado -mode batch -source ooc.tcl [-tclargs <clock MHz> [dvbs2_tx | dvbs2_rx | dvbs2_ldpc_dec |
-#                                                             dvbs2_rx_ddc | dvbs2_rx_axi | dvbs2_rx_pls]]
+#                                                             dvbs2_rx_ddc | dvbs2_rx_axi | dvbs2_rx_pls |
+#                                                             dvbs2_bch_dec | dvbs2_rx_llrq]]
 # The RX wrapper (dvbs2_rx_axi) gets its 100 MHz AXI clock and a 61.44 MHz ADC clock.
 if {[info exists ::env(OOC_THREADS)]} { set_param general.maxThreads $::env(OOC_THREADS) }
 set mhz [expr {[llength $argv] > 0 ? [lindex $argv 0] : 150}]
@@ -25,6 +26,8 @@ if {$top eq "dvbs2_tx"} {
 } elseif {$top eq "dvbs2_ldpc_dec"} {
   synth_design -top $top -part xc7z020clg400-2 -mode out_of_context \
     -generic ROM_FILE=\"[file join $gen ldpc_dec_rom.mem]\"
+} elseif {$top eq "dvbs2_rx_llrq" || $top eq "dvbs2_bch_dec"} {
+  synth_design -top $top -part xc7z020clg400-2 -mode out_of_context
 } elseif {$top eq "dvbs2_rx_axi"} {
   synth_design -top $top -part xc7z020clg400-2 -mode out_of_context \
     -generic LUT_FILE=\"[file join $gen nco_lut.mem]\" \

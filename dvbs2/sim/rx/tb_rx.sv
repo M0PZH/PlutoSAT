@@ -4,6 +4,8 @@
 //   +period=<clocks per input sample> (no backpressure on the input)
 //   +modcod= +pilots= +thresh= +xa= +xb= +tkp= +tki= +tinteg0= +pkp= +pki= +stall=<output %>
 //   +pls=<file> PLS decodes "code conf car grid best second freq" +plsh= +plsstep=
+//   +llrq=1: the LDPC input through the DDR LLR queue (axi_mem: +axistall= +axilat=),
+//   +llrqnfr= +llrqqhi= +llrqitlo=
 `timescale 1ns/1ps
 module tb_rx;
   logic clk = 0, rst = 1;
@@ -52,6 +54,30 @@ module tb_rx;
   logic [31:0] st_pls_seen;
   logic [15:0] st_pls_freq, st_pls_count, st_pls_dcount, st_pls_diff_modcod, st_pls_diff_pilots;
   logic [15:0] st_pls_skipped;
+  logic axi_rst = 1, llrq_en;
+  logic [31:0] llrq_base = 32'h3E80_0000;
+  logic [4:0] llrq_nfr;
+  logic [5:0] llrq_qhi, llrq_it_lo;
+  logic [5:0] st_llrq_depth, st_llrq_depth_max;
+  logic [15:0] st_llrq_frames, st_llrq_dropped0, st_llrq_dropped1, st_llrq_axi_err;
+  logic st_llrq_busy;
+  logic [31:0] m_axi_awaddr, m_axi_araddr;
+  logic [3:0]  m_axi_awlen, m_axi_arlen, m_axi_awcache, m_axi_arcache;
+  logic [2:0]  m_axi_awsize, m_axi_arsize;
+  logic [1:0]  m_axi_awburst, m_axi_arburst, m_axi_bresp, m_axi_rresp;
+  logic        m_axi_awvalid, m_axi_awready, m_axi_wlast, m_axi_wvalid, m_axi_wready, m_axi_bvalid, m_axi_bready;
+  logic        m_axi_arvalid, m_axi_arready, m_axi_rlast, m_axi_rvalid, m_axi_rready;
+  logic [63:0] m_axi_wdata, m_axi_rdata;
+  logic [7:0]  m_axi_wstrb;
+
+  axi_mem u_mem (
+    .clk, .rst(axi_rst), .awaddr(m_axi_awaddr), .awlen(m_axi_awlen), .awsize(m_axi_awsize),
+    .awburst(m_axi_awburst), .awvalid(m_axi_awvalid), .awready(m_axi_awready),
+    .wdata(m_axi_wdata), .wstrb(m_axi_wstrb), .wlast(m_axi_wlast), .wvalid(m_axi_wvalid), .wready(m_axi_wready),
+    .bresp(m_axi_bresp), .bvalid(m_axi_bvalid), .bready(m_axi_bready),
+    .araddr(m_axi_araddr), .arlen(m_axi_arlen), .arsize(m_axi_arsize), .arburst(m_axi_arburst),
+    .arvalid(m_axi_arvalid), .arready(m_axi_arready), .rdata(m_axi_rdata), .rresp(m_axi_rresp),
+    .rlast(m_axi_rlast), .rvalid(m_axi_rvalid), .rready(m_axi_rready));
 
   dvbs2_rx #(.LUT_FILE("../../rtl/gen/nco_lut.mem"), .LDPC_ROM_FILE("../../rtl/gen/ldpc_dec_rom.mem")) dut (
     .in_clk(clk), .in_rst(rst), .clk, .rst, .*);
@@ -95,12 +121,21 @@ module tb_rx;
     if (!$value$plusargs("plsstep=%d", tmp)) tmp = dvbs2_rx_pkg::PLS_STEP_DEFAULT;
     pls_step = 10'(tmp);
     if (!$value$plusargs("pls=%s", fpls)) fpls = "/dev/null";
+    if (!$value$plusargs("llrq=%d", tmp)) tmp = 0;
+    llrq_en = tmp[0];
+    if (!$value$plusargs("llrqnfr=%d", tmp)) tmp = 16;
+    llrq_nfr = 5'(tmp);
+    if (!$value$plusargs("llrqqhi=%d", tmp)) tmp = 63;
+    llrq_qhi = 6'(tmp);
+    if (!$value$plusargs("llrqitlo=%d", tmp)) tmp = 63;
+    llrq_it_lo = 6'(tmp);
     fp = $fopen(fpls, "w");
     fc = $fopen(fcoef, "r");
     fi = $fopen(fin, "r");
     fo = $fopen(fout, "w");
     fb = $fopen(fbytes, "w");
     repeat (4) @(posedge clk);
+    axi_rst <= 0;
     for (int a = 0; a < 1024; a++) begin
       rc = $fscanf(fc, "%h", cv);
       coef_we <= 1; coef_addr <= 10'(a); coef_data <= cv;
@@ -154,12 +189,13 @@ module tb_rx;
                 m_nerr, m_raw_err, m_rate, m_modcod, m_pilots, m_slot);
       n_bytes++;
     end
-    if (m_valid || dut.l_valid || dut.u_ldpc.dst != 0 || !eof) idle = 0;
+    if (m_valid || dut.l_valid || dut.u_ldpc.dst != 0 || st_llrq_busy || !eof) idle = 0;
     else idle++;
     if (eof && idle > 200000) begin
-      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, energy %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, pls %0d skipped %0d, pls hold %0d max %0d, t %0t",
+      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, energy %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, pls %0d skipped %0d, pls hold %0d max %0d, llrq frames %0d dropped %0d depth max %0d axi err %0d, t %0t",
                n_in, in_overflows, n_out, st_frames, st_fs_found, st_fs_flywheel, st_fs_lost,
-               st_agc_gain, $signed(st_freq), st_amp, st_energy, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, st_pls_count, st_pls_skipped, hold_n, hold_max, $time);
+               st_agc_gain, $signed(st_freq), st_amp, st_energy, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, st_pls_count, st_pls_skipped, hold_n, hold_max,
+               st_llrq_frames, st_llrq_dropped0, st_llrq_depth_max, st_llrq_axi_err, $time);
       $fclose(fo);
       $fclose(fb);
       $fclose(fp);

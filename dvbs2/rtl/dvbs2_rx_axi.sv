@@ -14,7 +14,9 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0400: frame sync confirms headers by their PLS decode
+//   0x00 VERSION      RO  0x0001_0500: DDR LLR queue (0xDC..0xF0), the packet header's
+//                         MODCOD/pilots are the frame's own (0x0001_0400: frame sync
+//                         confirms headers by their PLS decode
 //                         (no false lock on repeating frames), acquisition headers
 //                         typed by the frame length, pilots off: no header kicks after
 //                         the acquisition (0x0001_0300: pilots-off carrier tracking and
@@ -93,6 +95,21 @@
 //                         ~1420 clocks per hypothesis (2H + 2 of them) must fit
 //                         between two headers (94k clocks: 2.38 MBd dummy frames)
 //   0xD8 PLS_SKIPPED  RO  [15:0] headers not decoded (decoder still busy), wraps
+//   LLR queue (dvbs2_rx_llrq.sv; docs/rx2_design.md 6.1, 6.2): the carrier's LLR
+//   frames through a ring in DDR (m_axi, S_AXI_HP1) to the LDPC decoder, as slot 0
+//   0xDC LLRQ_CTRL    RW  [0] enable; takes effect at the next soft reset (CTRL[1]);
+//                         reads [0] as written, [1] in effect
+//   0xE0 LLRQ_BASE    RW  [31:21] ring region, 2 MB aligned (default 0x3E80_0000, the
+//                         device tree's dvbs2-llr-buffer): slot s frame f at base +
+//                         s * 1 MB + f * 64 KB
+//   0xE4 LLRQ_CFG     RW  [4:0] frames per slot ring (1..16, default 16), [13:8] QHI
+//                         (default 63: no cap), [21:16] MAX_IT_LO (default 10): while
+//                         more than QHI frames wait, frames stop at MAX_IT_LO iterations
+//   0xE8 LLRQ_STAT    RO  [5:0] frames waiting (complete in DDR + the one being read),
+//                         [13:8] the most since reset, [31:16] frames through the ring
+//   0xEC LLRQ_DROPPED RO  frames dropped because the ring was full: [15:0] slot 0,
+//                         [31:16] slot 1
+//   0xF0 LLRQ_AXI_ERR RO  [15:0] AXI error responses (SLVERR/DECERR)
 
 module dvbs2_rx_axi #(
   parameter string LUT_FILE      = "nco_lut.mem",
@@ -127,7 +144,36 @@ module dvbs2_rx_axi #(
   input  logic        adc_clk,
   input  logic        adc_valid,
   input  logic [15:0] adc_data_i,
-  input  logic [15:0] adc_data_q
+  input  logic [15:0] adc_data_q,
+
+  // LLR queue: AXI3 master, 64 bits, ID 0 (S_AXI_HP1)
+  output logic [31:0] m_axi_awaddr,
+  output logic [3:0]  m_axi_awlen,
+  output logic [2:0]  m_axi_awsize,
+  output logic [1:0]  m_axi_awburst,
+  output logic [3:0]  m_axi_awcache,
+  output logic        m_axi_awvalid,
+  input  logic        m_axi_awready,
+  output logic [63:0] m_axi_wdata,
+  output logic [7:0]  m_axi_wstrb,
+  output logic        m_axi_wlast,
+  output logic        m_axi_wvalid,
+  input  logic        m_axi_wready,
+  input  logic [1:0]  m_axi_bresp,
+  input  logic        m_axi_bvalid,
+  output logic        m_axi_bready,
+  output logic [31:0] m_axi_araddr,
+  output logic [3:0]  m_axi_arlen,
+  output logic [2:0]  m_axi_arsize,
+  output logic [1:0]  m_axi_arburst,
+  output logic [3:0]  m_axi_arcache,
+  output logic        m_axi_arvalid,
+  input  logic        m_axi_arready,
+  input  logic [63:0] m_axi_rdata,
+  input  logic [1:0]  m_axi_rresp,
+  input  logic        m_axi_rlast,
+  input  logic        m_axi_rvalid,
+  output logic        m_axi_rready
 );
 
   wire clk = s_axi_aclk;
@@ -152,6 +198,10 @@ module dvbs2_rx_axi #(
   logic [9:0]  pls_step;
   logic [31:0] pls_seen_clr;
   logic [31:0] t_integ0;
+  logic        llrq_ctrl, llrq_en;
+  logic [10:0] llrq_base;
+  logic [4:0]  llrq_nfr;
+  logic [5:0]  llrq_qhi, llrq_it_lo;
 
   logic [3:0] srst_cnt;
   logic       core_rst;
@@ -162,6 +212,7 @@ module dvbs2_rx_axi #(
     else if (ctrl[1])       srst_cnt <= '1;
     else if (srst_cnt != 0) srst_cnt <= srst_cnt - 1'b1;
     core_rst <= !aresetn_q || ctrl[1] || (srst_cnt != 0);
+    if (core_rst) llrq_en <= llrq_ctrl;     // the LLR queue path changes only at a reset
   end
 
   logic        aw_hold, w_hold;
@@ -199,6 +250,9 @@ module dvbs2_rx_axi #(
       snap_src <= 1'b0;
       pls_h <= dvbs2_rx_pkg::PLS_H_DEFAULT;
       pls_step <= dvbs2_rx_pkg::PLS_STEP_DEFAULT;
+      llrq_ctrl <= 1'b0;
+      llrq_base <= 11'(32'h3E80_0000 >> 21);
+      llrq_nfr <= 5'd16; llrq_qhi <= 6'd63; llrq_it_lo <= 6'd10;
     end else begin
       if (s_axi_awvalid && s_axi_awready) begin aw_hold <= 1'b1; awaddr_q <= s_axi_awaddr; end
       if (s_axi_wvalid && s_axi_wready)   begin w_hold  <= 1'b1; wdata_q  <= s_axi_wdata;  end
@@ -228,6 +282,9 @@ module dvbs2_rx_axi #(
           6'h29: begin snap_ra_we <= 1'b1; snap_ra_d <= wdata_q[9:0]; end
           6'h34: pls_seen_clr <= wdata_q;
           6'h35: begin pls_h <= wdata_q[5:0]; pls_step <= wdata_q[25:16]; end
+          6'h37: llrq_ctrl <= wdata_q[0];
+          6'h38: llrq_base <= wdata_q[31:21];
+          6'h39: begin llrq_nfr <= wdata_q[4:0]; llrq_qhi <= wdata_q[13:8]; llrq_it_lo <= wdata_q[21:16]; end
           default: ;
         endcase
       end
@@ -286,6 +343,8 @@ module dvbs2_rx_axi #(
   logic [17:0] pls_best, pls_second;
   logic [31:0] pls_seen;
   logic [15:0] pls_freq, pls_count, pls_dcount, pls_diff_m, pls_diff_p, pls_skipped;
+  logic [5:0]  llrq_depth, llrq_depth_max;
+  logic [15:0] llrq_frames, llrq_drop0, llrq_drop1, llrq_axi_err;
 
   dvbs2_rx #(.LUT_FILE(LUT_FILE), .LDPC_ROM_FILE(LDPC_ROM_FILE)) u_rx (
     .in_clk(clk), .in_rst(core_rst), .in_valid(d_valid), .in_i(d_i), .in_q(d_q), .in_overflows(in_ovf),
@@ -307,7 +366,16 @@ module dvbs2_rx_axi #(
     .st_pls_second(pls_second), .st_pls_freq(pls_freq), .st_pls_count(pls_count),
     .st_pls_dcode(pls_dcode), .st_pls_dflags(pls_dflags), .st_pls_dcount(pls_dcount),
     .st_pls_diff_modcod(pls_diff_m), .st_pls_diff_pilots(pls_diff_p),
-    .st_pls_seen(pls_seen), .st_pls_skipped(pls_skipped));
+    .st_pls_seen(pls_seen), .st_pls_skipped(pls_skipped),
+    .axi_rst(!aresetn_q), .llrq_en, .llrq_base({llrq_base, 21'd0}), .llrq_nfr, .llrq_qhi, .llrq_it_lo,
+    .st_llrq_depth(llrq_depth), .st_llrq_depth_max(llrq_depth_max), .st_llrq_frames(llrq_frames),
+    .st_llrq_dropped0(llrq_drop0), .st_llrq_dropped1(llrq_drop1), .st_llrq_axi_err(llrq_axi_err),
+    .st_llrq_busy(),
+    .m_axi_awaddr, .m_axi_awlen, .m_axi_awsize, .m_axi_awburst, .m_axi_awcache, .m_axi_awvalid,
+    .m_axi_awready, .m_axi_wdata, .m_axi_wstrb, .m_axi_wlast, .m_axi_wvalid, .m_axi_wready,
+    .m_axi_bresp, .m_axi_bvalid, .m_axi_bready, .m_axi_araddr, .m_axi_arlen, .m_axi_arsize,
+    .m_axi_arburst, .m_axi_arcache, .m_axi_arvalid, .m_axi_arready, .m_axi_rdata, .m_axi_rresp,
+    .m_axi_rlast, .m_axi_rvalid, .m_axi_rready);
 
   // {MODCOD, short, pilots} + {valid, grid, carrier, confident} -> PLS_LAST / PLS_DATA fields
   function automatic logic [15:0] pls_word(input logic [6:0] c, input logic [3:0] fl);
@@ -503,7 +571,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0400;
+          6'h00: s_axi_rdata <= 32'h0001_0500;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};
@@ -555,6 +623,12 @@ module dvbs2_rx_axi #(
           6'h34: s_axi_rdata <= pls_seen;
           6'h35: s_axi_rdata <= {6'd0, pls_step, 10'd0, pls_h};
           6'h36: s_axi_rdata <= {16'd0, pls_skipped};
+          6'h37: s_axi_rdata <= {30'd0, llrq_en, llrq_ctrl};
+          6'h38: s_axi_rdata <= {llrq_base, 21'd0};
+          6'h39: s_axi_rdata <= {10'd0, llrq_it_lo, 2'd0, llrq_qhi, 3'd0, llrq_nfr};
+          6'h3A: s_axi_rdata <= {llrq_frames, 2'd0, llrq_depth_max, 2'd0, llrq_depth};
+          6'h3B: s_axi_rdata <= {llrq_drop1, llrq_drop0};
+          6'h3C: s_axi_rdata <= {16'd0, llrq_axi_err};
           default: s_axi_rdata <= '0;
         endcase
       end

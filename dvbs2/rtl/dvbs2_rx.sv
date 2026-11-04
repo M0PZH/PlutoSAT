@@ -9,10 +9,17 @@
 // has no backpressure; samples arriving with the FIFO full are dropped and
 // counted. dvbs2_rx_pls decodes the PLS code of every PLHEADER: status, and
 // the frame sync's header confirmation (frame type, loss of lock).
+//
+// LLR queue (LLRQ = 1, dvbs2_rx_llrq, docs/rx2_design.md 6.1): with llrq_en
+// the carrier's LLR frames go through a ring in DDR (m_axi) to the LDPC
+// decoder, as slot 0 (the path of the second receive slot, testable with
+// one); without, straight to the decoder as before. Either way the decoded
+// frames are the same.
 
 module dvbs2_rx #(
   parameter string LUT_FILE = "nco_lut.mem",
-  parameter string LDPC_ROM_FILE = "ldpc_dec_rom.mem"
+  parameter string LDPC_ROM_FILE = "ldpc_dec_rom.mem",
+  parameter bit    LLRQ = 1'b1               // include the LLR queue
 ) (
   input  logic               in_clk,
   input  logic               in_rst,
@@ -42,6 +49,13 @@ module dvbs2_rx #(
   input  logic [5:0]         pls_h,        // PLS decoder grid -H..H
   input  logic [9:0]         pls_step,     // ... step, turns * 2^16 per symbol
   input  logic [31:0]        pls_seen_clr, // w1c of st_pls_seen
+  // LLR queue (static, change under rst); axi_rst: the AXI bus reset
+  input  logic               axi_rst,
+  input  logic               llrq_en,
+  input  logic [31:0]        llrq_base,    // 2 MB aligned
+  input  logic [4:0]         llrq_nfr,     // frames per slot ring, 1..16
+  input  logic [5:0]         llrq_qhi,     // iteration cap while more than qhi frames wait
+  input  logic [5:0]         llrq_it_lo,   // ... at it_lo iterations
 
   output logic               m_valid,
   input  logic               m_ready,
@@ -100,7 +114,45 @@ module dvbs2_rx #(
   output logic [15:0]        st_pls_diff_modcod,
   output logic [15:0]        st_pls_diff_pilots,
   output logic [31:0]        st_pls_seen,
-  output logic [15:0]        st_pls_skipped
+  output logic [15:0]        st_pls_skipped,
+
+  // LLR queue status
+  output logic [5:0]         st_llrq_depth,
+  output logic [5:0]         st_llrq_depth_max,
+  output logic [15:0]        st_llrq_frames,
+  output logic [15:0]        st_llrq_dropped0,
+  output logic [15:0]        st_llrq_dropped1,
+  output logic [15:0]        st_llrq_axi_err,
+  output logic               st_llrq_busy,
+
+  // LLR queue: AXI3 master, 64 bits (Zynq S_AXI_HP1)
+  output logic [31:0]        m_axi_awaddr,
+  output logic [3:0]         m_axi_awlen,
+  output logic [2:0]         m_axi_awsize,
+  output logic [1:0]         m_axi_awburst,
+  output logic [3:0]         m_axi_awcache,
+  output logic               m_axi_awvalid,
+  input  logic               m_axi_awready,
+  output logic [63:0]        m_axi_wdata,
+  output logic [7:0]         m_axi_wstrb,
+  output logic               m_axi_wlast,
+  output logic               m_axi_wvalid,
+  input  logic               m_axi_wready,
+  input  logic [1:0]         m_axi_bresp,
+  input  logic               m_axi_bvalid,
+  output logic               m_axi_bready,
+  output logic [31:0]        m_axi_araddr,
+  output logic [3:0]         m_axi_arlen,
+  output logic [2:0]         m_axi_arsize,
+  output logic [1:0]         m_axi_arburst,
+  output logic [3:0]         m_axi_arcache,
+  output logic               m_axi_arvalid,
+  input  logic               m_axi_arready,
+  input  logic [63:0]        m_axi_rdata,
+  input  logic [1:0]         m_axi_rresp,
+  input  logic               m_axi_rlast,
+  input  logic               m_axi_rvalid,
+  output logic               m_axi_rready
 );
 
   logic w_ready;
@@ -167,6 +219,71 @@ module dvbs2_rx #(
   assign snap_t_i = t_i;
   assign snap_t_q = t_q;
 
+  // ---------------------------------------------------------------- LLR queue
+  // d_*: the decoder's input, from the carrier or from the queue (slot 0)
+  logic       d_valid, d_ready, d_first;
+  logic [7:0] d_i, d_q;
+  logic [3:0] d_rate;
+  logic [5:0] d_max_it;
+  logic [7:0] d_tag;
+  logic       cap_en;
+  logic [5:0] cap;
+
+  if (LLRQ) begin : g_llrq
+    logic       q_valid, q_ready, q_first, q_slot, q_pilots;
+    logic [7:0] q_i, q_q;
+    logic [3:0] q_rate;
+    logic [5:0] q_max_it;
+    logic [4:0] q_modcod;
+
+    dvbs2_rx_llrq u_llrq (
+      .clk, .arst(axi_rst), .rst, .en(llrq_en), .base(llrq_base), .nfr(llrq_nfr),
+      .max_it0(ldpc_max_it), .max_it1(ldpc_max_it), .qhi(llrq_qhi), .it_lo(llrq_it_lo),
+      .s_valid(llrq_en && l_valid), .s_ready(q_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
+      .s_slot(1'b0), .s_modcod(modcod), .s_pilots(pilots),
+      .m_valid(q_valid), .m_ready(llrq_en && d_ready), .m_llr_i(q_i), .m_llr_q(q_q), .m_first(q_first),
+      .m_rate(q_rate), .m_max_it(q_max_it), .m_slot(q_slot), .m_modcod(q_modcod), .m_pilots(q_pilots),
+      .it_cap_en(cap_en), .it_cap(cap),
+      .st_depth(st_llrq_depth), .st_depth_max(st_llrq_depth_max), .st_frames(st_llrq_frames),
+      .st_dropped0(st_llrq_dropped0), .st_dropped1(st_llrq_dropped1), .st_axi_err(st_llrq_axi_err),
+      .st_busy(st_llrq_busy),
+      .m_axi_awaddr, .m_axi_awlen, .m_axi_awsize, .m_axi_awburst, .m_axi_awcache, .m_axi_awvalid,
+      .m_axi_awready, .m_axi_wdata, .m_axi_wstrb, .m_axi_wlast, .m_axi_wvalid, .m_axi_wready,
+      .m_axi_bresp, .m_axi_bvalid, .m_axi_bready, .m_axi_araddr, .m_axi_arlen, .m_axi_arsize,
+      .m_axi_arburst, .m_axi_arcache, .m_axi_arvalid, .m_axi_arready, .m_axi_rdata, .m_axi_rresp,
+      .m_axi_rlast, .m_axi_rvalid, .m_axi_rready);
+
+    assign l_ready  = llrq_en ? q_ready : d_ready;
+    assign d_valid  = llrq_en ? q_valid : l_valid;
+    assign d_i      = llrq_en ? q_i : l_i;
+    assign d_q      = llrq_en ? q_q : l_q;
+    assign d_first  = llrq_en ? q_first : l_first;
+    assign d_rate   = llrq_en ? q_rate : 4'(modcod - 5'd1);
+    assign d_max_it = llrq_en ? q_max_it : ldpc_max_it;
+    assign d_tag    = llrq_en ? {1'b0, q_slot, q_pilots, q_modcod} : {2'b00, pilots, modcod};
+  end else begin : g_no_llrq
+    assign l_ready  = d_ready;
+    assign d_valid  = l_valid;
+    assign d_i      = l_i;
+    assign d_q      = l_q;
+    assign d_first  = l_first;
+    assign d_rate   = 4'(modcod - 5'd1);
+    assign d_max_it = ldpc_max_it;
+    assign d_tag    = {2'b00, pilots, modcod};
+    assign cap_en   = 1'b0;
+    assign cap      = '0;
+    assign {st_llrq_depth, st_llrq_depth_max, st_llrq_frames, st_llrq_dropped0, st_llrq_dropped1,
+            st_llrq_axi_err, st_llrq_busy} = '0;
+    assign {m_axi_awaddr, m_axi_awlen, m_axi_awvalid, m_axi_wdata, m_axi_wlast, m_axi_wvalid,
+            m_axi_araddr, m_axi_arlen, m_axi_arvalid} = '0;
+    assign m_axi_awsize = 3'd3; assign m_axi_arsize = 3'd3;
+    assign m_axi_awburst = 2'd1; assign m_axi_arburst = 2'd1;
+    assign m_axi_awcache = 4'b0011; assign m_axi_arcache = 4'b0011;
+    assign m_axi_wstrb = 8'hFF;
+    assign m_axi_bready = 1'b1; assign m_axi_rready = 1'b1;
+  end
+
+  // ---------------------------------------------------------------- LDPC, BCH
   // per-frame tag through the LDPC and BCH decoders: {0, slot, pilots, MODCOD}
   logic       c_valid, c_ready, c_last, c_ok;   // LDPC -> BCH
   logic [7:0] c_data, c_chan;
@@ -176,9 +293,9 @@ module dvbs2_rx #(
 
   dvbs2_ldpc_dec #(.ROM_FILE(LDPC_ROM_FILE)) u_ldpc (
     .clk, .rst,
-    .s_valid(l_valid), .s_ready(l_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
-    .s_rate(4'(modcod - 5'd1)), .s_max_it(ldpc_max_it), .s_tag({2'b00, pilots, modcod}),
-    .it_cap_en(1'b0), .it_cap(6'd0),
+    .s_valid(d_valid), .s_ready(d_ready), .s_llr_i(d_i), .s_llr_q(d_q), .s_first(d_first),
+    .s_rate(d_rate), .s_max_it(d_max_it), .s_tag(d_tag),
+    .it_cap_en(cap_en), .it_cap(cap),
     .m_valid(c_valid), .m_ready(c_ready), .m_data(c_data), .m_last(c_last), .m_ok(c_ok), .m_iters(c_iters), .m_chan(c_chan),
     .m_rate(c_rate), .m_tag(c_tag),
     .st_frames(st_ldpc_frames), .st_failed(st_ldpc_failed));

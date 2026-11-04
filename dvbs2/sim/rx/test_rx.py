@@ -281,7 +281,8 @@ def test_carrier_pilotless_pn(carrier_exe, esn0, seed):
 RX_SOURCES = ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv", "gen/dvbs2_ldpc_dec_pkg.sv",
               "dvbs2_async_fifo.sv", "dvbs2_rx_timing.sv", "dvbs2_rx_framesync.sv", "dvbs2_rx_rot.sv",
               "dvbs2_rx_cordic.sv", "dvbs2_udiv.sv", "dvbs2_rx_carrier.sv", "dvbs2_ldpc_dec.sv",
-              "gen/dvbs2_bch_pkg.sv", "dvbs2_bch_dec.sv", "dvbs2_rx_pls.sv", "dvbs2_rx.sv"]
+              "gen/dvbs2_bch_pkg.sv", "dvbs2_bch_dec.sv", "dvbs2_rx_pls.sv", "dvbs2_rx_llrq.sv", "dvbs2_rx.sv",
+              os.path.join(HERE, "axi_mem.sv")]
 
 
 @pytest.fixture(scope="module")
@@ -299,16 +300,20 @@ def write_coefs(path, coefs):
 @pytest.mark.parametrize("name,kw", [
     ("p_1_2", dict(rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0)),
     ("np_3_4", dict(rate_idx=6, pilots=False, esn0=6.0, cfo=-0.002, ppm=-80.0, rms=400.0)),
+    ("p_1_2_llrq", dict(rate_idx=3, pilots=True, esn0=3.0, cfo=0.004, ppm=60.0, llrq=1)),
 ])
 def test_rx_end_to_end(rx_exe, name, kw):
     """Samples -> RTL receiver: the LLRs equal the front-end model, the
     BBFRAMEs equal the LDPC model and the transmitted BBFRAMEs, and
-    gr-dvbs2rx's LDPC/BCH decodes the RTL's LLRs to the same frames."""
+    gr-dvbs2rx's LDPC/BCH decodes the RTL's LLRs to the same frames.
+    llrq: the decoder's input through the DDR LLR queue (memory model with
+    stalls and latency): the same result."""
     import ldpcdec as ld
     import rxmodel as rf
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
     kw = dict(kw)
+    llrq = kw.pop("llrq", 0)
     rate_idx, pilots = kw["rate_idx"], kw["pilots"]
     x, bb = signal(nframes=4, lead=8, **kw)
     r = fx.receive(x, rate_idx + 1, pilots)
@@ -325,9 +330,11 @@ def test_rx_end_to_end(rx_exe, name, kw):
     log = rxsim.run(rx_exe, coef=cfile, period=22, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
                     thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
                     pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes, pls=fpls,
-                    **{"in": fin, "out": fout})
+                    llrq=llrq, axistall=30, axilat=200, **{"in": fin, "out": fout})
     print(log)
     assert "overflows 0," in log
+    if llrq:
+        assert "llrq frames 4 dropped 0 depth max 1 axi err 0," in log
     # PLS decodes: equal to the model, every confident one right
     got_p = [tuple(int(v, 16) for v in l.split()) for l in open(fpls)]
     want_p = [pls_line(d) for d in r["pls"].results]
@@ -707,10 +714,13 @@ def rx_axi_exe():
                                                   os.path.join(HERE, "tb_rx_axi.sv")])
 
 
-def test_rx_axi(rx_axi_exe):
+@pytest.mark.parametrize("llrq", [0, 1])
+def test_rx_axi(rx_axi_exe, llrq):
     """ADC-rate samples (6 per symbol, carrier offset partly removed by the
     DDC NCO) through the register-configured wrapper: every DMA packet
-    carries a transmitted BBFRAME, equal to the model chain."""
+    carries a transmitted BBFRAME, equal to the model chain. llrq = 1: the
+    same through the DDR LLR queue (LLRQ_CTRL, memory model with stalls and
+    latency), the LLRQ registers counting the frames."""
     import bchdec
     import grref
     import ldpcdec as ld
@@ -774,13 +784,17 @@ def test_rx_axi(rx_axi_exe):
     log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=20,
                     modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc, dec=dec,
                     ntaps=len(dcoef), shift=shift, tkp=kp, tki=ki, thresh=fx.fs_threshold(),
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout})
+                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, llrq=llrq, axistall=30, axilat=200,
+                    **{"in": fin, "out": fout})
     print(log)
     lines = [l.split() for l in open(fregs)]
     regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
     snap_got = [int(v, 16) for a, v in lines if a.startswith("s")]
     print({hex(k): v for k, v in regs.items()})
     assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
+    assert regs[0] == 0x0001_0500 and regs[0xE0] == 0x3E80_0000 and regs[0xE4] == 0x000A3F10
+    assert regs[0xDC] == 3 * llrq and regs[0xEC] == 0 and regs[0xF0] == 0
+    assert regs[0xE8] >> 16 == llrq * len(want) and regs[0xE8] & 0x3F == 0      # LLRQ_STAT
     check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots)
     # error counters and the constellation snapshot
     print("raw BER", raw_err / max(raw_bits, 1), "BCH bits", bch_bits)
@@ -820,7 +834,7 @@ def check_pls_regs(regs, lines, pls, modcod, pilots):
     st = pls.status()
     last = st["last"]
     print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
-    assert regs[0x00] == 0x00010400
+    assert regs[0x00] == 0x00010500
     assert regs[0xB8] == pls_word(last, st["count"])
     assert regs[0xBC] == pls_word(st["data"], st["data_count"])
     assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
