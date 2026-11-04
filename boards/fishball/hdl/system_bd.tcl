@@ -10,7 +10,7 @@
 ## PS-PL AXI ports (boards/fishball/README.md, "AXI ports"):
 ##   M_AXI_GP0  all AXI-Lite registers        M_AXI_GP1  spare
 ##   S_AXI_HP0  reserved: future IQ transmit DMA (memory -> DAC)
-##   S_AXI_HP1  reserved: second DATV receiver's LDPC LLR frame queue
+##   S_AXI_HP1  DATV receiver's LDPC LLR frame queue (dvbs2_rx m_axi, 64-bit)
 ##   S_AXI_HP2  nbiq ring writer (64-bit)
 ##   S_AXI_HP3  FFT result DMA (64-bit)
 ##   S_AXI_GP0  DVB-S2 RX DMA (32-bit)       S_AXI_GP1  DVB-S2 TX DMA (32-bit)
@@ -383,6 +383,17 @@ ad_connect sys_cpu_resetn axi_dvbs2_rx_dma/m_dest_axi_aresetn
 
 ad_cpu_interconnect 0x7C490000 axi_dvbs2_rx_dma
 ad_cpu_interconnect 0x7C510000 dvbs2_rx
+
+# the receiver's LLR frame queue (dvbs2_rx_llrq: DDR rings, 2 MB reserved at
+# 0x3E800000 by the device tree) on S_AXI_HP1 (64-bit, read and write)
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP1 {1}
+ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {64}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_HP1_ACLK
+ad_connect dvbs2_rx/m_axi sys_ps7/S_AXI_HP1
+create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
+                    [get_bd_addr_spaces dvbs2_rx/m_axi] \
+                    [get_bd_addr_segs sys_ps7/S_AXI_HP1/HP1_DDR_LOWOCM] \
+                    SEG_sys_ps7_HP1_DDR_LOWOCM
 ad_cpu_interrupt ps-9 mb-9 axi_dvbs2_rx_dma/irq
 
 # Narrowband IQ channels (nbiq/): 5 x (NCO, CIC, FIR) from either receive

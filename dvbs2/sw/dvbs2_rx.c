@@ -85,6 +85,13 @@
 #define R_PLS_SEEN      0xD0
 #define R_PLS_CFG       0xD4
 #define R_PLS_SKIPPED   0xD8
+#define R_LLRQ_CTRL     0xDC     /* LLR queue (core >= VERSION_LLRQ) */
+#define R_LLRQ_BASE     0xE0
+#define R_LLRQ_CFG      0xE4
+#define R_LLRQ_STAT     0xE8
+#define R_LLRQ_DROPPED  0xEC
+#define R_LLRQ_AXI_ERR  0xF0
+#define LLRQ_BYTES      0x200000 /* the rings: 2 slots x 16 frames x 64 KB */
 #define PLS_CONF        (1u << 12)
 #define PLS_CARRIER     (1u << 13)
 #define PLS_VALID       (1u << 15)
@@ -124,6 +131,7 @@
 #define CORE_CLK 100e6           /* sys_cpu_clk */
 #define VERSION_CIC 0x00010100   /* first core version with the CIC (DDC_CIC) */
 #define VERSION_PLS 0x00010200   /* first core version with the PLS decoder */
+#define VERSION_LLRQ 0x00010500  /* first core version with the DDR LLR queue */
 
 static volatile uint32_t *regs, *dmac;
 static uint8_t *dmabuf;
@@ -192,6 +200,22 @@ static void iio_set(int dev, const char *attr, const char *val)
 	snprintf(path, sizeof(path), "/sys/bus/iio/devices/iio:device%d/%s", dev, attr);
 	if (write_file(path, val))
 		fprintf(stderr, "warning: cannot set %s = %s\n", path, val);
+}
+
+/* address and size of a UIO map, -1 if the device has no such map */
+static int uio_map_info(int uio, int map, uint32_t *phys, size_t *size)
+{
+	char path[256], buf[64];
+
+	snprintf(path, sizeof(path), "/sys/class/uio/uio%d/maps/map%d/size", uio, map);
+	if (read_file(path, buf, sizeof(buf)))
+		return -1;
+	*size = strtoul(buf, NULL, 0);
+	snprintf(path, sizeof(path), "/sys/class/uio/uio%d/maps/map%d/addr", uio, map);
+	if (read_file(path, buf, sizeof(buf)))
+		return -1;
+	*phys = strtoul(buf, NULL, 0);
+	return 0;
 }
 
 static void *uio_map(int uio, int fd, int map, uint32_t *phys, size_t *size)
@@ -457,6 +481,7 @@ static const char *pls_names[32] = {
 };
 
 static int has_pls;                 /* core version >= VERSION_PLS */
+static int llrq;                    /* --llr-queue */
 
 static void usage(const char *p)
 {
@@ -495,7 +520,10 @@ static void usage(const char *p)
 		"      --detect-timeout S  seconds (default 30)\n"
 		"      --pls-grid H     PLS decoder frequency hypotheses -H..H x 0.004 cycles/symbol\n"
 		"                       (default 32; 2H + 2 hypotheses x ~14 us must fit in a\n"
-		"                       dummy frame, 3330 symbols)\n", p);
+		"                       dummy frame, 3330 symbols)\n"
+		"      --llr-queue      decode through the DDR LLR queue (the second receive slot's\n"
+		"                       path; the same frames; needs the device tree's 2 MB\n"
+		"                       dvbs2-llr-buffer, map3 of the UIO device)\n", p);
 	exit(2);
 }
 
@@ -514,6 +542,13 @@ static void status(int rate_idx, int pilots, double sr, unsigned long ts_pkts, s
 		else
 			snprintf(pls, sizeof(pls), ", PLS -");
 	}
+	/* LLR queue: frames through DDR, waiting (most), dropped, AXI errors */
+	char lq[64] = "";
+	if (llrq) {
+		uint32_t q = rd(regs, R_LLRQ_STAT);
+		snprintf(lq, sizeof(lq), ", LLRQ %u/%u(%u)/%u/%u", q >> 16, q & 0x3F, (q >> 8) & 0x3F,
+			 rd(regs, R_LLRQ_DROPPED) & 0xFFFF, rd(regs, R_LLRQ_AXI_ERR) & 0xFFFF);
+	}
 	static const char *st[4] = { "search", "check", "locked", "?" };
 	double amp = rd(regs, R_AMP), en = (double)rd(regs, R_ENERGY) * 16;
 	double snr = en > amp * amp ? 10 * log10(amp * amp / (en - amp * amp)) : 99;
@@ -526,13 +561,13 @@ static void status(int rate_idx, int pilots, double sr, unsigned long ts_pkts, s
 	double ber_post = nb > 0 ? (uint32_t)(bch - bch0) / nb : NAN;
 	raw0 = raw; bits0 = bits; bch0 = bch;
 	fprintf(stderr, "\r%s %s, %+.0f Hz, Es/N0 %.1f dB, BER %.2e (after LDPC %.1e), AGC %.2f, frames %u (LDPC failed %u, BCH corrected %u failed %u, dropped %u), "
-		"TS %lu (CRC %lu, bad %lu), fs %u/%u/%u, acq %u fa %u retype %u, ovf %u%s   ",
+		"TS %lu (CRC %lu, bad %lu), fs %u/%u/%u, acq %u fa %u retype %u, ovf %u%s%s   ",
 		modcods[rate_idx], st[rd(regs, R_FS_STATE) & 3], f, snr, ber_pre, ber_post, rd(regs, R_AGC_GAIN) / 4096.0,
 		rd(regs, R_LDPC_FRAMES), rd(regs, R_LDPC_FAILED), rd(regs, R_BCH) & 0xFFFF, rd(regs, R_BCH) >> 16,
 		rd(regs, R_PKT_DROPPED),
 		ts_pkts, d->crc_errors, bad, rd(regs, R_FS_FOUND), rd(regs, R_FS_FLYWHEEL),
 		rd(regs, R_FS_LOST), rd(regs, R_CARRIER_ACQ) & 0xFFFF, rd(regs, R_CARRIER_ACQ) >> 16,
-		rd(regs, R_CARRIER_RETYPE), rd(regs, R_IN_OVF) + rd(regs, R_DDC_DROPPED), pls);
+		rd(regs, R_CARRIER_RETYPE), rd(regs, R_IN_OVF) + rd(regs, R_DDC_DROPPED), pls, lq);
 }
 
 /* --detect. The PLS decoder decodes every header the frame sync tags, but
@@ -684,7 +719,7 @@ int main(int argc, char **argv)
 		{ "output", 1, 0, 'O' }, { "quiet", 0, 0, 'q' }, { "no-iio", 0, 0, 'n' },
 		{ "dump-coefs", 0, 0, 1 }, { "constellation", 1, 0, 'C' }, { "constellation-raw", 0, 0, 2 },
 		{ "adc-rate", 1, 0, 'F' }, { "detect", 0, 0, 3 }, { "detect-count", 1, 0, 4 },
-		{ "detect-timeout", 1, 0, 5 }, { "pls-grid", 1, 0, 6 },
+		{ "detect-timeout", 1, 0, 5 }, { "pls-grid", 1, 0, 6 }, { "llr-queue", 0, 0, 7 },
 		{ 0, 0, 0, 0 },
 	};
 	for (int c; (c = getopt_long(argc, argv, "s:d:m:pr:g:f:o:G:S:I:u:O:qnC:F:", lo, NULL)) != -1;) {
@@ -719,6 +754,7 @@ int main(int argc, char **argv)
 		case 4: det_count = atoi(optarg); break;
 		case 5: det_timeout = atof(optarg); break;
 		case 6: pls_h = atoi(optarg); break;
+		case 7: llrq = 1; break;
 		default: usage(argv[0]);
 		}
 	}
@@ -818,6 +854,24 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* the LLR queue writes into its DDR region: only with the region reserved */
+	int has_llrq = rd(regs, R_VERSION) >= VERSION_LLRQ;
+	if (llrq) {
+		uint32_t qa;
+		size_t qs;
+		if (!has_llrq) {
+			fprintf(stderr, "--llr-queue needs the LLR queue (core version %08x < %08x: old bitstream)\n",
+				rd(regs, R_VERSION), VERSION_LLRQ);
+			return 1;
+		}
+		if (uio_map_info(uio, 3, &qa, &qs) || qs < LLRQ_BYTES || (qa & (LLRQ_BYTES - 1))) {
+			fprintf(stderr, "--llr-queue: the device tree reserves no 2 MB LLR queue buffer "
+				"(dvbs2-rx map3; deploy.sh --boot)\n");
+			return 1;
+		}
+		wr(regs, R_LLRQ_BASE, qa);
+	}
+
 	if (!no_iio) {
 		int phy = find_by_name("/sys/bus/iio/devices", "iio:device", "ad9361-phy");
 		char v[64];
@@ -870,6 +924,8 @@ int main(int argc, char **argv)
 	wr(regs, R_LDPC_MAX_IT, max_it);
 	if (pls_h >= 0)
 		wr(regs, R_PLS_CFG, pls_h | (262u << 16));
+	if (has_llrq)
+		wr(regs, R_LLRQ_CTRL, llrq);        /* in effect from the soft reset below */
 
 	wr(dmac, DMAC_CONTROL, 0);
 	wr(dmac, DMAC_IRQ_MASK, 0x3);
@@ -986,6 +1042,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "\n");
 	fprintf(stderr, "dvbs2-rx: %lu TS packets, %lu BBFRAMEs, %lu bad/failed, %lu lost, %lu CRC errors\n",
 		out.packets, d.frames, bad, lost, d.crc_errors);
+	if (llrq)
+		fprintf(stderr, "dvbs2-rx: LLR queue: %u frames, at most %u waiting, %u dropped, %u AXI errors\n",
+			rd(regs, R_LLRQ_STAT) >> 16, (rd(regs, R_LLRQ_STAT) >> 8) & 0x3F,
+			rd(regs, R_LLRQ_DROPPED) & 0xFFFF, rd(regs, R_LLRQ_AXI_ERR) & 0xFFFF);
 	wr(regs, R_CTRL, 0);
 	wr(dmac, DMAC_CONTROL, 0);
 	return 0;

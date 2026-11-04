@@ -30,7 +30,7 @@ drivers create no IIO buffer then); the devicetrees in `linux/` and from
 | M_AXI_GP0 | all AXI-Lite registers (`axi_ad9361`, the PlutoSAT cores, their DMAs, SPI, I2C) | 32 |
 | M_AXI_GP1 | spare | |
 | S_AXI_HP0 | reserved: future IQ transmit DMA (memory -> DAC, up to 12 MS/s IQ, narrow- or wideband) | 64 |
-| S_AXI_HP1 | reserved: the second DATV receiver's LDPC LLR frame queue (DDR ring, ~20 MB/s read + write, ~2 MB) | 64 |
+| S_AXI_HP1 | DVB-S2 RX LDPC LLR frame queue `dvbs2_rx` `m_axi` (DDR rings, 2 MB @ 0x3E800000, up to ~20 MB/s read + write; used when LLRQ_CTRL enables it) | 64 |
 | S_AXI_HP2 | `nbiq` ring writer (`DW` 64), 5 channels into 4 MB @ 0x3EB00000 | 64 |
 | S_AXI_HP3 | FFT result DMA `axi_fft_dma` (stream -> memory, 0x7C4A0000, 1 MB @ 0x3EA00000) | 64 |
 | S_AXI_GP0 | DVB-S2 RX DMA `axi_dvbs2_rx_dma` (stream -> memory, 0x7C490000) | 32 |

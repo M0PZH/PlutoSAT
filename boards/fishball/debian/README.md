@@ -18,7 +18,7 @@ What it changes:
 | `/lib/firmware/plutosat.bit.bin` | the PL design (`build/system_top.bit` in FPGA-manager format) |
 | `/usr/local/sbin/plutosat-pl-load` | loads it at run time: unbinds the ADI drivers on the PL (ADC core, DDS core, I2C), programs the PL, binds them again |
 | `/usr/local/bin/` | `dvbs2-tx`, `dvbs2-rx`, `nbiq`, `rx-awgn`, `ts-prbs`, `dvbs2-selftest`, built on the board (Debian's glibc is older than buildroot's) |
-| `devicetree.dtb` (`--boot`) | + reserved memory for the DMA buffers (top 22 MB of RAM), + UIO nodes for the cores, - the IIO streaming DMAs (`dtb-add-plutosat.py`) |
+| `devicetree.dtb` (`--boot`) | + reserved memory for the DMA buffers and the LLR queue (top 24 MB of RAM), + UIO nodes for the cores, - the IIO streaming DMAs (`dtb-add-plutosat.py`) |
 | `uEnv.txt` (`--boot`) | + `uio_pdrv_genirq.of_id=generic-uio` on the bootargs |
 
 `--boot` keeps the original boot files on the card as `*.pre-plutosat`;

@@ -147,8 +147,9 @@
 
 /* DVB-S2 transmitter and receiver (dvbs2/): registers, their axi_dmac and
  * uncached buffers at the top of RAM (16 MB TX, 1 MB RX; 4 MB for nbiq,
- * 1 MB for the FFT result DMA), exported to user
- * space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
+ * 1 MB for the FFT result DMA, 2 MB for the receiver's LDPC LLR frame
+ * queue, which only the PL uses: dvbs2_rx_llrq on S_AXI_HP1), exported to
+ * user space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
  * uio_pdrv_genirq.of_id=generic-uio on the command line. */
 / {
 	reserved-memory {
@@ -175,6 +176,11 @@
 			reg = <0x3ea00000 0x00100000>;
 			no-map;
 		};
+
+		dvbs2_llr_buffer: dvbs2-llr-buffer@3e800000 {
+			reg = <0x3e800000 0x00200000>;
+			no-map;
+		};
 	};
 };
 
@@ -192,7 +198,8 @@
 		compatible = "generic-uio";
 		reg = <0x7c510000 0x10000>,     /* dvbs2_rx registers */
 		      <0x7c490000 0x10000>,     /* axi_dmac (BBFRAME packets, stream -> memory) */
-		      <0x3ef00000 0x00100000>;  /* DMA buffer */
+		      <0x3ef00000 0x00100000>,  /* DMA buffer */
+		      <0x3e800000 0x00200000>;  /* LLR queue rings (LLRQ_BASE; PL only) */
 		interrupt-parent = <&intc>;
 		interrupts = <0 53 IRQ_TYPE_LEVEL_HIGH>;
 	};
