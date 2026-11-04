@@ -35,6 +35,14 @@ WA = 9               # APP L
 WQ = 9               # Q = L - R
 RMAX = 63            # check message magnitude
 MAX_IT = 30
+# Channel LLR clip at the decoder input. A check sends at most RMAX - OFFSET
+# = 62, so a channel LLR beyond that can never be overruled where few checks
+# vote: a degree-1 (the last parity bit) or degree-2 (parity) variable whose
+# channel LLR is wrong at full scale (an impulse at high SNR, where the LLR
+# gain makes every |LLR| 127) stays wrong, and the frame does not converge
+# (BCH then finds no error: only parity bits are wrong). At 61 every variable
+# can be corrected; at the waterfall |LLR| > 61 is rare (mean 8 Es/N0).
+LCH = 61
 
 
 def sat(a, w):
@@ -90,7 +98,7 @@ class Decoder:
         """llr: 64800 int8 (codeword order). Returns (hard bits 64800, iterations,
         converged)."""
         c = self.code
-        L = sat(np.asarray(llr, np.int64)[self.pos], WA)        # (groups, 360)
+        L = np.clip(np.asarray(llr, np.int64)[self.pos], -LCH, LCH)   # (groups, 360)
         q = c.q
         # compressed check state per layer: arrays over t (360)
         m1 = [np.zeros(360, np.int64) for _ in range(q)]
@@ -197,7 +205,8 @@ def write_rtl_tables(gen_dir=None):
          f"  localparam int LD_S = {S};",
          f"  localparam int LD_ROM_DEPTH = {len(rom)};",
          f"  localparam int LD_RMAX = {RMAX};",
-         f"  localparam int LD_OFFSET = {OFFSET};"]
+         f"  localparam int LD_OFFSET = {OFFSET};",
+         f"  localparam int LD_LCH = {LCH};"]
     for name, k in (("BASE", 0), ("Q", 1), ("NG", 2), ("DEG", 3), ("KBCH", 4), ("KLDPC", 5)):
         L.append(f"  localparam logic [15:0] LD_{name} [11] = '{{" +
                  ", ".join(f"16'd{r[k]}" for r in rows) + "};")

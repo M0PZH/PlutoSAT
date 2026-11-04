@@ -243,6 +243,23 @@ of a failed frame are in the hundreds. The BCH decoder adds ~n/8 + Kbch/4 +
 500 clocks per frame after its input, during which the LDPC output waits.
 `dvbs2-rx` keeps the frames that are BCH codewords.
 
+The decoder clips the channel LLRs to +-61 on input (`LD_LCH`,
+`model/ldpcdec.py` `LCH`). A check message is at most 62 (6 bit, offset 1),
+and above ~12 dB Es/N0 the LLR gain makes every |LLR| 127 (`LLR_GAIN`
+saturated): a bit that an impulse turns wrong at full scale could then never
+be corrected where only one or two checks vote, i.e. on the parity bits
+(degree 2, the last one degree 1). Such a frame ran all iterations, counted
+in LDPC_FAILED, and BCH found no error (its info bits were right). On the RF
+cable loop in the 2.4 GHz band (802.11 beacons every 102.4 ms leaking into
+the receiver) that was one frame every few seconds at 27 dB Es/N0. With the
+clip, one wrong bit or symbol anywhere in a saturated frame converges in 2-3
+iterations (`test_ldpc_saturated`); near the threshold (mean |LLR| = 8 Es/N0
+LSBs) nothing changes: 60 frames each at 2/3 (3.0-3.4 dB), 9/10 (6.3-6.7 dB)
+and 1/2 (1.0-1.2 dB) fail and iterate the same with and without it. Longer
+bursts in the parity part (the zig-zag chain) still need not converge
+(random full-scale signs over 1/2/3/5/8 symbols: 16/13/8/6/0 of 16 frames
+converge, 0-1 of 16 without the clip); their info bits stay right.
+
 ### Pilots off
 
 Without pilots the carrier phase between two PLHEADERs (32490 symbols)
