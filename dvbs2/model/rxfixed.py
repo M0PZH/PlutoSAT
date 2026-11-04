@@ -692,6 +692,7 @@ class Carrier:
         self.n_dummy = 0            # dummy body blocks used
         self.dth = 0
         self.log = []
+        self.pls = None             # PlsDecoder fed with the input symbols (detection only)
 
     # ---- output ------------------------------------------------------------
     def _llr(self, buf, y):
@@ -799,6 +800,9 @@ class Carrier:
         return self.frames
 
     def step(self, si, sq, t, found=0):
+        if self.pls is not None:
+            # the decoder taps the carrier's input (state before this symbol)
+            self.pls.step(si, sq, t, self.fhat, self.acquired)
         self.upd = 0
         if t:
             self.prev_ok = self.ap is not None and self.since == self.L[self.ap[1]] and found == 1
@@ -980,18 +984,229 @@ class Carrier:
 
 
 # ---------------------------------------------------------------------------
+# PLS decoder (detection only): MODCOD, frame size and pilots of every header
+# ---------------------------------------------------------------------------
+#
+# It taps the carrier's input (the frame sync output, tag on the first
+# header symbol) and changes nothing in the receive path. The 90 header
+# symbols are stored as r = sat6(s >> 9) (per axis RMS 8 at the AGC target)
+# and decoded after the 90th (the next header is >= 3330 symbols away):
+#
+#   x_k = r_k * conj(h0_k) * sqrt2           h0: the PLHEADER of PLS code 0,
+#                                            i.e. SOF, PLS scrambling, pi/2
+#   per frequency hypothesis f (turns * 2^16 per symbol):
+#     y_k = rnd(x_k * (C[n_k] - j S[n_k]), 9),  C, S = 256 cos, sin(2 pi n / 64),
+#           n_k = rnd(phi_k, 10) mod 64, phi_k = k f mod 2^16
+#     S   = sum_{k < 26} y_k                 (SOF)
+#     Y_j = y_(26 + j), j = 0..63            (PLS; pair i = j >> 1)
+#     pass q = 0..15 (bits 0..3 of a = the bit-reversed MODCOD), b6 = pilots:
+#       P1, P2 = sum over j < 32 / j >= 32 of (-1)^(parity(i & q) ^ (b6 & j)) Y_j
+#       a4 = bit 4 of a (the 16-pair halves), b5 = short frame (all pairs):
+#         T = S + (-1)^b5 (P1 + (-1)^a4 P2),  M = (Ti^2 + Tq^2) >> 8
+#   M ~ |sum_k conj(c_k) y_k|^2 over the 90 symbols of codeword c: the
+#   maximum-likelihood decision for an unknown carrier phase (constant over
+#   the header, i.e. a known frequency).
+#
+# Hypotheses: the carrier's frequency (fhat >> 16, if it has
+# acquired) first; if that gives the configured PLS code or the dummy code
+# with confidence, the decode ends there. Otherwise the grid h * step,
+# h = -H..H, around 0 (the DDC frequency): the frequency must be known to
+# ~+-0.002 cycles/symbol, which the carrier gets only with the right
+# MODCOD and pilots (with the wrong ones it acquires a wrong frequency), so
+# a detection without it needs the grid. Result: the first maximum (order:
+# hypothesis, q, b6, a4, b5), second = the largest metric of another code
+# at the same hypothesis (another code at another frequency gets ~1/2 of a
+# noiseless header's metric, at the same frequency <= 0.18), confident =
+# best > 2 x second and best > 2^8. The carrier hypothesis ends the
+# decode when its code is the configured or the dummy one and best > 2^8.
+# At low SNR a wrong code at a wrong grid frequency can win with a large
+# metric (3e-4 of the headers at -2.4 dB with H = 32): such errors look
+# confident, so a detection should want a few equal decodes in a row.
+
+PLS_RB = 9                  # header symbols: sat6(s >> 9)
+PLS_PHB = 6                 # rotation phases 2^6
+PLS_H_DEFAULT = 32          # grid -32..32 x 0.004 = +-0.128 cycles/symbol
+PLS_STEP_DEFAULT = 262      # 0.004 turns/symbol * 2^16
+PLS_CONF_SH = 1             # confident: best > second << 1 ...
+PLS_MIN_SH = 8              # ... and best > 2^8 (AGC level: a header at -3 dB Es/N0
+                            # gives >= ~300, noise alone the largest of 128 x 65 <= ~220)
+PLS_SOF = 26
+PLS_C = [round(256 * math.cos(2 * math.pi * n / (1 << PLS_PHB))) for n in range(1 << PLS_PHB)]
+PLS_S = [round(256 * math.sin(2 * math.pi * n / (1 << PLS_PHB))) for n in range(1 << PLS_PHB)]
+PLS_H0 = m.plheader_bits(0, False)          # SOF + PLSC scrambling sequence
+
+
+def rev5(v):
+    return int(f"{v & 31:05b}"[::-1], 2)
+
+
+def pls_code(modcod, short, pilots):
+    """7-bit PLS code: MODCOD << 2 | short frame << 1 | pilots."""
+    return (modcod << 2) | (int(short) << 1) | int(pilots)
+
+
+def _pls_tables():
+    j = np.arange(64)
+    sg = np.empty((16, 2, 64), np.int64)
+    for q in range(16):
+        for b6 in range(2):
+            par = np.array([bin((jj >> 1) & q).count("1") & 1 for jj in j])
+            sg[q, b6] = 1 - 2 * (par ^ (b6 & j & 1))
+    codes = np.empty((16, 2, 2, 2), np.int64)               # q, b6, a4, b5
+    for q in range(16):
+        for b6 in range(2):
+            for a4 in range(2):
+                for b5 in range(2):
+                    codes[q, b6, a4, b5] = pls_code(rev5(q | (a4 << 4)), b5, b6)
+    return sg, codes.reshape(-1)
+
+
+_PLS_SG, _PLS_CODES = _pls_tables()
+_PLS_CA = np.array(PLS_C, np.int64)
+_PLS_SA = np.array(PLS_S, np.int64)
+_PLS_K = np.arange(90, dtype=np.int64)
+
+
+def pls_quant(s):
+    """Header symbol (16-bit I or Q) -> 6 bit."""
+    return sat(int(s) >> PLS_RB, 6)
+
+
+def pls_strip(r):
+    """x_k = r_k * conj(h0_k) * sqrt2 (r: (90, 2) 6-bit values)."""
+    r = np.asarray(r, np.int64)
+    ri, rq = r[:, 0], r[:, 1]
+    ev = (_PLS_K & 1) == 0
+    xi = np.where(ev, ri + rq, rq - ri)
+    xq = np.where(ev, rq - ri, -ri - rq)
+    sg = 1 - 2 * np.array(PLS_H0, np.int64)
+    return xi * sg, xq * sg
+
+
+def pls_metrics(r, freqs):
+    """Metrics (len(freqs), 128) in decoding order (codes: _PLS_CODES) of the
+    stored header r (90 x 2) for the frequency hypotheses (turns * 2^16)."""
+    xi, xq = pls_strip(r)
+    f = np.asarray(freqs, np.int64).reshape(-1, 1)
+    ph = (_PLS_K[None, :] * f) & 0xFFFF
+    n = ((ph + (1 << (15 - PLS_PHB))) >> (16 - PLS_PHB)) & ((1 << PLS_PHB) - 1)
+    c, s = _PLS_CA[n], _PLS_SA[n]
+    yi = (xi * c + xq * s + 256) >> 9
+    yq = (xq * c - xi * s + 256) >> 9
+    Si = yi[:, :PLS_SOF].sum(1)
+    Sq = yq[:, :PLS_SOF].sum(1)
+    Yi, Yq = yi[:, PLS_SOF:], yq[:, PLS_SOF:]
+    # P[h, q, b6, half]
+    P1i = np.einsum("qbj,hj->hqb", _PLS_SG[:, :, :32], Yi[:, :32])
+    P1q = np.einsum("qbj,hj->hqb", _PLS_SG[:, :, :32], Yq[:, :32])
+    P2i = np.einsum("qbj,hj->hqb", _PLS_SG[:, :, 32:], Yi[:, 32:])
+    P2q = np.einsum("qbj,hj->hqb", _PLS_SG[:, :, 32:], Yq[:, 32:])
+    sg = np.array([1, -1])
+    # T[h, q, b6, a4, b5] = S + s5 (P1 + s4 P2)
+    Ti = Si[:, None, None, None, None] + sg[None, None, None, None, :] * (
+        P1i[:, :, :, None, None] + sg[None, None, None, :, None] * P2i[:, :, :, None, None])
+    Tq = Sq[:, None, None, None, None] + sg[None, None, None, None, :] * (
+        P1q[:, :, :, None, None] + sg[None, None, None, :, None] * P2q[:, :, :, None, None])
+    return ((Ti * Ti + Tq * Tq) >> 8).reshape(len(f), 128)
+
+
+def pls_select(mets):
+    """mets (hypotheses, 128) -> (best, index, second): the first maximum,
+    and the largest metric of another code at the same hypothesis (the
+    RTL's running update gives the same)."""
+    mets = np.asarray(mets)
+    lb = mets.max(1)
+    h = int(np.argmax(lb))
+    row = mets[h]
+    c = int(np.argmax(row))
+    return int(row[c]), h * 128 + c, int(np.delete(row, c).max())
+
+
+def pls_confident(best, second):
+    return best > (second << PLS_CONF_SH) and best > (1 << PLS_MIN_SH)
+
+
+def pls_decode(r, fhat=0, acquired=False, cfg_code=None, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT):
+    """Decode one stored header r (90 x 2, 6-bit values). Returns a dict."""
+    hyps = []
+    if acquired:
+        hyps.append((fhat >> 16) & 0xFFFF)
+    grid = [(h * step) & 0xFFFF for h in range(-H, H + 1)]
+    mets = np.zeros((0, 128), np.int64)
+    used = []
+    grid_used = True
+    if acquired:
+        mets = pls_metrics(r, hyps)
+        used = list(hyps)
+        best, bi, second = pls_select(mets)
+        c = int(_PLS_CODES[bi])
+        if best > (1 << PLS_MIN_SH) and (c == cfg_code or c == 0):
+            grid_used = False
+    if grid_used:
+        mets = np.vstack([mets, pls_metrics(r, grid)])
+        used += grid
+    best, bi, second = pls_select(mets)
+    c = int(_PLS_CODES[bi % 128])
+    f = used[bi // 128]
+    return dict(code=c, modcod=c >> 2, short=(c >> 1) & 1, pilots=c & 1, best=best, second=second,
+                conf=pls_confident(best, second), freq=f - 65536 if f >= 32768 else f,
+                carrier_hyp=acquired and bi < 128, grid=grid_used, nhyp=len(used))
+
+
+class PlsDecoder:
+    """Streaming PLS decoder (see above); results in self.results."""
+
+    def __init__(self, modcod, pilots, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT):
+        self.cfg = (modcod, int(pilots))
+        self.H, self.step_ = H, step
+        self.buf = None
+        self.results = []
+
+    def step(self, si, sq, t, fhat, acquired):
+        if t:
+            self.buf = []
+            self.f0, self.acq = fhat, acquired
+        if self.buf is not None:
+            self.buf.append((pls_quant(si), pls_quant(sq)))
+            if len(self.buf) == 90:
+                d = pls_decode(self.buf, self.f0, self.acq, pls_code(self.cfg[0], 0, self.cfg[1]),
+                               self.H, self.step_)
+                self.results.append(d)
+                self.buf = None
+
+    def status(self, upto=None):
+        """The RTL's status registers after the first `upto` decodes."""
+        res = self.results[:upto]
+        st = dict(count=len(res), data_count=0, diff_modcod=0, diff_pilots=0, seen=0,
+                  last=res[-1] if res else None, data=None)
+        for d in res:
+            if not d["conf"]:
+                continue
+            if d["modcod"] != 0:
+                st["data"] = d
+                st["data_count"] += 1
+                st["diff_modcod"] += (d["modcod"], d["short"]) != (self.cfg[0], 0)
+                st["diff_pilots"] += d["pilots"] != self.cfg[1]
+            if not d["short"]:
+                st["seen"] |= 1 << d["modcod"]
+        return st
+
+
+# ---------------------------------------------------------------------------
 # whole receiver
 # ---------------------------------------------------------------------------
 
-def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None):
+def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None):
+    """pls: dict(H=, step=) of the PLS decoder (default: the defaults)."""
     bw = TIMING_BW if bw is None else bw
     kp, ki = timing_gains(bw)
     tr = Timing(timing_coefs(rolloff), kp, ki)
     sym = tr.run(x)
     fs = FrameSync(modcod, pilots)
     cr = Carrier(modcod, pilots, gold)
+    cr.pls = PlsDecoder(modcod, pilots, **(pls or {}))
     tags, nout = fs.run(sym, cr)
-    return dict(sym=sym, tags=tags[:nout], frames=cr.frames, timing=tr, fs=fs, carrier=cr)
+    return dict(sym=sym, tags=tags[:nout], frames=cr.frames, timing=tr, fs=fs, carrier=cr, pls=cr.pls)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1242,12 @@ def write_rx_pkg(path=None):
               f"  localparam logic signed [31:0] FA_STEP = 32'sd{FA_STEP};",
               f"  localparam logic signed [35:0] FA_AVG_CLAMP = 36'sd{FA_AVG_CLAMP};",
               f"  localparam logic [26:0] DUMMY_K = 27'd{DUMMY_K};",
+              f"  localparam logic [5:0] PLS_H_DEFAULT = 6'd{PLS_H_DEFAULT};",
+              f"  localparam logic [9:0] PLS_STEP_DEFAULT = 10'd{PLS_STEP_DEFAULT};",
+              "  // PLS decoder rotation table {-256 sin, 256 sin, 256 cos} (10 bit each)",
+              "  localparam logic [29:0] PLS_TAB [64] = '{" + ", ".join(
+                  f"30'h{((-s & 1023) << 20) | ((s & 1023) << 10) | (c & 1023):08x}"
+                  for c, s in zip(PLS_C, PLS_S)) + "};",
               "endpackage", ""]
     with open(path, "w") as f:
         f.write("\n".join(lines))

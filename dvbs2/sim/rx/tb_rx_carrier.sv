@@ -14,6 +14,7 @@ module tb_rx_carrier;
   logic s_sof, s_dummy, s_found;
   logic ty_v, ty_dummy;
   logic [15:0] st_acq, st_fa, st_retype;
+  logic st_acquired;
   logic snap_v;
   logic signed [15:0] snap_i, snap_q;
   logic m_valid, m_ready = 0;

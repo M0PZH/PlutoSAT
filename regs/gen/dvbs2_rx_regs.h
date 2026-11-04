@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00010100u
+#define DVBS2_RX_VERSION_VALUE 0x00010200u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -30,7 +30,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0100 = 1.1 (1.0: no CIC, DDC_CIC reads 0) */
+/* VERSION (ro): Core version, 0x0001_0200 = 1.2 (1.1: no PLS decoder, 0xB8..0xD8 read 0; 1.0: no CIC, DDC_CIC reads 0) */
 #define DVBS2_RX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -273,6 +273,116 @@
 #define DVBS2_RX_RAW_BITS 0x0B0
 /* BCH_BITERR (ro): Bit errors corrected by BCH (post-LDPC errors), wraps */
 #define DVBS2_RX_BCH_BITERR 0x0B4
+/* PLS_LAST (ro): PLS decoder: the last decoded PLHEADER (data or dummy) */
+#define DVBS2_RX_PLS_LAST 0x0B8
+/*   [4:0] MODCOD: MODCOD (0 = dummy frame) */
+#define DVBS2_RX_PLS_LAST_MODCOD_SHIFT 0
+#define DVBS2_RX_PLS_LAST_MODCOD_WIDTH 5
+#define DVBS2_RX_PLS_LAST_MODCOD_MASK 0x0000001Fu
+/*   [8] PILOTS: Pilots on */
+#define DVBS2_RX_PLS_LAST_PILOTS_SHIFT 8
+#define DVBS2_RX_PLS_LAST_PILOTS_WIDTH 1
+#define DVBS2_RX_PLS_LAST_PILOTS_MASK 0x00000100u
+/*   [9] SHORT: Short frame */
+#define DVBS2_RX_PLS_LAST_SHORT_SHIFT 9
+#define DVBS2_RX_PLS_LAST_SHORT_WIDTH 1
+#define DVBS2_RX_PLS_LAST_SHORT_MASK 0x00000200u
+/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
+#define DVBS2_RX_PLS_LAST_CONF_SHIFT 12
+#define DVBS2_RX_PLS_LAST_CONF_WIDTH 1
+#define DVBS2_RX_PLS_LAST_CONF_MASK 0x00001000u
+/*   [13] CARRIER: Decided at the carrier's frequency */
+#define DVBS2_RX_PLS_LAST_CARRIER_SHIFT 13
+#define DVBS2_RX_PLS_LAST_CARRIER_WIDTH 1
+#define DVBS2_RX_PLS_LAST_CARRIER_MASK 0x00002000u
+/*   [14] GRID: The frequency grid was searched */
+#define DVBS2_RX_PLS_LAST_GRID_SHIFT 14
+#define DVBS2_RX_PLS_LAST_GRID_WIDTH 1
+#define DVBS2_RX_PLS_LAST_GRID_MASK 0x00004000u
+/*   [15] VALID: A decode since reset */
+#define DVBS2_RX_PLS_LAST_VALID_SHIFT 15
+#define DVBS2_RX_PLS_LAST_VALID_WIDTH 1
+#define DVBS2_RX_PLS_LAST_VALID_MASK 0x00008000u
+/*   [31:16] COUNT: Decodes (wraps) */
+#define DVBS2_RX_PLS_LAST_COUNT_SHIFT 16
+#define DVBS2_RX_PLS_LAST_COUNT_WIDTH 16
+#define DVBS2_RX_PLS_LAST_COUNT_MASK 0xFFFF0000u
+/* PLS_DATA (ro): PLS decoder: the last confident decode of a data header (MODCOD != 0) */
+#define DVBS2_RX_PLS_DATA 0x0BC
+/*   [4:0] MODCOD: MODCOD (0 = dummy frame) */
+#define DVBS2_RX_PLS_DATA_MODCOD_SHIFT 0
+#define DVBS2_RX_PLS_DATA_MODCOD_WIDTH 5
+#define DVBS2_RX_PLS_DATA_MODCOD_MASK 0x0000001Fu
+/*   [8] PILOTS: Pilots on */
+#define DVBS2_RX_PLS_DATA_PILOTS_SHIFT 8
+#define DVBS2_RX_PLS_DATA_PILOTS_WIDTH 1
+#define DVBS2_RX_PLS_DATA_PILOTS_MASK 0x00000100u
+/*   [9] SHORT: Short frame */
+#define DVBS2_RX_PLS_DATA_SHORT_SHIFT 9
+#define DVBS2_RX_PLS_DATA_SHORT_WIDTH 1
+#define DVBS2_RX_PLS_DATA_SHORT_MASK 0x00000200u
+/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
+#define DVBS2_RX_PLS_DATA_CONF_SHIFT 12
+#define DVBS2_RX_PLS_DATA_CONF_WIDTH 1
+#define DVBS2_RX_PLS_DATA_CONF_MASK 0x00001000u
+/*   [13] CARRIER: Decided at the carrier's frequency */
+#define DVBS2_RX_PLS_DATA_CARRIER_SHIFT 13
+#define DVBS2_RX_PLS_DATA_CARRIER_WIDTH 1
+#define DVBS2_RX_PLS_DATA_CARRIER_MASK 0x00002000u
+/*   [14] GRID: The frequency grid was searched */
+#define DVBS2_RX_PLS_DATA_GRID_SHIFT 14
+#define DVBS2_RX_PLS_DATA_GRID_WIDTH 1
+#define DVBS2_RX_PLS_DATA_GRID_MASK 0x00004000u
+/*   [15] VALID: A decode since reset */
+#define DVBS2_RX_PLS_DATA_VALID_SHIFT 15
+#define DVBS2_RX_PLS_DATA_VALID_WIDTH 1
+#define DVBS2_RX_PLS_DATA_VALID_MASK 0x00008000u
+/*   [31:16] COUNT: Confident data decodes (wraps) */
+#define DVBS2_RX_PLS_DATA_COUNT_SHIFT 16
+#define DVBS2_RX_PLS_DATA_COUNT_WIDTH 16
+#define DVBS2_RX_PLS_DATA_COUNT_MASK 0xFFFF0000u
+/* PLS_FREQ (ro): Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ */
+#define DVBS2_RX_PLS_FREQ 0x0C0
+/* PLS_BEST (ro): Metric of the best code of the last decode */
+#define DVBS2_RX_PLS_BEST 0x0C4
+/*   [17:0] METRIC: A header at -3 dB gives >= ~300, noise alone <= ~220 */
+#define DVBS2_RX_PLS_BEST_METRIC_SHIFT 0
+#define DVBS2_RX_PLS_BEST_METRIC_WIDTH 18
+#define DVBS2_RX_PLS_BEST_METRIC_MASK 0x0003FFFFu
+/* PLS_SECOND (ro): Metric of the best other code at the same frequency */
+#define DVBS2_RX_PLS_SECOND 0x0C8
+/*   [17:0] METRIC: Metric */
+#define DVBS2_RX_PLS_SECOND_METRIC_SHIFT 0
+#define DVBS2_RX_PLS_SECOND_METRIC_WIDTH 18
+#define DVBS2_RX_PLS_SECOND_METRIC_MASK 0x0003FFFFu
+/* PLS_DIFF (ro): Confident data decodes that differ from the configuration (wrap) */
+#define DVBS2_RX_PLS_DIFF 0x0CC
+/*   [15:0] MODCOD: MODCOD or frame size differs from the configured one */
+#define DVBS2_RX_PLS_DIFF_MODCOD_SHIFT 0
+#define DVBS2_RX_PLS_DIFF_MODCOD_WIDTH 16
+#define DVBS2_RX_PLS_DIFF_MODCOD_MASK 0x0000FFFFu
+/*   [31:16] PILOTS: Pilots differ from the configured setting */
+#define DVBS2_RX_PLS_DIFF_PILOTS_SHIFT 16
+#define DVBS2_RX_PLS_DIFF_PILOTS_WIDTH 16
+#define DVBS2_RX_PLS_DIFF_PILOTS_MASK 0xFFFF0000u
+/* PLS_SEEN (w1c): Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins */
+#define DVBS2_RX_PLS_SEEN 0x0D0
+/* PLS_CFG (rw): PLS frequency grid searched when the carrier's frequency gives no confident decode */
+#define DVBS2_RX_PLS_CFG 0x0D4
+/*   [5:0] H: Grid half width: hypotheses h x STEP, h = -H..H (reset 32) */
+#define DVBS2_RX_PLS_CFG_H_SHIFT 0
+#define DVBS2_RX_PLS_CFG_H_WIDTH 6
+#define DVBS2_RX_PLS_CFG_H_MASK 0x0000003Fu
+/*   [25:16] STEP: Grid step, turns x 2^16 per symbol (reset 262, ~0.004) */
+#define DVBS2_RX_PLS_CFG_STEP_SHIFT 16
+#define DVBS2_RX_PLS_CFG_STEP_WIDTH 10
+#define DVBS2_RX_PLS_CFG_STEP_MASK 0x03FF0000u
+/* PLS_SKIPPED (ro): Headers not decoded because the decoder was still busy */
+#define DVBS2_RX_PLS_SKIPPED 0x0D8
+/*   [15:0] COUNT: Headers (wraps) */
+#define DVBS2_RX_PLS_SKIPPED_COUNT_SHIFT 0
+#define DVBS2_RX_PLS_SKIPPED_COUNT_WIDTH 16
+#define DVBS2_RX_PLS_SKIPPED_COUNT_MASK 0x0000FFFFu
 
 /* DMA packet word HDR (64 bits): Word 0 of a DMA packet (64-bit words, byte 0 = [7:0]); BBFRAME bytes (BB-descrambled) from byte 8, then zeros */
 /*   [15:0] LEN: BBFRAME length in bytes (Kbch/8) */

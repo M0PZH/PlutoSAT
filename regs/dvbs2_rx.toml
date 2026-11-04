@@ -8,7 +8,7 @@ title = "DVB-S2 receiver"
 uio = "dvbs2-rx"
 size = 0x10000
 id = { offset = 0x04, value = 0x44565232 }        # "DVR2"
-version = { offset = 0x00, value = 0x00010100 }
+version = { offset = 0x00, value = 0x00010200 }
 rtl = "dvbs2/rtl/dvbs2_rx_axi.sv"
 maps = ["regs", "dmac", "buffer"]
 
@@ -61,7 +61,7 @@ doc = "Symbols per constellation snapshot"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0100 = 1.1 (1.0: no CIC, DDC_CIC reads 0)"
+doc = "Core version, 0x0001_0200 = 1.2 (1.1: no PLS decoder, 0xB8..0xD8 read 0; 1.0: no CIC, DDC_CIC reads 0)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -488,6 +488,152 @@ name = "BCH_BITERR"
 offset = 0xB4
 access = "ro"
 doc = "Bit errors corrected by BCH (post-LDPC errors), wraps"
+
+[[reg]]
+name = "PLS_LAST"
+offset = 0xB8
+access = "ro"
+doc = "PLS decoder: the last decoded PLHEADER (data or dummy)"
+  [[reg.field]]
+  name = "MODCOD"
+  bits = [0, 4]
+  doc = "MODCOD (0 = dummy frame)"
+  [[reg.field]]
+  name = "PILOTS"
+  bits = [8, 8]
+  doc = "Pilots on"
+  [[reg.field]]
+  name = "SHORT"
+  bits = [9, 9]
+  doc = "Short frame"
+  [[reg.field]]
+  name = "CONF"
+  bits = [12, 12]
+  doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
+  [[reg.field]]
+  name = "CARRIER"
+  bits = [13, 13]
+  doc = "Decided at the carrier's frequency"
+  [[reg.field]]
+  name = "GRID"
+  bits = [14, 14]
+  doc = "The frequency grid was searched"
+  [[reg.field]]
+  name = "VALID"
+  bits = [15, 15]
+  doc = "A decode since reset"
+  [[reg.field]]
+  name = "COUNT"
+  bits = [16, 31]
+  doc = "Decodes (wraps)"
+
+[[reg]]
+name = "PLS_DATA"
+offset = 0xBC
+access = "ro"
+doc = "PLS decoder: the last confident decode of a data header (MODCOD != 0)"
+  [[reg.field]]
+  name = "MODCOD"
+  bits = [0, 4]
+  doc = "MODCOD (0 = dummy frame)"
+  [[reg.field]]
+  name = "PILOTS"
+  bits = [8, 8]
+  doc = "Pilots on"
+  [[reg.field]]
+  name = "SHORT"
+  bits = [9, 9]
+  doc = "Short frame"
+  [[reg.field]]
+  name = "CONF"
+  bits = [12, 12]
+  doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
+  [[reg.field]]
+  name = "CARRIER"
+  bits = [13, 13]
+  doc = "Decided at the carrier's frequency"
+  [[reg.field]]
+  name = "GRID"
+  bits = [14, 14]
+  doc = "The frequency grid was searched"
+  [[reg.field]]
+  name = "VALID"
+  bits = [15, 15]
+  doc = "A decode since reset"
+  [[reg.field]]
+  name = "COUNT"
+  bits = [16, 31]
+  doc = "Confident data decodes (wraps)"
+
+[[reg]]
+name = "PLS_FREQ"
+offset = 0xC0
+access = "ro"
+doc = "Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ"
+
+[[reg]]
+name = "PLS_BEST"
+offset = 0xC4
+access = "ro"
+doc = "Metric of the best code of the last decode"
+  [[reg.field]]
+  name = "METRIC"
+  bits = [0, 17]
+  doc = "A header at -3 dB gives >= ~300, noise alone <= ~220"
+
+[[reg]]
+name = "PLS_SECOND"
+offset = 0xC8
+access = "ro"
+doc = "Metric of the best other code at the same frequency"
+  [[reg.field]]
+  name = "METRIC"
+  bits = [0, 17]
+  doc = "Metric"
+
+[[reg]]
+name = "PLS_DIFF"
+offset = 0xCC
+access = "ro"
+doc = "Confident data decodes that differ from the configuration (wrap)"
+  [[reg.field]]
+  name = "MODCOD"
+  bits = [0, 15]
+  doc = "MODCOD or frame size differs from the configured one"
+  [[reg.field]]
+  name = "PILOTS"
+  bits = [16, 31]
+  doc = "Pilots differ from the configured setting"
+
+[[reg]]
+name = "PLS_SEEN"
+offset = 0xD0
+access = "w1c"
+doc = "Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins"
+
+[[reg]]
+name = "PLS_CFG"
+offset = 0xD4
+access = "rw"
+doc = "PLS frequency grid searched when the carrier's frequency gives no confident decode"
+  [[reg.field]]
+  name = "H"
+  bits = [0, 5]
+  doc = "Grid half width: hypotheses h x STEP, h = -H..H (reset 32)"
+  [[reg.field]]
+  name = "STEP"
+  bits = [16, 25]
+  doc = "Grid step, turns x 2^16 per symbol (reset 262, ~0.004)"
+
+[[reg]]
+name = "PLS_SKIPPED"
+offset = 0xD8
+access = "ro"
+doc = "Headers not decoded because the decoder was still busy"
+  [[reg.field]]
+  name = "COUNT"
+  bits = [0, 15]
+  doc = "Headers (wraps)"
 
 [[packet]]
 name = "HDR"

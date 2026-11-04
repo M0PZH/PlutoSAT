@@ -176,8 +176,10 @@ dvbs2-tx -s 500000 -m qpsk1/2 -p -f 2403.75e6 -a 10 -u 1234   # TS on UDP port 1
 ## Receiver
 
 ```
-ADC ─► DDC ─► timing ─► frame sync ─► carrier + demap ─► LDPC ─► BCH ─► BBFRAME ─► DMA packet
+ADC ─► DDC ─► timing ─► frame sync ─┬─► carrier + demap ─► LDPC ─► BCH ─► BBFRAME ─► DMA packet
+                                    └─► PLS decoder (status only)
        dvbs2_rx_ddc  dvbs2_rx_timing  dvbs2_rx_framesync  dvbs2_rx_carrier  dvbs2_ldpc_dec  dvbs2_bch_dec
+                                      dvbs2_rx_pls
        \_________________________________ dvbs2_rx (core) _________________________________/
        \_____________________________ dvbs2_rx_axi (registers, packets) _____________________/
 ```
@@ -189,6 +191,7 @@ ADC ─► DDC ─► timing ─► frame sync ─► carrier + demap ─► LDP
 | `dvbs2_rx_ddc` | NCO, optional 3-stage CIC (decimation R = 2..32), decimating FIR (decimation D = 1..63, up to 512 loadable taps, 2 taps per clock): ADC rate -> 2 samples/symbol, total decimation R x D; see [DDC](#ddc) |
 | `dvbs2_ldpc_dec` | layered offset min-sum (offset 1 LSB), 18 lanes over the 360x360 circulants, APP 9 bit, messages 6 bit; phase A reads a check's edges, phase B writes L += R_new - R_old (circulants of one column group sharing a layer, which the DVB-S2 tables have, update in turn); stops when an iteration has no unsatisfied check and no APP sign change; ping-pong APP memories; output the Kldpc hard decisions and the channel's hard decisions of the same bits |
 | `dvbs2_bch_dec` | GF(2^16), t = 12/10/8: odd syndromes 8 bits per clock while the frame comes in, simplified inversionless Berlekamp-Massey, Chien search 8 positions per clock writing the corrected, BB-descrambled bits back into the frame buffer; ok = deg Lambda roots found; counts the pre-FEC bit errors (channel decisions vs. decoder output) |
+| `dvbs2_rx_pls` | PLS code (MODCOD, frame size, pilots) of every tagged PLHEADER, whatever MODCOD/pilots are configured: maximum likelihood over the 128 codes for an unknown phase, per frequency hypothesis (the carrier's frequency, then a grid); see [PLS decoder](#pls-decoder) |
 | `dvbs2_rx_carrier` | PL descrambling; frequency acquisition from 4 headers each confirmed by the next one being detected exactly a frame length later (staged Kay / Luise-Reggiannini with 1, 6 and 45 lags, correlations summed over the 4), re-acquisition if 2 of the next 3 or 8 later headers in a row are far off; then the NCO frequency from every PLHEADER (gain 1/4 .. 1/8); frame type (data/dummy) decided coherently from both headers and reported to the frame sync; pilots on: CORDIC phase per header/pilot block, linear phase interpolation across each data segment, pilot-to-pilot frequency loop (gain 1/4), dummy frame bodies as 36 known blocks (block-to-block frequency loop, no 1/1476 ambiguity), and the 1/1476 false lock of the pilot loop corrected from the averaged header estimates; pilots off: decision-directed PLL whose phase is reset from every header; amplitude/noise from the known blocks; max-log LLRs, 4 LSBs per unit |
 
 `model/rxfixed.py`, `model/ldpcdec.py` and `model/bchdec.py` are the bit-exact models of this
@@ -238,6 +241,87 @@ rate), and the LDPC error floor; near the LDPC threshold the residual errors
 of a failed frame are in the hundreds. The BCH decoder adds ~n/8 + Kbch/4 +
 500 clocks per frame after its input, during which the LDPC output waits.
 `dvbs2-rx` keeps the frames that are BCH codewords.
+
+### PLS decoder
+
+The receive path is told the MODCOD and pilots (MODCOD register); the PLS
+decoder reports what the PLHEADERs say, so the software can detect them
+(and changes of them) instead of trying hypotheses. It taps the carrier's
+input (symbols + the frame sync's header tags) and decodes every tagged
+header, data or dummy, in its own time (the next header is >= 3330
+symbols away); nothing in the receive path depends on it.
+
+* Metric: the 90 header symbols (6 bit) are multiplied by the conjugate of
+  the PLS-code-0 header (SOF, PLS scrambling, pi/2), rotated by -2 pi f k
+  (64-phase table), and correlated with the 128 codewords: SOF sum S, then
+  16 passes over the 64 PLS symbols with two accumulators (pilots off/on)
+  and the two 16-pair halves (the MODCOD LSB row), T = S +- (P1 +- P2) (the
+  short-frame row flips all PLS symbols), M = |T|^2. That is the maximum
+  likelihood decision for an unknown phase, if the frequency is known to
+  about +-0.002 cycles/symbol over the header.
+* Frequency hypotheses: the carrier's frequency (once acquired) first; if it
+  gives the configured PLS code or the dummy code with a metric above the
+  noise level, the decode ends there (normal operation: one hypothesis).
+  Otherwise a grid h x step, h = -H..H around the DDC frequency (PLS_CFG,
+  default 32 x 0.004: +-0.128 cycles/symbol, the carrier's acquisition
+  range). The grid is what makes a detection with the wrong configuration
+  work: the carrier's frequency acquisition uses the configured header and,
+  with the wrong MODCOD or pilots, acquires a wrong frequency (in the model:
+  +0.008 instead of +0.004, -0.127 instead of 0 cycles/symbol). The best
+  grid frequency is reported too (PLS_FREQ, +-0.002 cycles/symbol).
+* Confident: best > 2 x the best metric of another code at the same
+  frequency, and best > 2^8 (with the AGC a header at -3 dB Es/N0 gives >=
+  ~300, noise alone <= ~220). The counters and the seen mask take
+  confident decodes only.
+* Error rate (`model/rxfixed.py` pls_decode(), random codes and phases,
+  AWGN, 10^5 headers per point; "carrier": the carrier's frequency within
+  ~2e-4 cycles/symbol and the configured code; "grid": not acquired, the
+  frequency uniform over the grid; errors, most of them confident):
+
+  | Es/N0 | carrier | grid H = 32 (+-0.128) | H = 8 (+-0.032) | H = 16, step 0.002 |
+  | --- | --- | --- | --- | --- |
+  | -3 dB | 5e-5 | 9.0e-4 | | |
+  | -2.4 dB | 1e-5 | 3.3e-4 | 2.2e-4 | 1.6e-4 |
+  | -2 dB | 1e-5 | 2.1e-4 | | |
+  | -1 dB | 0 | 2e-5 | | |
+  | 0, 1, 3 dB | 0 | 0 | | |
+
+  With the carrier's frequency the few errors come from the grid fallback
+  (the carrier hypothesis below the noise level); a known frequency alone
+  (one hypothesis, H = 0) gave no error at -2.4 dB. Not confident although
+  right: 0.6 % (carrier) and 0.9 % (grid) of the headers at -2.4 dB, 1.5 %
+  and 2 % at -3 dB. Noise alone: no confident decode in 10^5.
+
+  A non-coherent alternative (correlating the 89 header differentials, as
+  the frame sync does: `model/rxmodel.py` pls_decode_differential()) is
+  useless here: 54 % code errors at -2.4 dB, 9 % at 3 dB, because codes whose
+  (64,7) codewords differ only in the MODCOD LSB row (the 16-pair halves) or
+  the short-frame row differ in only one or two differentials. The grid is
+  the price of coherence without a frequency.
+* A wrong code at a wrong grid frequency can beat the right one at low SNR
+  and then looks confident: a detection should want a few equal decodes
+  in a row (`dvbs2-rx --detect`: 3).
+* The frame sync must still find the headers: with the right pilots it
+  locks with any MODCOD (its correlation keeps the SOF and the pilot-bit
+  differentials); with the wrong pilots it predicts the wrong frame length
+  and finds data headers only next to dummy frames (with dummy frames the
+  first data header is decoded right after them). Without dummy frames the
+  software has to try pilots off and on: 2 hypotheses instead of 22.
+* Time: ~1420 clocks per hypothesis (rotation 4 clocks per symbol on one
+  DSP, 16 passes x 64 clocks, the metrics on a second DSP during the next
+  pass), 94k clocks for 2H + 2 = 66 hypotheses: one dummy frame at 2.38
+  MBd. A header that starts while a decode runs is skipped (PLS_SKIPPED).
+* Resources (out of context, 100 MHz): 607 LUTs (50 of them distributed
+  RAM: the 90 stored symbols and the 64 rotated ones), 828 FFs, 2 DSPs, no
+  block RAM, WNS +3.6 ns. The status logic (counters, last decodes, seen
+  mask) is ~70 of the LUTs.
+* Tests (`sim/rx/test_rx.py`): `test_pls` (RTL = model on the model chain's
+  carrier input: TX QPSK 3/4 pilots with the RX told QPSK 1/2 without
+  pilots, a different MODCOD at 0.03 cycles/symbol without dummy frames,
+  -2.4 dB matched (carrier hypothesis), -2 dB mismatched (grid), symbols
+  too fast (skipped headers)); `test_rx_end_to_end` (every decode equals the
+  model, the confident ones are the right codes); `test_rx_axi*` (the
+  registers).
 
 ### DDC
 
@@ -348,6 +432,24 @@ carrier offset, Es/N0 estimate, pre-FEC and post-LDPC bit error rates
 (RAW_ERR / RAW_BITS / BCH_BITERR, over BCH-good frames) and frame/packet
 counters; `-C FILE` writes a 1024-symbol constellation snapshot (carrier
 output, or the timing loop output with `--constellation-raw`) every second.
+With a core >= VERSION 0x0001_0200 the status line ends with the last
+confident PLS decode of a data header (`, PLS qpsk3/4 pilots`, `!` when it
+is not the configured MODCOD/pilots, `, PLS -` before the first).
+
+`--detect` detects the MODCOD and pilots instead of receiving: it
+configures the core as usual (any `-m`/`-p`), waits for `--detect-count`
+(3) equal confident PLS decodes of data headers in a row, prints them
+(stdout: `MODCOD name pilots short offset_Hz`, the offset being the
+signal's frequency from the LO: `-o` plus the carrier's or the PLS
+decoder's estimate) and exits 0, or exits 1 after `--detect-timeout` (30
+s). The frame sync needs the right pilots (or dummy frames): without
+dummy frames, try `-p` and no `-p`. `--pls-grid H` sets the grid (default
+32; 2H + 2 hypotheses must fit in a dummy frame).
+
+```
+dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
+dvbs2-rx -s 333333 -f 739.75e6 -p --detect   # if the first one times out
+```
 
 ## Loopback self-test on the board
 

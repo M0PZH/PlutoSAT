@@ -173,7 +173,7 @@ def test_carrier(carrier_exe, name, stall, kw, drop):
 RX_SOURCES = ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv", "gen/dvbs2_ldpc_dec_pkg.sv",
               "dvbs2_async_fifo.sv", "dvbs2_rx_timing.sv", "dvbs2_rx_framesync.sv", "dvbs2_rx_rot.sv",
               "dvbs2_rx_cordic.sv", "dvbs2_udiv.sv", "dvbs2_rx_carrier.sv", "dvbs2_ldpc_dec.sv",
-              "gen/dvbs2_bch_pkg.sv", "dvbs2_bch_dec.sv", "dvbs2_rx.sv"]
+              "gen/dvbs2_bch_pkg.sv", "dvbs2_bch_dec.sv", "dvbs2_rx_pls.sv", "dvbs2_rx.sv"]
 
 
 @pytest.fixture(scope="module")
@@ -210,15 +210,24 @@ def test_rx_end_to_end(rx_exe, name, kw):
     fin = os.path.join(WORK, f"rx_in_{name}.hex")
     fout = os.path.join(WORK, f"rx_out_{name}.hex")
     fbytes = os.path.join(WORK, f"rx_bytes_{name}.hex")
+    fpls = os.path.join(WORK, f"rx_pls_{name}.hex")
     rxsim.write_iq(fin, x)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
     log = rxsim.run(rx_exe, coef=cfile, period=22, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
                     thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
-                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes,
+                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes, pls=fpls,
                     **{"in": fin, "out": fout})
     print(log)
     assert "overflows 0," in log
+    # PLS decodes: equal to the model, every confident one right
+    got_p = [tuple(int(v, 16) for v in l.split()) for l in open(fpls)]
+    want_p = [pls_line(d) for d in r["pls"].results]
+    print("PLS", want_p)
+    assert got_p == want_p and "skipped 0," in log
+    codes = [d["code"] for d in r["pls"].results if d["conf"]]
+    assert len(codes) >= 8 and set(codes) <= {0, fx.pls_code(rate_idx + 1, 0, pilots)}
+    assert fx.pls_code(rate_idx + 1, 0, pilots) in codes
     got = rxsim.read_hex_cols(fout, (-8, -8, 1, 1))
     assert len(got) == len(want), (len(got), len(want))
     bad = np.nonzero(np.any(got[:, :2] != want, axis=1))[0]
@@ -503,10 +512,11 @@ def test_rx_axi(rx_axi_exe):
                     pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout})
     print(log)
     lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if not a.startswith("s")}
+    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
     snap_got = [int(v, 16) for a, v in lines if a.startswith("s")]
     print({hex(k): v for k, v in regs.items()})
     assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
+    check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots)
     # error counters and the constellation snapshot
     print("raw BER", raw_err / max(raw_bits, 1), "BCH bits", bch_bits)
     assert (regs[0xAC], regs[0xB0], regs[0xB4]) == (raw_err, raw_bits, bch_bits)
@@ -529,6 +539,36 @@ def test_rx_axi(rx_axi_exe):
         assert np.array_equal(np.unpackbits(body), bb[k]), f"packet {k} is not the transmitted BBFRAME"
         nw = 1 + (kb // 8 + 7) // 8
         assert not pkt[nw:].any()
+
+
+def pls_word(d, n):
+    """PLS_LAST / PLS_DATA register value of decode d (None: no decode), count n."""
+    if d is None:
+        return n << 16
+    return (n << 16) | (1 << 15) | (int(d["grid"]) << 14) | (int(d["carrier_hyp"]) << 13) | \
+        (int(d["conf"]) << 12) | (d["short"] << 9) | (d["pilots"] << 8) | d["modcod"]
+
+
+def check_pls_regs(regs, lines, pls, modcod, pilots):
+    """The PLS registers of tb_rx_axi equal the model decoder's status, every
+    confident decode is the transmitted code or a dummy, W1C works."""
+    st = pls.status()
+    last = st["last"]
+    print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
+    assert regs[0x00] == 0x00010200
+    assert regs[0xB8] == pls_word(last, st["count"])
+    assert regs[0xBC] == pls_word(st["data"], st["data_count"])
+    assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
+    assert (regs[0xC4], regs[0xC8]) == (last["best"], last["second"])
+    assert regs[0xCC] == (st["diff_pilots"] << 16) | st["diff_modcod"]
+    assert regs[0xD0] == st["seen"]
+    assert regs[0xD4] == (pls.step_ << 16) | pls.H
+    assert regs[0xD8] == 0                                # no header skipped
+    w = {a: int(v, 16) for a, v in lines if a[0] == "w"}
+    assert (w["w0"], w["w1"]) == (st["seen"] & 1, 0) and st["seen"] & 1
+    code = fx.pls_code(modcod, 0, pilots)
+    assert all(d["code"] in (0, code) for d in pls.results if d["conf"])
+    assert st["data_count"] >= 1 and st["data"]["code"] == code and st["diff_modcod"] == st["diff_pilots"] == 0
 
 
 def lowrate_signal(dec, tone, nframes=2, lead=8, esn0=4.0, seed=7, rms=400.0, resid=0.003):
@@ -614,8 +654,9 @@ def test_rx_axi_lowrate(rx_axi_exe, name, dec, adcdiv, tone):
     print(log)
     os.remove(fin)
     lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if not a.startswith("s")}
+    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
     assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
+    check_pls_regs(regs, lines, r["pls"], rate_idx + 1, pilots)
     words = [l.split() for l in open(fout)]
     data = np.array([int(w, 16) for w, _ in words], dtype=np.uint64)
     assert len(data) == 1024 * len(want)
@@ -726,7 +767,7 @@ def test_rx_axi_hold(rx_axi_exe):
               pkp=pkp, pki=pki, maxit=30, **{"in": fin, "out": fout})
     print(log)
     lines = [l.split() for l in open(fregs)]
-    regs = {int(a, 16): int(v, 16) for a, v in lines if not a.startswith("s")}
+    regs = {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}
     words = [int(l.split()[0], 16) for l in open(fout)]
     assert len(words) % 1024 == 0
     pk = [words[i:i + 1024] for i in range(0, len(words), 1024)]
@@ -741,3 +782,97 @@ def test_rx_axi_hold(rx_axi_exe):
     assert len(pk) + regs[0x8C] == nframes, (len(pk), regs[0x8C])
     assert len(pk) >= 3
     assert sent == sorted(sent) and -1 not in sent, sent
+
+
+# ---------------------------------------------------------------------------
+# PLS decoder
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def pls_exe():
+    return rxsim.build("tb_rx_pls", ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv",
+                                     "dvbs2_rx_pls.sv", os.path.join(HERE, "tb_rx_pls.sv")])
+
+
+class _PlsRec(fx.PlsDecoder):
+    """PlsDecoder that records its input (the carrier's input stream)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.rec = []
+
+    def step(self, si, sq, t, fhat, acquired):
+        self.rec.append((si, sq, int(t != 0), fhat & 0xFFFFFFFF, int(acquired)))
+        super().step(si, sq, t, fhat, acquired)
+
+
+def pls_run(x, rx_modcod, rx_pilots, H=fx.PLS_H_DEFAULT, step=fx.PLS_STEP_DEFAULT):
+    """Model chain with a recording PLS decoder: (receive() result, decoder)."""
+    kp, ki = fx.timing_gains()
+    sym = fx.Timing(fx.timing_coefs(0.35), kp, ki).run(x)
+    fs = fx.FrameSync(rx_modcod, rx_pilots)
+    cr = fx.Carrier(rx_modcod, rx_pilots)
+    cr.pls = _PlsRec(rx_modcod, rx_pilots, H, step)
+    fs.run(sym, cr)
+    return cr, cr.pls
+
+
+def pls_line(d):
+    return (d["code"], int(d["conf"]), int(d["carrier_hyp"]), int(d["grid"]), d["best"], d["second"],
+            d["freq"] & 0xFFFF)
+
+
+# name, TX (rate_idx, pilots), RX (modcod, pilots), Es/N0, cfo, dummy lead frames, data frames,
+# testbench clocks per symbol, grid H
+PLS_CASES = [
+    # the coordinator's case: TX QPSK 3/4 pilots, RX told QPSK 1/2 without pilots; the
+    # frame sync finds the data header after the dummy frames (then misses: wrong length)
+    ("mismatch", (6, True), (4, False), 3.0, 0.004, 3, 3, 40, 32),
+    # MODCOD differs, pilots right, no dummy frames, 0.03 cycles/symbol: the carrier
+    # acquires a wrong frequency, the grid finds the header
+    ("modcod_cfo", (5, False), (4, False), 2.0, -0.03, 0, 4, 40, 32),
+    # matched, -2.4 dB: after the acquisition the carrier hypothesis decides alone
+    ("lowsnr", (0, True), (1, True), -2.4, 0.004, 8, 2, 40, 32),
+    # MODCOD differs at -2 dB: grid decodes
+    ("lowsnr_grid", (0, True), (4, True), -2.0, 0.002, 4, 3, 40, 16),
+    # symbols faster than the decoder: headers skipped
+    ("skip", (6, True), (6, True), 6.0, 0.004, 6, 1, 6, 32),
+]
+
+
+@pytest.mark.parametrize("name,tx,rx,esn0,cfo,lead,nfr,period,H", PLS_CASES, ids=[c[0] for c in PLS_CASES])
+def test_pls(pls_exe, name, tx, rx, esn0, cfo, lead, nfr, period, H):
+    """PLS decoder RTL = model on the carrier input of the model chain, with
+    the configured MODCOD/pilots different from the transmitted ones."""
+    os.makedirs(WORK, exist_ok=True)
+    x, _ = signal(nframes=nfr, lead=lead, rate_idx=tx[0], pilots=tx[1], esn0=esn0, cfo=cfo, seed=2)
+    cr, p = pls_run(x, rx[0], rx[1], H)
+    fin = os.path.join(WORK, f"pls_in_{name}.hex")
+    fout = os.path.join(WORK, f"pls_out_{name}.hex")
+    with open(fin, "w") as f:
+        for si, sq, t, fh, a in p.rec:
+            f.write(f"{si & 0xFFFF:04x} {sq & 0xFFFF:04x} {t} {fh:08x} {a}\n")
+    log = rxsim.run(pls_exe, modcod=rx[0], pilots=int(rx[1]), period=period, h=H, **{"in": fin, "out": fout})
+    print(log)
+    got = [tuple(int(v, 16) for v in l.split()) for l in open(fout)]
+    want = [pls_line(d) for d in p.results]
+    print("model", want, "acq", cr.n_acq, "fhat", cr.fhat / 2 ** 32)
+    true_code = fx.pls_code(tx[0] + 1, 0, tx[1])
+    if name == "skip":
+        assert "skipped 0 " not in log + " "
+        it = iter(want)
+        assert all(any(g == w for w in it) for g in got), "not a subsequence of the model's decodes"
+        return
+    assert "skipped 0" in log
+    assert got == want
+    st = p.status()
+    assert (f"count {st['count']} data {st['data_count']} dcode {st['data']['code']:02x} dvalid 1 "
+            f"diff {st['diff_modcod']} {st['diff_pilots']} seen {st['seen']:08x} skipped 0") in log
+    conf = [d for d in p.results if d["conf"]]
+    assert all(d["code"] in (0, true_code) for d in conf), [d["code"] for d in conf]
+    data = [k for k, d in enumerate(p.results) if d["conf"] and d["code"] == true_code]
+    assert data and data[0] <= (lead if lead else 1), data
+    if name == "lowsnr":
+        assert any(d["carrier_hyp"] and not d["grid"] for d in p.results)
+    if rx != (tx[0] + 1, tx[1]):
+        assert st["diff_modcod"] + st["diff_pilots"] >= 1

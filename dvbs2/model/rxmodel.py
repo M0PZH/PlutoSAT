@@ -423,3 +423,43 @@ def gr_ldpc_decode_llr(llrs, rate_idx):
     if len(out) == len(l) * kbch // 8:
         out = np.unpackbits(out)
     return out[: n * kbch]
+
+
+# --------------------------------------------------------------------------
+# PLS decoding (float reference of rxfixed.pls_decode)
+# --------------------------------------------------------------------------
+
+def pls_header_symbols(code):
+    """PLHEADER of a 7-bit PLS code (MODCOD << 2 | short << 1 | pilots)."""
+    hdr = (m.SOF << 64) | m.plsc_bits(code >> 2, (code >> 1) & 1, code & 1)
+    bits = [(hdr >> (89 - i)) & 1 for i in range(90)]
+    return np.array([((1 + 1j) if i % 2 == 0 else (-1 + 1j)) * (1 - 2 * y)
+                     for i, y in enumerate(bits)]) / np.sqrt(2)
+
+
+PLS_HDRS = np.array([pls_header_symbols(c) for c in range(128)])
+
+
+def pls_decode_coherent(r, freqs=(0.0,)):
+    """Maximum likelihood for an unknown phase: argmax over the frequency
+    hypotheses (cycles/symbol) and the 128 codes of |sum conj(h_c) r e^(-j2pi f k)|^2.
+    r: (..., 90) complex. Returns (code, frequency)."""
+    r = np.asarray(r)
+    k = np.arange(90)
+    rot = np.exp(-2j * np.pi * np.asarray(freqs)[:, None] * k[None, :])
+    met = np.abs((r[..., None, :] * rot) @ np.conj(PLS_HDRS).T) ** 2      # (..., nf, 128)
+    met = met.reshape(*met.shape[:-2], -1)
+    best = met.argmax(-1)
+    return best % 128, np.asarray(freqs)[best // 128]
+
+
+def pls_decode_differential(r):
+    """Non-coherent alternative: argmax |sum_i conj(d_c,i) d_i|^2 over the 89
+    header differentials d_i = r_i conj(r_(i-1)) (any carrier offset, like the
+    frame sync). Much weaker: codes whose (64,7) codewords differ only in a
+    few pair-to-pair transitions (the 16-pair halves of the MODCOD LSB row,
+    the all-ones row of the frame size) are almost indistinguishable."""
+    r = np.asarray(r)
+    d = r[..., 1:] * np.conj(r[..., :-1])
+    dh = PLS_HDRS[:, 1:] * np.conj(PLS_HDRS[:, :-1])
+    return np.abs(d @ np.conj(dh).T).argmax(-1)
