@@ -104,8 +104,14 @@ module dvbs2_rx_carrier
   // ---------------------------------------------------------------- buffers
   logic [31:0] zbuf [640];                  // 5 banks of header s1, then z / 2 (16-bit pairs)
   logic [31:0] zrbuf [128];                 // derotated by the current FLL stage
+  // seg and zbuf have their own write and read processes (registered address,
+  // data, enable), so they map to block RAM instead of ~2.3k LUTs of LUTRAM
   (* ram_style = "block" *) logic [31:0] seg [2048];   // pending data symbols
   logic [31:0] seg_rd;
+  logic        sw_v;                       // seg write, one clock after the symbol
+  logic [10:0] sw_a;
+  logic [31:0] sw_d;
+  always_ff @(posedge clk) if (sw_v) seg[sw_a] <= sw_d;
 
   // ---------------------------------------------------------------- output FIFO
   logic [15:0] ofifo [32];
@@ -341,9 +347,20 @@ module dvbs2_rx_carrier
   logic [31:0] zw_d;
   always_ff @(posedge clk) if (zw_v) zbuf[zw_a] <= zw_d;
 
-  logic [31:0] hz_w;
+  // zbuf read port: M_HZ reads the header bank, M_FLL_ROT the bank being
+  // correlated; zb_q is the word one clock later (M_HZ2, or the rotator input
+  // issued from zr_* one clock after M_FLL_ROT)
+  logic [31:0] zb_q;
+  logic        zr_v;
+  logic [31:0] zr_ph;
+  logic [6:0]  zr_tag;
+  wire  [9:0]  zb_ra = (st == M_HZ) ? 10'({wb, fk}) : 10'({fh, fk});
+  always_ff @(posedge clk) zb_q <= zbuf[zb_ra];
   logic        hz_si, hz_sq;
   logic [5:0] inflight;                      // segment words issued, not yet out of the rotator
+  // seg read port: the word M_SEG_EMIT issues (same condition as there)
+  wire seg_issue = (st == M_SEG_EMIT) && (sk != nd) && (6'(of_cnt) + inflight < 6'd22);
+  always_ff @(posedge clk) if (seg_issue) seg_rd <= seg[sk];
   wire        room1 = of_cnt < 6'd26;            // FIFO 32 - LLR pipeline in flight
 
   always_ff @(posedge clk) begin
@@ -354,6 +371,8 @@ module dvbs2_rx_carrier
     seg_rv    <= 1'b0;
     ty_v      <= 1'b0;
     zw_v      <= 1'b0;
+    sw_v      <= 1'b0;
+    zr_v      <= 1'b0;
 
     if (rst) begin
       st <= M_IDLE;
@@ -497,7 +516,7 @@ module dvbs2_rx_carrier
             z_pil <= 1'b1;
             st <= M_SYM2;
           end else if (pilots) begin
-            seg[nd] <= {s1q, s1i};
+            sw_v <= 1'b1; sw_a <= nd; sw_d <= {s1q, s1i};
             nd <= nd + 11'd1;
             st <= M_SYM2;
           end else if (room1) begin
@@ -616,7 +635,6 @@ module dvbs2_rx_carrier
 
         // stored s1 -> z / 2 of the decided type, in place
         M_HZ: begin
-          hz_w <= zbuf[10'({wb, fk})];
           hz_si <= hk_si;
           hz_sq <= hk_sq;
           st <= M_HZ2;
@@ -624,10 +642,10 @@ module dvbs2_rx_carrier
 
         M_HZ2: begin : hz2
           logic signed [17:0] a_i, a_q, z_i, z_q;
-          a_i = hz_si ? -18'($signed(hz_w[15:0]))  : 18'($signed(hz_w[15:0]));
-          a_q = hz_si ? -18'($signed(hz_w[31:16])) : 18'($signed(hz_w[31:16]));
-          z_i = a_i + (hz_sq ? -18'($signed(hz_w[31:16])) : 18'($signed(hz_w[31:16])));
-          z_q = a_q - (hz_sq ? -18'($signed(hz_w[15:0]))  : 18'($signed(hz_w[15:0])));
+          a_i = hz_si ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0]));
+          a_q = hz_si ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16]));
+          z_i = a_i + (hz_sq ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16])));
+          z_q = a_q - (hz_sq ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0])));
           zw_v <= 1'b1; zw_a <= 10'({wb, fk});
           zw_d <= {sat16((48'(z_q) + 48'sd1) >>> 1), sat16((48'(z_i) + 48'sd1) >>> 1)};
           if (fk == 7'd89) begin
@@ -685,11 +703,9 @@ module dvbs2_rx_carrier
         M_FLL_ROT: begin
           // derotate zbuf by the estimate so far, one per clock
           if (fk != 7'd90) begin
-            rot_v   <= 1'b1;
-            rot_i   <= $signed(zbuf[10'({fh, fk})][15:0]);
-            rot_q   <= $signed(zbuf[10'({fh, fk})][31:16]);
-            rot_ph  <= fph;
-            rot_tag <= {1'b0, fk};
+            zr_v    <= 1'b1;
+            zr_ph   <= fph;
+            zr_tag  <= fk;
             fph <= fph - ff[31:0];
             fk  <= fk + 7'd1;
           end
@@ -982,7 +998,6 @@ module dvbs2_rx_carrier
           issue = (sk != nd) && (6'(of_cnt) + inflight < 6'd22);
           push  = rot_ov && rot_otag == 8'h80;
           if (issue) begin
-            seg_rd  <= seg[sk];
             seg_rv  <= 1'b1;
             seg_rph <= -sph;
             sph <= sph + 32'(incr);
@@ -1030,6 +1045,14 @@ module dvbs2_rx_carrier
 
         default: st <= M_IDLE;
       endcase
+    end
+    // M_FLL_ROT: the zbuf word read in the previous clock goes to the rotator
+    if (zr_v) begin
+      rot_v   <= 1'b1;
+      rot_i   <= $signed(zb_q[15:0]);
+      rot_q   <= $signed(zb_q[31:16]);
+      rot_ph  <= zr_ph;
+      rot_tag <= {1'b0, zr_tag};
     end
   end
 
