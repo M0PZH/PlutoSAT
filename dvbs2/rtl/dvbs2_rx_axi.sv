@@ -13,7 +13,7 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0000
+//   0x00 VERSION      RO  0x0001_0100 (0x0001_0000: no CIC, DDC_CIC reads 0)
 //   0x04 ID           RO  "DVR2" (0x44565232)
 //   0x08 SCRATCH      RW
 //   0x10 CTRL         RW  [0] enable (take ADC samples), [1] soft reset (self-clearing)
@@ -21,7 +21,7 @@
 //   0x18 GOLD_XA      RW  [17:0]
 //   0x1C GOLD_XB      RW  [17:0]
 //   0x20 DDC_FINC     RW  NCO phase increment per ADC sample (2^32 = ADC rate)
-//   0x24 DDC_CFG      RW  [5:0] decimation, [17:8] taps (even, <= 512), [28:24] shift
+//   0x24 DDC_CFG      RW  [5:0] FIR decimation D (1..63), [17:8] taps (even, <= 512), [28:24] shift
 //   0x28 DDC_COEF_ADDR RW [8:0]
 //   0x2C DDC_COEF_DATA WO [17:0], then DDC_COEF_ADDR++
 //   0x30 RRC_COEF_ADDR RW [9:0] {phase[4:0], tap[4:0]}
@@ -31,6 +31,8 @@
 //   0x40 PLL_KP       RW  [17:0]
 //   0x44 PLL_KI       RW  [17:0]
 //   0x48 LDPC_MAX_IT  RW  [5:0]
+//   0x4C DDC_CIC      RW  [5:0] CIC decimation R (0, 1: no CIC; 2..32), [11:8] CIC output shift;
+//                         the total decimation is R * D (dvbs2_rx_ddc.sv; model/rxfixed.py ddc_config())
 //   0x50 IN_OVERFLOWS RO  2-sps samples lost at the core input FIFO
 //   0x54 DDC_DROPPED  RO  DDC outputs lost (input too fast for the taps)
 //   0x58 AGC_GAIN     RO  Q5.12
@@ -102,6 +104,8 @@ module dvbs2_rx_axi #(
   logic [5:0]  ddc_dec, max_it;
   logic [9:0]  ddc_ntaps;
   logic [4:0]  ddc_shift;
+  logic [5:0]  ddc_cic_r;
+  logic [3:0]  ddc_cic_shift;
   logic [8:0]  ddc_caddr;
   logic [9:0]  rrc_caddr;
   logic        ddc_cwe, rrc_cwe;
@@ -141,6 +145,7 @@ module dvbs2_rx_axi #(
       modcod <= 5'd4; pilots <= 1'b1;
       gold_xa <= 18'h00001; gold_xb <= 18'h01008;
       ddc_finc <= '0; ddc_dec <= 6'd1; ddc_ntaps <= 10'd2; ddc_shift <= 5'd16;
+      ddc_cic_r <= '0; ddc_cic_shift <= '0;
       ddc_caddr <= '0; rrc_caddr <= '0;
       t_kp <= dvbs2_rx_pkg::TIMING_KP_DEFAULT;
       t_ki <= dvbs2_rx_pkg::TIMING_KI_DEFAULT;
@@ -172,6 +177,7 @@ module dvbs2_rx_axi #(
           6'h10: pll_kp <= wdata_q[17:0];
           6'h11: pll_ki <= wdata_q[17:0];
           6'h12: max_it <= wdata_q[5:0];
+          6'h13: begin ddc_cic_r <= wdata_q[5:0]; ddc_cic_shift <= wdata_q[11:8]; end
           6'h28: begin snap_arm <= wdata_q[0]; snap_src <= wdata_q[1]; end
           6'h29: begin snap_ra_we <= 1'b1; snap_ra_d <= wdata_q[9:0]; end
           default: ;
@@ -203,6 +209,7 @@ module dvbs2_rx_axi #(
 
   dvbs2_rx_ddc #(.LUT_FILE(LUT_FILE)) u_ddc (
     .clk, .rst(core_rst), .finc(ddc_finc), .dec(ddc_dec), .ntaps(ddc_ntaps), .shift(ddc_shift),
+    .cic_r(ddc_cic_r), .cic_shift(ddc_cic_shift),
     .coef_we(ddc_cwe), .coef_addr(ddc_caddr), .coef_data(cdata),
     .s_valid(a_valid), .s_ready(a_ready), .s_i($signed(a_data[15:0])), .s_q($signed(a_data[31:16])),
     .m_valid(d_valid), .m_i(d_i), .m_q(d_q), .st_dropped(ddc_dropped));
@@ -429,7 +436,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0000;
+          6'h00: s_axi_rdata <= 32'h0001_0100;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};
@@ -445,6 +452,7 @@ module dvbs2_rx_axi #(
           6'h10: s_axi_rdata <= {14'd0, pll_kp};
           6'h11: s_axi_rdata <= {14'd0, pll_ki};
           6'h12: s_axi_rdata <= {26'd0, max_it};
+          6'h13: s_axi_rdata <= {20'd0, ddc_cic_shift, 2'd0, ddc_cic_r};
           6'h14: s_axi_rdata <= {16'd0, in_ovf};
           6'h15: s_axi_rdata <= {16'd0, ddc_dropped};
           6'h16: s_axi_rdata <= {15'd0, agc_gain};

@@ -92,8 +92,8 @@ def test_rx_coefs(rx_tool, sr, dec, rolloff, gold):
     out = subprocess.run(args, capture_output=True, text=True, check=True).stdout.split("\n")
     rrc = np.array([[int(v) for v in out[k].split()] for k in range(32)])
     assert np.array_equal(rrc, fx.timing_coefs(rolloff))
-    d = dec or int(np.ceil(2.1e6 / (2 * sr)))
-    assert np.array_equal(np.array([int(v) for v in out[32].split()]), fx.ddc_coefs(d))
+    d = dec or round(12e6 / (2 * sr))                    # default: ADC at 12 MS/s
+    assert np.array_equal(np.array([int(v) for v in out[32].split()]), fx.ddc_config(d)["coefs"])
     assert [int(v) for v in out[33].split()] == list(m.gold_init(gold))
 
 

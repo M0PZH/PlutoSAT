@@ -2,7 +2,7 @@
 // samples on a separate 48 MHz clock (one every +adcdiv clocks), writes the
 // DMA packets ("hhhhhhhhhhhhhhhh last") and finally the status registers.
 //   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall= +hold=
-//   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift=
+//   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift= +cicr= +cicshift=
 //                    +tkp= +tki= +thresh= +pkp= +pki= +maxit=
 `timescale 1ps/1ps
 module tb_rx_axi;
@@ -86,6 +86,9 @@ module tb_rx_axi;
     if (!$value$plusargs("finc=%d", lv)) lv = 0;
     axi_write(8'h20, 32'(lv));
     axi_write(8'h24, arg("dec", 1) | (arg("ntaps", 2) << 8) | (arg("shift", 16) << 24));
+    axi_write(8'h4C, arg("cicr", 0) | (arg("cicshift", 0) << 8));
+    axi_read(8'h4C, r);
+    if (r != 32'(arg("cicr", 0) | (arg("cicshift", 0) << 8))) $fatal(1, "DDC_CIC reads %h", r);
     axi_write(8'h38, arg("tkp", 0) | (arg("tki", 0) << 16));
     axi_write(8'h3C, arg("thresh", 0));
     axi_write(8'h40, arg("pkp", 0));

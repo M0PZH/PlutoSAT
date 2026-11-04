@@ -107,11 +107,31 @@ def cordic(x, y):
 
 
 # ---------------------------------------------------------------------------
-# DDC: NCO + polyphase decimating FIR (ADC rate -> 2 samples/symbol)
+# DDC: NCO + optional CIC + polyphase decimating FIR (ADC rate -> 2 samples/symbol)
 # ---------------------------------------------------------------------------
+#
+#   m[n] = rot(x[n], n * finc)                       (bypassed when finc = 0)
+#   CIC on (cic_r = R >= 2): 3 integrators at the input rate (integrator k > 0
+#   adds the previous value of integrator k - 1), decimation by R (the value
+#   after input R*j + R - 1), 3 combs; 32-bit wrap-around arithmetic (exact:
+#   |output| <= R^3 * 2^15 <= 2^30 for R <= 32), then
+#     c[j] = sat18(rnd(comb / 2^cic_shift))
+#   CIC off: c[n] = m[n].
+#   FIR, decimation D = dec, samples before the first one are zero:
+#     y[k] = sat16(rnd(sum_{i<ntaps} h[i] c[k*D + D-1 - i] / 2^shift))
+# Total decimation R * D.
 
 DDC_NMAX = 512      # coefficients
 DDC_CW = 18
+DDC_DMAX = 63       # FIR decimation (6-bit field)
+CIC_N = 3
+CIC_W = 32
+CIC_RMAX = 32
+DDC_FIR_ONLY_MAX = 32   # ddc_config(): FIR alone up to this decimation ...
+DDC_CIC_D_GOOD = 8      # ... unless the CIC path has a FIR decimation >= this
+DDC_CIC_TPP = 16        # ddc_config(): FIR taps per decimation step after the CIC
+DDC_CIC_BETA = 8.0      # ... and the Kaiser window's beta
+DDC_CIC_DMIN = 4        # ... smallest FIR decimation after the CIC
 
 
 def ddc_coefs(dec, taps_per_phase=12, gain=1.0):
@@ -135,28 +155,137 @@ def ddc_coefs(dec, taps_per_phase=12, gain=1.0):
     return c
 
 
-def ddc(x, coefs, dec, finc=0, shift=16):
-    """y[k] = sat16(rnd(sum_i h[i] * m[k*dec + dec-1 - i], shift)), where
-    m[n] = x[n] * exp(j*2*pi*n*finc/2^32) (rot(), same LUT as the NCOs)."""
+def cic_shift_for(R):
+    """CIC output shift: gain R^3 / 2^shift in (16, 32] (R >= 4), so a 12-bit
+    ADC sample (|I|, |Q| <= 2048, <= 2896 after the NCO) stays below 2^17."""
+    return max(0, ((R ** CIC_N) - 1).bit_length() - 5)
+
+
+def ddc_split(dec):
+    """(R, D) for a total decimation `dec`, or None if not supported. CIC
+    candidates: R = 2..CIC_RMAX dividing dec with D = dec / R <= 32; the
+    one with the smallest R (largest D) is used if D >= DDC_CIC_D_GOOD
+    (>= ~70 dB alias rejection), or, above 32, if D >= DDC_CIC_DMIN
+    (>= ~62 dB). Otherwise decimations up to 32 use the FIR alone (R = 1,
+    ~58 dB)."""
+    cand = [R for R in range(2, CIC_RMAX + 1) if dec % R == 0 and dec // R <= DDC_FIR_ONLY_MAX]
+    D = dec // cand[0] if cand else 0
+    if D >= DDC_CIC_D_GOOD or (dec > DDC_FIR_ONLY_MAX and D >= DDC_CIC_DMIN):
+        return cand[0], D
+    if 1 <= dec <= DDC_FIR_ONLY_MAX:
+        return 1, dec
+    return None
+
+
+def _kaiser(n, beta):
+    return np.i0(beta * np.sqrt(1 - (2 * np.arange(n) / (n - 1) - 1) ** 2)) / np.i0(beta)
+
+
+def ddc_cic_fir(R, D, taps_per_phase=DDC_CIC_TPP, beta=DDC_CIC_BETA):
+    """FIR after the CIC (float, sum 1): Kaiser-windowed lowpass, cutoff at
+    the symbol rate (1/(2D) of its input rate), with the CIC droop
+    compensated: the ideal response is 1 + c f^2 (f in cycles per CIC
+    output sample, c = 3 pi^2 (1 - 1/R^2) / 6, the second-order inverse of
+    the CIC response) below the cutoff, integrated in closed form."""
+    n = D * taps_per_phase
+    fc = 1.0 / (2 * D)
+    c = CIC_N * math.pi ** 2 * (1 - 1.0 / R ** 2) / 6
+    k = np.arange(n) - (n - 1) / 2
+    w = 2 * math.pi * k
+    with np.errstate(divide="ignore", invalid="ignore"):
+        g = 2 * (fc ** 2 * np.sin(w * fc) / w + 2 * fc * np.cos(w * fc) / w ** 2
+                 - 2 * np.sin(w * fc) / w ** 3)
+        sinc = np.sin(w * fc) / (math.pi * k)
+    g = np.where(k == 0, 2 * fc ** 3 / 3, g)
+    sinc = np.where(k == 0, 2 * fc, sinc)
+    h = (sinc + c * g) * _kaiser(n, beta)
+    return h / h.sum()
+
+
+def ddc_config(dec, gain_log2=4):
+    """DDC settings for a total decimation `dec` (ADC rate / (2 x symbol
+    rate)) and an overall gain 2^gain_log2 (DC, CW). Returns dict(R, D,
+    cic_shift, coefs, shift) or raises ValueError. FIR only (R = 1): the
+    ddc_coefs() lowpass, shift 16 - gain_log2 (as before). With the CIC:
+    ddc_cic_fir(), scaled to sum 2^shift * 2^gain_log2 / (R^3 / 2^cic_shift)
+    with the largest shift that keeps every coefficient below 2^17. The same
+    design is in sw/dvbs2_rx.c."""
+    sp = ddc_split(dec)
+    if sp is None:
+        raise ValueError(f"decimation {dec} is not supported")
+    R, D = sp
+    if R == 1:
+        return dict(R=1, D=D, cic_shift=0, coefs=ddc_coefs(D), shift=16 - gain_log2)
+    cs = cic_shift_for(R)
+    scale = float(1 << gain_log2) * (1 << cs) / R ** CIC_N    # wanted sum(h) / 2^shift
+    h = ddc_cic_fir(R, D)
+    mx = np.abs(h).max() * scale
+    shift = 0
+    while shift < 31 and mx * 2.0 ** (shift + 1) < (1 << (DDC_CW - 1)) - 1:
+        shift += 1
+    c = np.rint(h * scale * 2.0 ** shift).astype(np.int64)
+    assert np.abs(c).max() < (1 << (DDC_CW - 1)) and len(c) <= DDC_NMAX and len(c) % 2 == 0
+    return dict(R=R, D=D, cic_shift=cs, coefs=c, shift=shift)
+
+
+_COSA = np.array(_COS, np.int64)
+_SINA = np.array(_SIN, np.int64)
+
+
+def mix(x, finc, ph0=0):
+    """Vectorized rot() of x[n] by phase ph0 + n * finc (same results)."""
     x = np.asarray(x, np.int64)
+    ph = (np.uint64(ph0) + np.arange(len(x), dtype=np.uint64) * np.uint64(finc)) & np.uint64(0xFFFFFFFF)
+    a = (ph >> np.uint64(22)).astype(np.int64)
+    c, s = _COSA[a], _SINA[a]
+    i, q = x[:, 0], x[:, 1]
+    oi = np.clip((i * c - q * s + (1 << 14)) >> 15, -32768, 32767)
+    oq = np.clip((i * s + q * c + (1 << 14)) >> 15, -32768, 32767)
+    return np.stack([oi, oq], 1)
+
+
+def _wrapw(v, w):
+    return ((v + (1 << (w - 1))) & ((1 << w) - 1)) - (1 << (w - 1))
+
+
+def cic(x, R, cshift):
+    """3-stage CIC, decimation R (see the DDC description above). x: (n, 2)
+    int64; the int64 sums wrap mod 2^64, which is exact mod 2^CIC_W."""
+    v = np.cumsum(np.asarray(x, np.int64), axis=0)
+    for _ in range(1, CIC_N):
+        v = np.concatenate([np.zeros((1, 2), np.int64), np.cumsum(v, axis=0)[:-1]])
+    u = v[R - 1::R]
+    for _ in range(CIC_N):
+        u = np.diff(u, axis=0, prepend=np.zeros((1, 2), np.int64))
+    u = _wrapw(u, CIC_W)
+    if cshift:
+        u = (u + (1 << (cshift - 1))) >> cshift
+    return np.clip(u, -(1 << 17), (1 << 17) - 1)
+
+
+def ddc(x, coefs, dec, finc=0, shift=16, cic_r=1, cic_shift=0):
+    """The DDC (see above): y[k] = sat16(rnd(sum_i h[i] * c[k*dec + dec-1 - i],
+    shift)), c = the CIC output (cic_r >= 2) or the NCO output m[n] =
+    x[n] * exp(j*2*pi*n*finc/2^32) (rot(), same LUT as the NCOs)."""
+    x = np.asarray(x, np.int64).reshape(-1, 2)
     if finc:
-        mx = np.empty_like(x)
-        ph = 0
-        for n, (i, q) in enumerate(x):
-            mx[n] = rot(int(i), int(q), ph)
-            ph = (ph + finc) & 0xFFFFFFFF
-        x = mx
+        x = mix(x, finc)
+    if cic_r >= 2:
+        x = cic(x, cic_r, cic_shift)
     h = np.asarray(coefs, np.int64)
     nt = len(h)
     xp = np.vstack([np.zeros((nt, 2), np.int64), x])       # zeros before the first sample
-    out = []
-    for k in range(len(x) // dec):
-        n = k * dec + dec - 1 + nt
-        seg = xp[n - nt + 1:n + 1][::-1]                    # x[n], x[n-1], ...
-        acc = h @ seg
-        r = [(int(a) + (1 << (shift - 1))) >> shift if shift else int(a) for a in acc]
-        out.append([sat(r[0], 16), sat(r[1], 16)])
-    return np.array(out, np.int64).reshape(-1, 2)
+    K = len(x) // dec
+    out = np.empty((K, 2), np.int64)
+    hr = h[::-1]
+    for k0 in range(0, K, 4096):
+        k = np.arange(k0, min(K, k0 + 4096))
+        n = k * dec + dec - 1 + nt                          # newest sample, index into xp
+        seg = xp[n[:, None] - nt + 1 + np.arange(nt)[None, :]]   # (K, nt, 2): x[n-nt+1] .. x[n]
+        acc = np.einsum("j,kjc->kc", hr, seg)
+        r = (acc + (1 << (shift - 1))) >> shift if shift else acc
+        out[k] = np.clip(r, -32768, 32767)
+    return out
 
 
 # ---------------------------------------------------------------------------

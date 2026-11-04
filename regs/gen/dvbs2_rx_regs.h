@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00010000u
+#define DVBS2_RX_VERSION_VALUE 0x00010100u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -30,7 +30,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0000 = 1.0 */
+/* VERSION (ro): Core version, 0x0001_0100 = 1.1 (1.0: no CIC, DDC_CIC reads 0) */
 #define DVBS2_RX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -80,7 +80,7 @@
 #define DVBS2_RX_DDC_FINC 0x020
 /* DDC_CFG (rw): DDC configuration */
 #define DVBS2_RX_DDC_CFG 0x024
-/*   [5:0] DECIM: Decimation (ADC samples per 2 symbols) */
+/*   [5:0] DECIM: FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC) */
 #define DVBS2_RX_DDC_CFG_DECIM_SHIFT 0
 #define DVBS2_RX_DDC_CFG_DECIM_WIDTH 6
 #define DVBS2_RX_DDC_CFG_DECIM_MASK 0x0000003Fu
@@ -150,6 +150,16 @@
 #define DVBS2_RX_LDPC_MAX_IT_MAX_IT_SHIFT 0
 #define DVBS2_RX_LDPC_MAX_IT_MAX_IT_WIDTH 6
 #define DVBS2_RX_LDPC_MAX_IT_MAX_IT_MASK 0x0000003Fu
+/* DDC_CIC (rw): DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D */
+#define DVBS2_RX_DDC_CIC 0x04C
+/*   [5:0] R: CIC decimation R: 0 or 1 = no CIC, 2..32 */
+#define DVBS2_RX_DDC_CIC_R_SHIFT 0
+#define DVBS2_RX_DDC_CIC_R_WIDTH 6
+#define DVBS2_RX_DDC_CIC_R_MASK 0x0000003Fu
+/*   [11:8] SHIFT: CIC output shift */
+#define DVBS2_RX_DDC_CIC_SHIFT_SHIFT 8
+#define DVBS2_RX_DDC_CIC_SHIFT_WIDTH 4
+#define DVBS2_RX_DDC_CIC_SHIFT_MASK 0x00000F00u
 /* IN_OVERFLOWS (ro): 2-sps samples lost at the core input FIFO */
 #define DVBS2_RX_IN_OVERFLOWS 0x050
 /* DDC_DROPPED (ro): DDC outputs lost (input too fast for the taps) */

@@ -33,6 +33,7 @@
 #include "bbdeframe.h"
 
 /* ---------------------------------------------------------------- registers */
+#define R_VERSION       0x00
 #define R_ID            0x04
 #define R_CTRL          0x10
 #define   CTRL_ENABLE     (1u << 0)
@@ -51,6 +52,7 @@
 #define R_PLL_KP        0x40
 #define R_PLL_KI        0x44
 #define R_LDPC_MAX_IT   0x48
+#define R_DDC_CIC       0x4C
 #define R_IN_OVF        0x50
 #define R_DDC_DROPPED   0x54
 #define R_AGC_GAIN      0x58
@@ -97,8 +99,18 @@
 #define NQUEUE 4                  /* axi_dmac transfer IDs */
 #define RRC_NPH 32
 #define RRC_NT 25
-#define DDC_TPP 12
+#define DDC_TPP 12                /* FIR alone: taps per decimation step */
 #define DDC_NMAX 512
+#define DDC_FIR_ONLY_MAX 32       /* model/rxfixed.py ddc_split() */
+#define DDC_CIC_D_GOOD 8
+#define DDC_CIC_DMIN 4
+#define DDC_CIC_TPP 16            /* FIR after the CIC: taps per decimation step, Kaiser beta */
+#define DDC_CIC_BETA 8.0
+#define CIC_N 3
+#define CIC_RMAX 32
+#define DEC_MAX (CIC_RMAX * DDC_FIR_ONLY_MAX)
+#define CORE_CLK 100e6           /* sys_cpu_clk */
+#define VERSION_CIC 0x00010100   /* first core version with the CIC (DDC_CIC) */
 
 static volatile uint32_t *regs, *dmac;
 static uint8_t *dmabuf;
@@ -253,6 +265,108 @@ static int ddc_coefs(int dec, int32_t *c)
 	return n;
 }
 
+/* (R, D) for a total decimation, same as model/rxfixed.py:ddc_split():
+ * the CIC with the smallest R (largest FIR decimation D <= 32) if D >= 8, or
+ * above 32 if D >= 4; else the FIR alone up to 32. -1: not supported. */
+static int ddc_split(int dec, int *R, int *D)
+{
+	int r = 0;
+	for (int k = 2; k <= CIC_RMAX && !r; k++)
+		if (dec % k == 0 && dec / k <= DDC_FIR_ONLY_MAX)
+			r = k;
+	int d = r ? dec / r : 0;
+	if (d >= DDC_CIC_D_GOOD || (dec > DDC_FIR_ONLY_MAX && d >= DDC_CIC_DMIN)) {
+		*R = r;
+		*D = d;
+		return 0;
+	}
+	if (dec >= 1 && dec <= DDC_FIR_ONLY_MAX) {
+		*R = 1;
+		*D = dec;
+		return 0;
+	}
+	return -1;
+}
+
+static int cic_shift_for(int R)
+{
+	unsigned v = (unsigned)(R * R * R) - 1;
+	int bits = 0;
+	while (v) {
+		bits++;
+		v >>= 1;
+	}
+	return bits > 5 ? bits - 5 : 0;
+}
+
+/* FIR after the CIC, same as model/rxfixed.py:ddc_cic_fir(): Kaiser-windowed
+ * lowpass, cutoff 1/(2D), ideal response 1 + c f^2 (CIC droop compensation),
+ * normalised to sum 1. Returns the number of taps. */
+static int ddc_cic_fir(int R, int D, double *h)
+{
+	int n = D * DDC_CIC_TPP;
+	double fc = 1.0 / (2 * D), c = CIC_N * M_PI * M_PI * (1 - 1.0 / ((double)R * R)) / 6, s = 0;
+
+	for (int i = 0; i < n; i++) {
+		double k = i - (n - 1) / 2.0, w = 2 * M_PI * k, g, sinc;
+		if (k == 0) {
+			g = 2 * fc * fc * fc / 3;
+			sinc = 2 * fc;
+		} else {
+			g = 2 * (fc * fc * sin(w * fc) / w + 2 * fc * cos(w * fc) / (w * w) -
+				 2 * sin(w * fc) / (w * w * w));
+			sinc = sin(w * fc) / (M_PI * k);
+		}
+		double x = 2.0 * i / (n - 1) - 1;
+		double win = bessel_i0(DDC_CIC_BETA * sqrt(1 - x * x)) / bessel_i0(DDC_CIC_BETA);
+		h[i] = (sinc + c * g) * win;
+		s += h[i];
+	}
+	for (int i = 0; i < n; i++)
+		h[i] /= s;
+	return n;
+}
+
+/* DDC configuration for a total decimation, same as model/rxfixed.py:ddc_config() */
+struct ddc_cfg {
+	int R, D, cic_shift, ntaps, shift;
+	int32_t c[DDC_NMAX];
+};
+
+static int ddc_config(int dec, int gain_log2, struct ddc_cfg *cfg)
+{
+	if (ddc_split(dec, &cfg->R, &cfg->D))
+		return -1;
+	if (cfg->R == 1) {
+		cfg->cic_shift = 0;
+		cfg->ntaps = ddc_coefs(cfg->D, cfg->c);
+		cfg->shift = 16 - gain_log2;
+		return 0;
+	}
+	double h[DDC_NMAX], mx = 0;
+	int R = cfg->R;
+	cfg->cic_shift = cic_shift_for(R);
+	double scale = (double)(1 << gain_log2) * (1 << cfg->cic_shift) / ((double)R * R * R);
+	cfg->ntaps = ddc_cic_fir(R, cfg->D, h);
+	for (int i = 0; i < cfg->ntaps; i++)
+		mx = fmax(mx, fabs(h[i]));
+	mx *= scale;
+	cfg->shift = 0;
+	while (cfg->shift < 31 && mx * ldexp(1.0, cfg->shift + 1) < (1 << 17) - 1)
+		cfg->shift++;
+	for (int i = 0; i < cfg->ntaps; i++)
+		cfg->c[i] = (int32_t)nearbyint(h[i] * scale * ldexp(1.0, cfg->shift));
+	return 0;
+}
+
+/* the DDC's input rate limit (dvbs2_rx_ddc.sv): one sample per 2 clocks, an
+ * output per ntaps/2 clocks; 5 % margin */
+static int ddc_fast_enough(const struct ddc_cfg *cfg, double fs)
+{
+	double dec = (double)cfg->R * cfg->D;
+	return fs <= 0.95 * CORE_CLK / 2 && fs * (cfg->ntaps / 2) / dec <= 0.95 * CORE_CLK;
+}
+
 static uint32_t gold_x(uint32_t n)
 {
 	uint32_t x = 1;
@@ -325,7 +439,13 @@ static void usage(const char *p)
 	fprintf(stderr,
 		"usage: %s [options]\n"
 		"  -s, --sym-rate S/s   symbol rate (default 500000)\n"
-		"  -d, --decim N        ADC samples per 2 symbols, 1..32 (default: ADC >= 2.1 MS/s)\n"
+		"  -F, --adc-rate Hz    ADC sample rate (default 12e6, the system's fixed rate);\n"
+		"                       decimation = Hz / (2 x sym-rate), which must be (within\n"
+		"                       100 ppm) an integer the DDC supports (1..32, larger ones\n"
+		"                       with its CIC, e.g. 180 = 6 x 30 for 33.33 kS/s);\n"
+		"                       'auto': the lowest rate >= 2.1 MS/s with a supported\n"
+		"                       decimation\n"
+		"  -d, --decim N        ADC samples per 2 symbols instead (ADC rate 2 x sym-rate x N)\n"
 		"  -m, --modcod M       qpsk1/4 .. qpsk9/10 (default qpsk1/2)\n"
 		"  -p, --pilots         frames have pilots\n"
 		"  -r, --rolloff R      0.35, 0.25 or 0.20 (default 0.35)\n"
@@ -389,11 +509,11 @@ static void snapshot(const char *path, int raw)
 
 int main(int argc, char **argv)
 {
-	double sr = 500e3, rolloff = 0.35, freq = 0, offset = 0, gain = NAN;
+	double sr = 500e3, rolloff = 0.35, freq = 0, offset = 0, gain = NAN, adc_rate = 12e6;
 	int rate_idx = 3, pilots = 0, dec = 0, ddc_gain = 4, max_it = 30, quiet = 0, no_iio = 0, dump = 0;
 	uint32_t gold = 0;
 	const char *udp = "127.0.0.1:1234", *output = NULL, *constel = NULL;
-	int constel_raw = 0;
+	int constel_raw = 0, adc_set = 0;
 
 	static const struct option lo[] = {
 		{ "sym-rate", 1, 0, 's' }, { "decim", 1, 0, 'd' }, { "modcod", 1, 0, 'm' },
@@ -402,9 +522,10 @@ int main(int argc, char **argv)
 		{ "ddc-gain", 1, 0, 'S' }, { "iterations", 1, 0, 'I' }, { "udp", 1, 0, 'u' },
 		{ "output", 1, 0, 'O' }, { "quiet", 0, 0, 'q' }, { "no-iio", 0, 0, 'n' },
 		{ "dump-coefs", 0, 0, 1 }, { "constellation", 1, 0, 'C' }, { "constellation-raw", 0, 0, 2 },
+		{ "adc-rate", 1, 0, 'F' },
 		{ 0, 0, 0, 0 },
 	};
-	for (int c; (c = getopt_long(argc, argv, "s:d:m:pr:g:f:o:G:S:I:u:O:qnC:", lo, NULL)) != -1;) {
+	for (int c; (c = getopt_long(argc, argv, "s:d:m:pr:g:f:o:G:S:I:u:O:qnC:F:", lo, NULL)) != -1;) {
 		switch (c) {
 		case 's': sr = atof(optarg); break;
 		case 'd': dec = atoi(optarg); break;
@@ -431,25 +552,52 @@ int main(int argc, char **argv)
 		case 1: dump = 1; break;
 		case 'C': constel = optarg; break;
 		case 2: constel_raw = 1; break;
+		case 'F': adc_rate = strcmp(optarg, "auto") ? atof(optarg) : 0; adc_set = 1; break;
 		default: usage(argv[0]);
 		}
 	}
+	if (dec && !adc_set)
+		adc_rate = 0;                       /* -d alone: ADC rate 2 x sr x dec */
+	if (adc_rate > 0 && !dec) {
+		dec = (int)lround(adc_rate / (2 * sr));
+		/* within 100 ppm: 33333 S/s means 12e6 / 360 */
+		if (dec < 1 || fabs(2 * sr * dec - adc_rate) > 1e-4 * adc_rate) {
+			fprintf(stderr, "the ADC rate %.0f is not 2 x %.0f S/s x an integer (-F auto: choose one)\n",
+				adc_rate, sr);
+			return 2;
+		}
+	}
 	if (!dec) {
-		/* the AD9363 needs >= ~2.08 MS/s without its own FIR decimation */
+		/* the AD9363 needs >= ~2.08 MS/s without its own FIR decimation;
+		 * the next decimation the DDC supports */
 		dec = (int)ceil(2.1e6 / (2 * sr));
 		if (dec < 1)
 			dec = 1;
+		int R, D;
+		while (dec < DEC_MAX && ddc_split(dec, &R, &D))
+			dec++;
 	}
 	double fs = 2 * sr * dec;
-	if (dec < 1 || dec > 32 || fs > 61.44e6 || ddc_gain < 0 || ddc_gain > 8 ||
-	    max_it < 1 || max_it > 63 || gold >= 262143) {
+	if (adc_rate > 0 && fabs(fs - adc_rate) > 1e-4 * adc_rate) {
+		fprintf(stderr, "-d %d and -F %.0f disagree (ADC rate %.0f)\n", dec, adc_rate, fs);
+		return 2;
+	}
+	struct ddc_cfg dc;
+	if (dec < 1 || dec > DEC_MAX || fs > 61.44e6 || ddc_gain < 0 || ddc_gain > 8 ||
+	    max_it < 1 || max_it > 63 || gold >= 262143 || ddc_config(dec, ddc_gain, &dc)) {
 		fprintf(stderr, "bad parameters (decimation %d, ADC rate %.0f)\n", dec, fs);
 		return 2;
 	}
+	if (!ddc_fast_enough(&dc, fs)) {
+		fprintf(stderr, "the DDC is too slow for an ADC rate of %.0f S/s with decimation %d (%d taps)\n",
+			fs, dec, dc.ntaps);
+		return 2;
+	}
 
-	int32_t rrc[RRC_NPH][32], ddc[DDC_NMAX];
+	int32_t rrc[RRC_NPH][32];
 	rrc_bank(rolloff, rrc);
-	int ntaps = ddc_coefs(dec, ddc);
+	const int32_t *ddc = dc.c;
+	int ntaps = dc.ntaps;
 	if (dump) {
 		for (int k = 0; k < RRC_NPH; k++)
 			for (int j = 0; j < RRC_NT; j++)
@@ -457,6 +605,7 @@ int main(int argc, char **argv)
 		for (int i = 0; i < ntaps; i++)
 			printf("%d%c", ddc[i], i == ntaps - 1 ? '\n' : ' ');
 		printf("%u %u\n", gold_x(gold), gold_x(gold + 131072));
+		printf("%d %d %d %d\n", dc.R, dc.D, dc.cic_shift, dc.shift);
 		return 0;
 	}
 
@@ -481,6 +630,11 @@ int main(int argc, char **argv)
 	}
 	if (rd(regs, R_ID) != 0x44565232) {
 		fprintf(stderr, "dvbs2-rx core not found (ID %08x)\n", rd(regs, R_ID));
+		return 1;
+	}
+	if (dc.R > 1 && rd(regs, R_VERSION) < VERSION_CIC) {
+		fprintf(stderr, "decimation %d needs the DDC's CIC (core version %08x < %08x: old bitstream)\n",
+			dec, rd(regs, R_VERSION), VERSION_CIC);
 		return 1;
 	}
 
@@ -514,7 +668,9 @@ int main(int argc, char **argv)
 	wr(regs, R_GOLD_XA, gold_x(gold));
 	wr(regs, R_GOLD_XB, gold_x(gold + 131072));
 	wr(regs, R_DDC_FINC, (uint32_t)(int64_t)llround(-offset / fs * 4294967296.0));
-	wr(regs, R_DDC_CFG, dec | (ntaps << 8) | ((16 - ddc_gain) << 24));
+	wr(regs, R_DDC_CFG, dc.D | (ntaps << 8) | (dc.shift << 24));
+	if (rd(regs, R_VERSION) >= VERSION_CIC)
+		wr(regs, R_DDC_CIC, (dc.R > 1 ? dc.R : 0) | (dc.cic_shift << 8));
 	wr(regs, R_DDC_CADDR, 0);
 	for (int i = 0; i < ntaps; i++)
 		wr(regs, R_DDC_CDATA, (uint32_t)ddc[i] & 0x3FFFF);
@@ -566,9 +722,9 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	fprintf(stderr, "dvbs2-rx: %s%s, %.0f S/s, ADC %.0f S/s (decimation %d, %d taps), roll-off %.2f, "
-		"Gold %u, offset %.0f Hz\n", modcods[rate_idx], pilots ? " pilots" : "", sr, fs, dec,
-		ntaps, rolloff, gold, offset);
+	fprintf(stderr, "dvbs2-rx: %s%s, %.0f S/s, ADC %.0f S/s (decimation %d = CIC %d x FIR %d, %d taps), "
+		"roll-off %.2f, Gold %u, offset %.0f Hz\n", modcods[rate_idx], pilots ? " pilots" : "", sr, fs,
+		dec, dc.R, dc.D, ntaps, rolloff, gold, offset);
 
 	struct bbdeframer d;
 	bbdeframer_init(&d);

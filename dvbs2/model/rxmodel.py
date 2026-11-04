@@ -1,6 +1,6 @@
 """DVB-S2 receiver front-end reference model (float), QPSK normal frames.
 
-Algorithm plan for the PL implementation (design notes, "接收链路"):
+Algorithm plan for the PL implementation (design notes, section "receive chain"):
 
   2 samples/symbol from the DDC
   -> AGC

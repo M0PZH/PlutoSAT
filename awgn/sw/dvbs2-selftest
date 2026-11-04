@@ -13,6 +13,8 @@
 # usage: dvbs2-selftest [-L digital|rf] [-s SYMRATE] [-m MODCOD] [-p]
 #                       [-e "ESN0 ..."] [-t SEC] [-w SEC] [-o NCO_HZ] [-r ROLLOFF]
 #                       [-f LO_HZ] [-d RX_LO_OFFSET_HZ] [-a TX_ATTEN_DB] [-G RX_GAIN_DB]
+#   -s  symbol rate (default 1000000), 12 MS/s / (2 x 1..32): the transmitter
+#       interpolates by at most 64, the receiver supports all of these
 #   -e  Es/N0 points in dB, "off" for no added noise (default "off 1 0 -1 -2")
 #   -t  counting time per point (default 10 s), -w warm-up (default 3 s)
 #   -o  transmitter NCO offset (a carrier offset for the receiver, which is
@@ -27,7 +29,7 @@ LO=2400250000 DLO=0 ATT=40 GAIN=
 FS=12000000
 
 die() { echo "dvbs2-selftest: $*" >&2; exit 1; }
-usage() { sed -n '2,24s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+usage() { sed -n '2,26s/^# \{0,1\}//p' "$0" >&2; exit 2; }
 
 while getopts "L:s:m:pe:t:w:o:f:d:a:G:r:h" o; do
 	case $o in
@@ -49,9 +51,14 @@ while getopts "L:s:m:pe:t:w:o:f:d:a:G:r:h" o; do
 done
 case $L in digital|rf) ;; *) usage ;; esac
 
+# the transmitter interpolates by FS / SR = 2..64; the receiver's DDC
+# decimation FS / (2 SR) must be one dvbs2-rx supports (1..32, larger ones
+# with its CIC): ask dvbs2-rx, which applies the same rules as for -d
 DEC=$((FS / (2 * SR)))
-[ $((DEC * 2 * SR)) -eq $FS ] && [ $DEC -ge 1 ] && [ $DEC -le 32 ] ||
-	die "symbol rate must divide $FS / 2 (2 x symbol rate x 1..32)"
+[ $((DEC * 2 * SR)) -eq $FS ] && [ $((2 * DEC)) -ge 2 ] && [ $((2 * DEC)) -le 64 ] ||
+	die "symbol rate must be $FS / (2 x 1..32) (transmitter: $FS / SR = 2..64)"
+dvbs2-rx --dump-coefs -s $SR -d $DEC >/dev/null 2>&1 ||
+	die "dvbs2-rx does not support decimation $DEC (symbol rate $SR at $FS)"
 
 phy=
 for d in /sys/bus/iio/devices/iio:device*; do

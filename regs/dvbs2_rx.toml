@@ -8,7 +8,7 @@ title = "DVB-S2 receiver"
 uio = "dvbs2-rx"
 size = 0x10000
 id = { offset = 0x04, value = 0x44565232 }        # "DVR2"
-version = { offset = 0x00, value = 0x00010000 }
+version = { offset = 0x00, value = 0x00010100 }
 rtl = "dvbs2/rtl/dvbs2_rx_axi.sv"
 maps = ["regs", "dmac", "buffer"]
 
@@ -61,7 +61,7 @@ doc = "Symbols per constellation snapshot"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0000 = 1.0"
+doc = "Core version, 0x0001_0100 = 1.1 (1.0: no CIC, DDC_CIC reads 0)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -147,7 +147,7 @@ doc = "DDC configuration"
   [[reg.field]]
   name = "DECIM"
   bits = [0, 5]
-  doc = "Decimation (ADC samples per 2 symbols)"
+  doc = "FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC)"
   [[reg.field]]
   name = "TAPS"
   bits = [8, 17]
@@ -252,6 +252,21 @@ doc = "LDPC iteration limit"
   name = "MAX_IT"
   bits = [0, 5]
   doc = "Iterations, 1..63"
+
+[[reg]]
+name = "DDC_CIC"
+offset = 0x4C
+access = "rw"
+reset = 0
+doc = "DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D"
+  [[reg.field]]
+  name = "R"
+  bits = [0, 5]
+  doc = "CIC decimation R: 0 or 1 = no CIC, 2..32"
+  [[reg.field]]
+  name = "SHIFT"
+  bits = [8, 11]
+  doc = "CIC output shift"
 
 [[reg]]
 name = "IN_OVERFLOWS"

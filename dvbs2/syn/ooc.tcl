@@ -1,5 +1,8 @@
 # Out-of-context implementation of the DVB-S2 cores for resource/timing numbers.
-#   vivado -mode batch -source ooc.tcl [-tclargs <clock MHz> [dvbs2_tx | dvbs2_rx | dvbs2_ldpc_dec]]
+#   vivado -mode batch -source ooc.tcl [-tclargs <clock MHz> [dvbs2_tx | dvbs2_rx | dvbs2_ldpc_dec |
+#                                                             dvbs2_rx_ddc | dvbs2_rx_axi]]
+# The RX wrapper (dvbs2_rx_axi) gets its 100 MHz AXI clock and a 61.44 MHz ADC clock.
+if {[info exists ::env(OOC_THREADS)]} { set_param general.maxThreads $::env(OOC_THREADS) }
 set mhz [expr {[llength $argv] > 0 ? [lindex $argv 0] : 150}]
 set top [expr {[llength $argv] > 1 ? [lindex $argv 1] : "dvbs2_tx"}]
 set here [file dirname [file normalize [info script]]]
@@ -9,7 +12,8 @@ set out  [file join $here out_[string map {dvbs2_ ""} $top]_${mhz}mhz]
 file mkdir $out
 
 set pkgs [list [file join $gen dvbs2_tables_pkg.sv] [file join $gen dvbs2_rx_pkg.sv] \
-            [file join $gen dvbs2_ldpc_dec_pkg.sv] [file join $rtl dvbs2_pl_pkg.sv]]
+            [file join $gen dvbs2_ldpc_dec_pkg.sv] [file join $gen dvbs2_bch_pkg.sv] \
+            [file join $rtl dvbs2_pl_pkg.sv]]
 read_verilog -sv $pkgs
 foreach f [glob [file join $rtl *.sv]] {
   if {[lsearch $pkgs $f] < 0} { read_verilog -sv $f }
@@ -21,11 +25,21 @@ if {$top eq "dvbs2_tx"} {
 } elseif {$top eq "dvbs2_ldpc_dec"} {
   synth_design -top $top -part xc7z020clg400-2 -mode out_of_context \
     -generic ROM_FILE=\"[file join $gen ldpc_dec_rom.mem]\"
+} elseif {$top eq "dvbs2_rx_axi"} {
+  synth_design -top $top -part xc7z020clg400-2 -mode out_of_context \
+    -generic LUT_FILE=\"[file join $gen nco_lut.mem]\" \
+    -generic LDPC_ROM_FILE=\"[file join $gen ldpc_dec_rom.mem]\"
 } else {
   synth_design -top $top -part xc7z020clg400-2 -mode out_of_context \
     -generic LUT_FILE=\"[file join $gen nco_lut.mem]\"
 }
-create_clock -name clk -period [expr {1000.0 / $mhz}] [get_ports clk]
+if {$top eq "dvbs2_rx_axi"} {
+  create_clock -name clk -period [expr {1000.0 / $mhz}] [get_ports s_axi_aclk]
+  create_clock -name adc_clk -period 16.276 [get_ports adc_clk]
+  set_clock_groups -asynchronous -group clk -group adc_clk
+} else {
+  create_clock -name clk -period [expr {1000.0 / $mhz}] [get_ports clk]
+}
 if {[llength [get_ports -quiet in_clk]]} {
   create_clock -name in_clk -period [expr {1000.0 / $mhz}] [get_ports in_clk]
   set_clock_groups -asynchronous -group clk -group in_clk

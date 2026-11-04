@@ -313,29 +313,114 @@ def ddc_exe():
     return rxsim.build("tb_rx_ddc", ["dvbs2_rx_rot.sv", "dvbs2_rx_ddc.sv", os.path.join(HERE, "tb_rx_ddc.sv")])
 
 
-@pytest.mark.parametrize("dec,finc,period", [(3, 0, 8), (3, 123456789, 6), (18, -98765432, 8), (1, 55555555, 8)])
-def test_ddc(ddc_exe, dec, finc, period):
+def ddc_case(R, D, gain_log2=4):
+    """Coefficients/shifts of the DDC for the split R x D (ddc_config() for
+    the total decimation when it chooses this split, else the same design
+    for this R and D)."""
+    if R <= 1:
+        return dict(R=0, D=D, cic_shift=0, coefs=fx.ddc_coefs(D) if D > 1 else np.array([65536 - 1, 0]),
+                    shift=16)
+    c = fx.ddc_config(R * D, gain_log2) if fx.ddc_split(R * D) == (R, D) else None
+    if c is None:
+        cs = fx.cic_shift_for(R)
+        scale = float(1 << gain_log2) * (1 << cs) / R ** 3
+        h = fx.ddc_cic_fir(R, D)
+        sh = int(np.floor(np.log2(((1 << 17) - 1) / (np.abs(h).max() * scale))))
+        c = dict(R=R, D=D, cic_shift=cs, coefs=np.rint(h * scale * 2.0 ** sh).astype(np.int64), shift=sh)
+    return c
+
+
+# (name, R, D, finc, input period (0: as fast as s_ready allows), overrides)
+DDC_CASES = [
+    ("fir3", 1, 3, 0, 8, {}),
+    ("fir3_nco", 1, 3, 123456789, 6, {}),
+    ("fir18", 1, 18, -98765432, 8, {}),
+    ("fir1", 1, 1, 55555555, 8, {}),
+    ("fir1_fast", 1, 1, 0, 0, {}),
+    ("cic6x30", 6, 30, 0, 8, {}),                         # 33.33 kS/s at 12 MS/s
+    ("cic3x30_nco", 3, 30, -71582788, 8, {}),             # 66.67 kS/s, NCO at -0.2 MHz
+    ("cic2x9_nco", 2, 9, 98765432, 5, {}),
+    ("cic5x7", 5, 7, 0, 4, {}),
+    ("cic32x32_nco", 32, 32, 12345678, 3, {}),            # 512 taps, R^3 = 2^15
+    ("cic32x4_fast", 32, 4, -5555555, 0, {}),
+    ("cic8x4_sat", 8, 4, 0, 4, dict(cic_shift=4, shift_add=-3)),   # CIC and FIR outputs saturate
+]
+
+
+@pytest.mark.parametrize("name,R,D,finc,period,ov", DDC_CASES, ids=[c[0] for c in DDC_CASES])
+def test_ddc(ddc_exe, name, R, D, finc, period, ov):
     os.makedirs(WORK, exist_ok=True)
-    rng = np.random.default_rng(dec)
-    x = np.clip(np.round(rng.standard_normal((6000, 2)) * 3000), -32768, 32767).astype(np.int64)
+    rng = np.random.default_rng(R * 100 + D)
+    nout = 60 if R > 1 else 2000
+    n = max(6000, (nout + 2) * R * D)
+    t = np.arange(n)
+    x = rng.standard_normal((n, 2)) * 3000
+    x[:, 0] += 6000 * np.cos(2 * np.pi * 0.0013 * t)               # a tone near DC (CIC passband)
+    x[:, 1] += 6000 * np.sin(2 * np.pi * 0.0013 * t)
+    x = np.clip(np.round(x), -32768, 32767).astype(np.int64)
     x[100] = [32767, -32768]                      # saturation corner
-    coefs = fx.ddc_coefs(dec) if dec > 1 else np.array([65536 - 1, 0])
-    want = fx.ddc(x, coefs, dec, finc & 0xFFFFFFFF, 16)
-    cfile = os.path.join(WORK, f"ddc_coef{dec}.hex")
+    x[n // 2:n // 2 + 3 * R * D] = [[-32768, 32767]] if ov else [[32767, 32767]]   # full-scale run
+    c = ddc_case(R, D)
+    cs = ov.get("cic_shift", c["cic_shift"])
+    shift = c["shift"] + ov.get("shift_add", 0)
+    coefs = c["coefs"]
+    want = fx.ddc(x, coefs, D, finc & 0xFFFFFFFF, shift, R, cs)
+    if ov:
+        assert (np.abs(want) == 32768).any() or (want == 32767).any()
+        assert (np.abs(fx.cic(fx.mix(x, finc & 0xFFFFFFFF) if finc else x, R, cs)) >= (1 << 17) - 1).any()
+    cfile = os.path.join(WORK, f"ddc_coef_{name}.hex")
     with open(cfile, "w") as f:
-        for c in coefs:
-            f.write(f"{int(c) & 0x3FFFF:05x}\n")
-    fin = os.path.join(WORK, f"ddc_in{dec}.hex")
-    fout = os.path.join(WORK, f"ddc_out{dec}.hex")
+        for v in coefs:
+            f.write(f"{int(v) & 0x3FFFF:05x}\n")
+    fin = os.path.join(WORK, f"ddc_in_{name}.hex")
+    fout = os.path.join(WORK, f"ddc_out_{name}.hex")
     rxsim.write_iq(fin, x)
-    log = rxsim.run(ddc_exe, coef=cfile, dec=dec, ntaps=len(coefs), shift=16, finc=finc & 0xFFFFFFFF,
-                    period=period, **{"in": fin, "out": fout})
+    log = rxsim.run(ddc_exe, coef=cfile, dec=D, ntaps=len(coefs), shift=shift, finc=finc & 0xFFFFFFFF,
+                    cicr=R, cicshift=cs, period=max(period, 1), burst=int(period == 0),
+                    **{"in": fin, "out": fout})
     print(log)
     assert "dropped 0" in log
     got = rxsim.read_hex_cols(fout, (-16, -16))
     assert len(got) == len(want)
     bad = np.nonzero(np.any(got != want, axis=1))[0]
     assert len(bad) == 0, f"first mismatch {bad[0]}: {got[bad[0]]} vs {want[bad[0]]}"
+
+
+def test_ddc_sw_config(tmp_path):
+    """sw/dvbs2_rx.c chooses the same DDC split, shifts and coefficients as
+    model/rxfixed.py ddc_config() for every decimation (and none for the
+    unsupported ones), and the default (no -d) decimation for low rates."""
+    import subprocess
+    sw = os.path.join(HERE, "..", "..", "sw")
+    exe = str(tmp_path / "dvbs2-rx")
+    subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-std=gnu11", "-o", exe,
+                    os.path.join(sw, "dvbs2_rx.c"), os.path.join(sw, "bbdeframe.c"),
+                    os.path.join(sw, "bbframe.c"), "-lm"], check=True)
+
+    def dump(*args):
+        r = subprocess.run([exe, "--dump-coefs"] + [str(a) for a in args], capture_output=True, text=True)
+        if r.returncode:
+            return None
+        out = r.stdout.split("\n")
+        return [int(v) for v in out[32].split()], [int(v) for v in out[34].split()]
+
+    for dec in range(1, fx.CIC_RMAX * fx.DDC_FIR_ONLY_MAX + 1):
+        got = dump("-s", repr(6e6 / dec), "-F", "12e6", "-S", 4 + dec % 5 - 2)
+        if fx.ddc_split(dec) is None:
+            assert got is None, dec
+            continue
+        c = fx.ddc_config(dec, 4 + dec % 5 - 2)
+        assert got is not None, dec
+        assert got[1] == [c["R"], c["D"], c["cic_shift"], c["shift"]], dec
+        assert got[0] == [int(v) for v in c["coefs"]], dec
+    # default: 12 MS/s (symbol rates within 100 ppm); -F auto: ADC >= 2.1 MS/s,
+    # the next supported decimation; -d alone: ADC rate 2 x sr x dec
+    for sr, args, dec in [(33333, (), 180), (66666, (), 90), (500e3, (), 12), (2e6, (), 3),
+                          (33333.0, ("-F", "auto"), 32), (25e3, ("-F", "0"), 42), (12e3, ("-F", "auto"), 88),
+                          (66.67e3, ("-F", "auto"), 16), (1e6, ("-d", 3), 3)]:
+        got = dump("-s", sr, *args)
+        assert got[1][0] * got[1][1] == dec and fx.ddc_split(dec), (sr, args, got[1])
+    assert dump("-s", 123456) is None and dump("-s", 123456, "-F", "auto") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +529,105 @@ def test_rx_axi(rx_axi_exe):
         assert np.array_equal(np.unpackbits(body), bb[k]), f"packet {k} is not the transmitted BBFRAME"
         nw = 1 + (kb // 8 + 7) // 8
         assert not pkt[nw:].any()
+
+
+def lowrate_signal(dec, tone, nframes=2, lead=8, esn0=4.0, seed=7, rms=400.0, resid=0.003):
+    """QPSK 1/2 pilots at 12 MS/s / (2 dec) symbols/s, 2 dec samples/symbol:
+    the signal 1.5 MHz (tone) or -0.8 MHz off the LO plus `resid`
+    cycles/symbol, 40 ppm, AWGN over the whole ADC band (Es/N0 in the
+    signal band), 12-bit samples. tone: a CW 30 dB above the signal in the
+    second alias band of the 2-samples/symbol output (2.3 x 2 Rs above
+    it). Returns (x, BBFRAMEs, NCO increment that removes the offset)."""
+    import grref
+    import rxmodel as rf
+    import txmodel as m
+    rate_idx, pilots = 3, True
+    kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
+    rng = np.random.default_rng(seed)
+    ts = rng.integers(0, 256, ((nframes + 1) * kb // 1504 + 3, 188), dtype=np.uint8)
+    ts[:, 0] = 0x47
+    bb = grref.bbheader(ts.ravel(), m.RATES[rate_idx])[: nframes * kb].reshape(nframes, kb)
+    frames = [m.dummy_plframe_signs()] * lead + \
+             [m.plframe_signs(m.fec_frame(b, rate_idx), rate_idx + 1, pilots) for b in bb] + \
+             [m.dummy_plframe_signs()] * 2
+    tx = m.rrc_interp(m.signs_to_iq(np.concatenate(frames)), m.rrc_coefs(8, 0.35, 16), 8, 16)
+    fs = 12e6
+    Rs, sps = fs / (2 * dec), 2 * dec
+    off = 1.5e6 if tone else -0.8e6
+    y = rf.channel(tx, 8, sps, off / Rs + resid, 40.0, 0.2, 300.0, seed)      # no noise yet
+    ps = np.mean(np.abs(y) ** 2)
+    n = len(y)
+    y += np.sqrt(ps * sps / 10 ** (esn0 / 10) / 2) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    if tone:
+        y += np.sqrt(1000 * ps) * np.exp(2j * np.pi * (off + 2.3 * 2 * Rs) / fs * np.arange(n))
+    y *= rms / np.sqrt(np.mean(np.abs(y) ** 2) / 2)
+    x = np.clip(np.round(np.stack([y.real, y.imag], 1)), -2048, 2047).astype(np.int64)
+    return x, bb, (-round(off / fs * 2 ** 32)) & 0xFFFFFFFF
+
+
+# name, total decimation (12 MS/s / (2 x symbol rate)), testbench ADC clocks per sample
+# (48 MHz ADC clock: the simulation runs the ADC 2-4x faster than 12 MS/s), CW interferer
+LOWRATE_CASES = [("66k", 90, 2, False), ("33k", 180, 1, True)]
+
+
+@pytest.mark.parametrize("name,dec,adcdiv,tone", LOWRATE_CASES, ids=[c[0] for c in LOWRATE_CASES])
+def test_rx_axi_lowrate(rx_axi_exe, name, dec, adcdiv, tone):
+    """66.67 and 33.33 kS/s (decimation 90 = 3 x 30 and 180 = 6 x 30: CIC +
+    FIR, configured as dvbs2-rx does it, ddc_config()) through the wrapper,
+    the offset from the LO removed by the DDC NCO: every DMA packet carries a
+    transmitted BBFRAME, equal to the model chain."""
+    import bchdec
+    import ldpcdec as ld
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    rate_idx, pilots = 3, True
+    kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
+    x, bb, finc = lowrate_signal(dec, tone)
+    cfg = fx.ddc_config(dec)
+    assert cfg["R"] > 1
+    x2 = fx.ddc(x, cfg["coefs"], cfg["D"], finc, cfg["shift"], cfg["R"], cfg["cic_shift"])
+    r = fx.receive(x2, rate_idx + 1, pilots)
+    dm = ld.Decoder(rate_idx)
+    want = []
+    for f in r["frames"]:
+        hard, it, conv = dm.decode(f)
+        out, ok, L = bchdec.decode(hard[:dm.code.K], rate_idx)
+        want.append((np.packbits(out), it, conv, ok, L))
+    assert len(want) == len(bb)
+    fddc = os.path.join(WORK, f"lr_ddc_{name}.hex")
+    with open(fddc, "w") as f:
+        for v in cfg["coefs"]:
+            f.write(f"{int(v) & 0x3FFFF:05x}\n")
+    frrc = os.path.join(WORK, f"lr_rrc_{name}.hex")
+    write_coefs(frrc, fx.timing_coefs(0.35))
+    fin = os.path.join(WORK, f"lr_in_{name}.hex")
+    fout = os.path.join(WORK, f"lr_out_{name}.hex")
+    fregs = os.path.join(WORK, f"lr_regs_{name}.hex")
+    rxsim.write_iq(fin, x)
+    kp, ki = fx.timing_gains()
+    xa, xb = m.gold_init(0)
+    log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=adcdiv, stall=20,
+                    modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc, dec=cfg["D"],
+                    ntaps=len(cfg["coefs"]), shift=cfg["shift"], cicr=cfg["R"], cicshift=cfg["cic_shift"],
+                    tkp=kp, tki=ki, thresh=fx.fs_threshold(),
+                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout})
+    print(log)
+    os.remove(fin)
+    lines = [l.split() for l in open(fregs)]
+    regs = {int(a, 16): int(v, 16) for a, v in lines if not a.startswith("s")}
+    assert regs[0x50] == 0 and regs[0x54] == 0 and regs[0x8C] == 0     # nothing lost
+    words = [l.split() for l in open(fout)]
+    data = np.array([int(w, 16) for w, _ in words], dtype=np.uint64)
+    assert len(data) == 1024 * len(want)
+    for k, (wb, it, conv, ok, L) in enumerate(want):
+        pkt = data[k * 1024:(k + 1) * 1024]
+        h = int(pkt[0])
+        assert h >> 56 == 0xB5 and h & 0xFFFF == kb // 8 and (h >> 16) & 0xFFFF == k
+        assert (h >> 40) & 0x3F == it and (h >> 48) & 1 == int(conv)
+        assert (h >> 49) & 1 == int(ok) and (h >> 50) & 0x1F == L
+        body = pkt[1:].view(np.uint8)[: kb // 8]
+        assert np.array_equal(body, wb), f"packet {k} body"
+        assert np.array_equal(np.unpackbits(body), bb[k]), f"packet {k} is not the transmitted BBFRAME"
 
 
 # ---------------------------------------------------------------------------

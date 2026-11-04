@@ -1,5 +1,6 @@
 // File-driven testbench for dvbs2_rx_ddc.
 //   +coef=<file> (ntaps lines, 18-bit hex) +in= +out= +dec= +ntaps= +shift= +finc= +period=
+//   +cicr= +cicshift= (CIC decimation, 0/1: off) +burst=1 (try to send a sample every clock)
 `timescale 1ns/1ps
 module tb_rx_ddc;
   logic clk = 0, rst = 1;
@@ -9,6 +10,8 @@ module tb_rx_ddc;
   logic [5:0]  dec;
   logic [9:0]  ntaps;
   logic [4:0]  shift;
+  logic [5:0]  cic_r;
+  logic [3:0]  cic_shift;
   logic coef_we = 0;
   logic [8:0] coef_addr;
   logic signed [17:0] coef_data;
@@ -20,7 +23,8 @@ module tb_rx_ddc;
   dvbs2_rx_ddc #(.LUT_FILE("../../rtl/gen/nco_lut.mem")) dut (.*);
 
   string fin, fout, fcoef;
-  int fi, fo, fc, period, rc, tmp, n_in, n_out;
+  int fi, fo, fc, period, rc, tmp, n_in, n_out, burst;
+  logic have = 0;
   logic [17:0] cv;
   logic [15:0] vi, vq;
   logic eof = 0;
@@ -36,6 +40,11 @@ module tb_rx_ddc;
     ntaps = 10'(tmp);
     if (!$value$plusargs("shift=%d", tmp)) tmp = 16;
     shift = 5'(tmp);
+    if (!$value$plusargs("cicr=%d", tmp)) tmp = 0;
+    cic_r = 6'(tmp);
+    if (!$value$plusargs("cicshift=%d", tmp)) tmp = 0;
+    cic_shift = 4'(tmp);
+    if (!$value$plusargs("burst=%d", burst)) burst = 0;
     if (!$value$plusargs("finc=%d", f64)) f64 = 0;
     finc = 32'(f64);
     if (!$value$plusargs("period=%d", period)) period = 8;
@@ -52,13 +61,15 @@ module tb_rx_ddc;
     rst <= 0;
   end
 
+  // a sample every +period clocks (or, with +burst=1, whenever s_ready
+  // allows), held until taken
   int ph = 0;
   always @(posedge clk) begin
-    s_valid <= 0;
+    if (s_valid && s_ready) begin s_valid <= 0; n_in++; end
     if (!rst && !eof) begin
-      if (ph == 0) begin
+      if ((burst != 0 || ph == 0) && !(s_valid && !s_ready)) begin
         rc = $fscanf(fi, "%h %h", vi, vq);
-        if (rc == 2) begin s_valid <= 1; s_i <= vi; s_q <= vq; n_in++; end
+        if (rc == 2) begin s_valid <= 1; s_i <= vi; s_q <= vq; end
         else eof <= 1;
       end
       ph = (ph + 1 == period) ? 0 : ph + 1;

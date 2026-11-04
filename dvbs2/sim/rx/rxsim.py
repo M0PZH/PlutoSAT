@@ -26,11 +26,20 @@ def run(exe, **plus):
     return r.stdout
 
 
+_HEX = np.frombuffer(b"0123456789abcdef", np.uint8)
+
+
 def write_iq(path, x):
-    x = np.asarray(x, np.int64) & 0xFFFF
-    with open(path, "w") as f:
-        for i, q in x:
-            f.write(f"{i:04x} {q:04x}\n")
+    """'iiii qqqq' lines (16-bit hex), vectorized."""
+    x = np.asarray(x, np.int64).reshape(-1, 2) & 0xFFFF
+    b = np.empty((len(x), 10), np.uint8)
+    for c in range(2):
+        for d in range(4):
+            b[:, 5 * c + d] = _HEX[(x[:, c] >> (12 - 4 * d)) & 15]
+    b[:, 4] = ord(" ")
+    b[:, 9] = ord("\n")
+    with open(path, "wb") as f:
+        f.write(b.tobytes())
 
 
 def read_hex_cols(path, widths):
