@@ -54,7 +54,7 @@ def build():
               "--snapshot", snap, "xil_defaultlib.tb_fft", "xil_defaultlib.glbl"], BUILD, f"xelab_{snap}.log")
 
 
-def run(case_dir, double_buf=0, adc_n=0, tap_n=1):
+def run(case_dir, double_buf=0, adc_n=0, tap_n=1, tap_div=1):
     shutil.copy(WIN_MEM, os.path.join(case_dir, "fft_win.mem"))
     # a private copy of the snapshot: xsim writes the run's plusargs into it
     snap = os.path.join(case_dir, "xsim.dir", SNAP[double_buf])
@@ -62,7 +62,7 @@ def run(case_dir, double_buf=0, adc_n=0, tap_n=1):
     shutil.copytree(os.path.join(BUILD, "xsim.dir", SNAP[double_buf]), snap)
     _run(["xsim", SNAP[double_buf], "-R",
           "--testplusarg", f"DIR={case_dir}", "--testplusarg", f"ADC_N={adc_n}",
-          "--testplusarg", f"TAP_N={tap_n}"], case_dir, "xsim.log")
+          "--testplusarg", f"TAP_N={tap_n}", "--testplusarg", f"TAP_DIV={tap_div}"], case_dir, "xsim.log")
     log = open(os.path.join(case_dir, "xsim.log")).read()
     if "FATAL" in log or "DONE at" not in log:
         raise RuntimeError(f"simulation failed, see {case_dir}/xsim.log")
