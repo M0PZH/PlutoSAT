@@ -454,6 +454,22 @@ def test_rx_start_np14(rx_exe):
     assert all(got)
 
 
+def test_rx_falselock_cycle(rx_exe):
+    """Board finding (RX 1.4 as first built): QPSK 1/4 without pilots from a
+    TS of null packets, through the ADC and DDC as on the board: after a PLS
+    drop the search found the same repeating data again at the dummy length
+    each frame, the carrier confirmed those tags (a frame length apart) and
+    acquired 0.374 cycles/symbol. Now the first search after a drop covers a
+    data frame: one acquisition, every frame sent decodes."""
+    import falselock_experiment as fe
+    x2, bb, start = fe.adc_signal(0, False, 12, 5)
+    r, dec = rx_rtl(rx_exe, "falselock_cycle", x2, 0, False, period=40)
+    cr = r["carrier"]
+    print("acq", cr.n_acq, "retype", cr.n_retype, "f", cr.fhat / 2 ** 32, r["fs"].events)
+    assert cr.n_acq == 1 and cr.n_retype == 0 and abs(cr.fhat) < (1 << 20)
+    assert len(dec) >= 3 and all(any(np.array_equal(d, b) for b in bb) for d in dec)
+
+
 def esn0_est(A, E):
     """The software's Es/N0 estimate (dB) from the AMP and ENERGY registers."""
     import math

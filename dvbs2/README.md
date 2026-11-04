@@ -464,6 +464,22 @@ PLS check now ends). At -3 dB a header's
 decode is not confident ~1.5 % of the time, so a lock is lost by this rule
 ~3e-6 per header.
 
+After a PLS drop the next search peak is checked at the data length only
+(the search covers a whole data frame first; model `nodz`). Board finding
+with the first 1.4 build (QPSK 1/4 without pilots, null packets, digital
+loopback, 1 MS/s): 5 of 10 `dvbs2-rx` starts acquired a wrong frequency
+(+374 kHz), retyped 6-7 headers, lost 1-8 frames (twice with input
+overflows from the padding of retyped frames) and re-acquired. Reproduced
+through the ADC and DDC (`falselock_experiment.adc_signal()`, 1 of 32
+starts): after a drop the search found the same repeating data at the
+dummy length again, a frame length after the last false tag, every frame;
+each such tag was dropped, but the carrier took tags a frame length apart
+for confirmed headers and acquired 0.374 cycles/symbol from four of them
+(the search never reached the real header). With the data-length check
+after a drop: 32 of 32 starts acquire once and decode every frame sent. It
+costs a frame per drop at low SNR (QPSK 1/4 pilots, -2 dB, 8 dummy frames:
+165 instead of 170 of 192 frames).
+
 The same weakness, a lock that nothing about the header's content
 confirms, cost the start-up of QPSK 1/4 without pilots (model finding:
 `rxfixed_experiment.run(rate_idx=0, pilots=False, esn0=-1.0, seed=0, lead=8)`
@@ -496,13 +512,14 @@ data):
 | QPSK 1/4 no pilots -2 dB, lead 8 | 5 | | 82 | | 137 | 144 |
 | QPSK 1/4 no pilots -2 dB, lead 16 | | | 186 | | 190 | 189 |
 | QPSK 1/2 no pilots 2.5 dB, lead 8 | 186 | | 192 | | 192 | 192 |
-| QPSK 1/4 pilots -2 dB / -1 dB, lead 8 | 173 / 191 | | 173 / 191 | | 173 / 191 | 170 / 191 |
+| QPSK 1/4 pilots -2 dB / -1 dB, lead 8 | 173 / 191 | | 173 / 191 | | 173 / 191 | 165 / 191 |
 
 (1.4 = all of these plus the start-up details below: frames begun before the
 acquisition not sent, pilots off, and the amplitude/noise average restarted
 after the acquisition.) With pilots the frame sync and acquisition changes
-changed nothing (the same frames decode; 1.4 loses 3 at -2 dB, frames right
-after the acquisition, from the restarted LLR-gain average); the
+changed nothing (the same frames decode; 1.4 loses 8 at -2 dB: 3 frames
+right after the acquisition from the restarted LLR-gain average, 5 from the
+full-frame search after a PLS drop); the
 `rxfixed_experiment.py` 7 cases and `pilotless_experiment.py` (ideal tags, acquisition on 16 dummy
 frames; pilots off, 0.003 rad/symbol: FER 164 / 6 / 0 of 192 at -2.5 / -2.2 /
 -2.0 dB, before 160 / 6 / 1) give the same results as before. At -2 dB with 8 dummy frames the
@@ -515,7 +532,42 @@ the wrong CHECK dropped, the frames decoded), test_rx_start_np14 (QPSK 1/4
 without pilots at -1 dB after 8 dummy frames: 4 of 4 frames, 1.3: 0 of 4) and
 test_framesync_pls (a PLS stand-in busy for 150k clocks: the frame sync waits,
 tags equal the model; confirmed / not confident / other pilots), and
-test_rx_esn0_restart / test_model.py test_rx_esn0_restart (below).
+test_rx_esn0_restart / test_model.py test_rx_esn0_restart (below), and
+test_rx_falselock_cycle (both: QPSK 1/4 without pilots, null packets, ADC and
+DDC as on the board; RTL = model, one acquisition).
+
+Board (pluto2, 2026-11-04, VERSION 0x0001_0400, AD9363 digital loopback;
+plutosatd from station main, `examples/scanclient.rs`, tx0 sending null
+packets, 20 starts per fixed case, 10 / 8 per auto case at 1 MS/s / 333 kS/s,
+a start not locked within 25 s counted as 25 s; the 1.3 column is the
+watchdog measurement in station `docs/api.md` section 4):
+
+| case | 1.3, no watchdog | 1.3 + watchdog | 1.4, watchdog off | 1.4 + watchdog |
+| --- | --- | --- | --- | --- |
+| fixed qpsk9/10 pilots, 1 MS/s | 0.86 / 2.29 / 12.5 s | 1.07 / 1.04 / 3.9 s (15 restarts) | 0.25 / 0.25 / 0.29 s | 0.25 / 0.25 / 0.29 s (0) |
+| fixed qpsk1/4 pilots, 1 MS/s | 0.46 / 0.65 / 3.2 s | 0.45 / 0.70 / 2.5 s (4) | 0.46 / 0.51 / 1.07 s | 0.37 / 0.46 / 1.11 s (0) |
+| fixed qpsk9/10 pilots, 333 kS/s | 0.76 / 4.30 / > 25 s | 0.78 / 1.66 / 6.6 s (11) | 0.46 / 0.46 / 0.51 s | 0.46 / 0.47 / 0.66 s (0) |
+| fixed qpsk1/4 pilots, 333 kS/s | | | 0.87 / 1.03 / 2.50 s | 0.86 / 0.95 / 1.89 s (0) |
+| auto, qpsk9/10 pilots, 1 MS/s | 1.76 / 2.45 / 6.1 s | 1.77 / 1.93 / 4.3 s | | 0.65 / 0.73 / 1.46 s (0) |
+| auto, qpsk1/4 pilots, 1 MS/s | 1.87 / 1.82 / 2.9 s | 1.58 / 1.81 / 3.9 s | | 0.85 / 0.89 / 1.26 s (0) |
+| auto, qpsk9/10 pilots, 333 kS/s | 9.1 / 8.9 / 17.6 s | 2.6 / 4.4 / 9.4 s | | 1.87 / 1.87 / 1.88 s (0) |
+| auto, qpsk1/4 pilots, 333 kS/s | 10.8 / 13.0 / > 25 s | 3.7 / 5.3 / 12.1 s | | 1.87 / 2.28 / 3.50 s (0) |
+
+(median / mean / max; in brackets the watchdog's restarts.) No restart and
+no loss of lock in the 3 s after each of the 160 fixed starts. Pilots
+switched while locked (auto): 1.08 / 0.89 s (1 MS/s), 2.1 / 2.3 s (333 kS/s).
+`dvbs2-selftest` (1 MS/s, 6 s per point): QPSK 1/4 at off, 0, -1, -2 dB,
+1/2 at off, 2, 1.5, 3/4 at off, 5, 4.5, 9/10 at off, 8, 7 dB, pilots off and
+on: PER 0 everywhere; LDPC failures only with pilots on (0-3 per run, the
+frames before the acquisition, which are still sent with pilots on).
+`dvbs2-rx --detect` from qpsk1/2 with the wrong pilots, TX qpsk3/4 pilots,
+1/4, 9/10 pilots, 2/3, PRBS or null packets: all 16 right, 0.8-1.1 s from
+the wrong start, 0.2-0.6 s from the right one. QPSK 2/3 without pilots at
+125 kS/s: Es/N0 34-38 dB in the first second, 27-29 dB from the 5th on (1.3:
+-21 dB, then ~0.6 dB per frame), no LDPC failure. QPSK 1/4 without pilots,
+1 MS/s: PRBS no failure; null packets 5 of 10 starts with a wrong
+acquisition (see above; fixed in 0x0001_0401, not yet measured on the
+board).
 
 ### Start-up details (1.4)
 

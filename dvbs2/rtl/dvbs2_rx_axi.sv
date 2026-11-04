@@ -15,7 +15,8 @@
 //
 // Register map (byte offsets, 32-bit):
 //   0x00 VERSION      RO  0x0001_0500: DDR LLR queue (0xDC..0xF0), the packet header's
-//                         MODCOD/pilots are the frame's own (0x0001_0400: frame sync
+//                         MODCOD/pilots are the frame's own (0x0001_0401: a whole-frame
+//                         search after a PLS drop; 0x0001_0400: frame sync
 //                         confirms headers by their PLS decode
 //                         (no false lock on repeating frames), acquisition headers
 //                         typed by the frame length, pilots off: no header kicks after
