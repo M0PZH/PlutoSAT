@@ -61,7 +61,7 @@ doc = "Symbols per constellation snapshot"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0200 = 1.2 (1.1: no PLS decoder, 0xB8..0xD8 read 0; 1.0: no CIC, DDC_CIC reads 0)"
+doc = "Core version, 0x0001_0200 = 1.2: PLS decoder and TIMING_INTEG preset (1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -289,8 +289,8 @@ doc = "Digital AGC gain, Q5.12"
 [[reg]]
 name = "TIMING_INTEG"
 offset = 0x5C
-access = "ro"
-doc = "Timing loop integrator (Q.24 samples/symbol, signed)"
+access = "rw"
+doc = "Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the core reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200)"
 
 [[reg]]
 name = "FS_STATE"

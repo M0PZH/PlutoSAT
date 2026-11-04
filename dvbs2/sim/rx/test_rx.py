@@ -33,13 +33,15 @@ def timing_exe():
     return rxsim.build("tb_rx_timing", ["dvbs2_rx_timing.sv", os.path.join(HERE, "tb_rx_timing.sv")])
 
 
-@pytest.mark.parametrize("stall,rms,ppm", [(0, 1500.0, 60.0), (30, 300.0, -100.0)])
-def test_timing(timing_exe, stall, rms, ppm):
+@pytest.mark.parametrize("stall,rms,ppm,integ0", [(0, 1500.0, 60.0, 0), (30, 300.0, -100.0, 0),
+                                                   (10, 800.0, -1000.0, 33588), (0, 1500.0, 2000.0, -70000)])
+def test_timing(timing_exe, stall, rms, ppm, integ0):
+    """integ0: integrator preset (TIMING_INTEG write), the last one far off."""
     os.makedirs(WORK, exist_ok=True)
     x, _ = signal(nframes=0, lead=6, rms=rms, ppm=ppm)
     coefs = fx.timing_coefs(0.35)
     kp, ki = fx.timing_gains()
-    tr = fx.Timing(coefs, kp, ki)
+    tr = fx.Timing(coefs, kp, ki, integ0=integ0)
     want = tr.run(x)
     cfile = os.path.join(WORK, "coef.hex")
     with open(cfile, "w") as f:
@@ -49,7 +51,7 @@ def test_timing(timing_exe, stall, rms, ppm):
     fin = os.path.join(WORK, f"t_in{stall}.hex")
     fout = os.path.join(WORK, f"t_out{stall}.hex")
     rxsim.write_iq(fin, x)
-    log = rxsim.run(timing_exe, coef=cfile, kp=kp, ki=ki, stall=stall, **{"in": fin, "out": fout})
+    log = rxsim.run(timing_exe, coef=cfile, kp=kp, ki=ki, integ0=integ0, stall=stall, **{"in": fin, "out": fout})
     print(log)
     got = rxsim.read_hex_cols(fout, (-16, -16))
     n = min(len(got), len(want))
@@ -571,10 +573,10 @@ def check_pls_regs(regs, lines, pls, modcod, pilots):
     assert st["data_count"] >= 1 and st["data"]["code"] == code and st["diff_modcod"] == st["diff_pilots"] == 0
 
 
-def lowrate_signal(dec, tone, nframes=2, lead=8, esn0=4.0, seed=7, rms=400.0, resid=0.003):
-    """QPSK 1/2 pilots at 12 MS/s / (2 dec) symbols/s, 2 dec samples/symbol:
-    the signal 1.5 MHz (tone) or -0.8 MHz off the LO plus `resid`
-    cycles/symbol, 40 ppm, AWGN over the whole ADC band (Es/N0 in the
+def lowrate_signal(dec, tone, nframes=2, lead=8, esn0=4.0, seed=7, rms=400.0, resid=0.003, ppm=40.0):
+    """QPSK 1/2 pilots at 12 MS/s / (2 dec) x (1 + ppm 1e-6) symbols/s,
+    2 dec samples/symbol: the signal 1.5 MHz (tone) or -0.8 MHz off the LO
+    plus `resid` cycles/symbol, AWGN over the whole ADC band (Es/N0 in the
     signal band), 12-bit samples. tone: a CW 30 dB above the signal in the
     second alias band of the 2-samples/symbol output (2.3 x 2 Rs above
     it). Returns (x, BBFRAMEs, NCO increment that removes the offset)."""
@@ -594,7 +596,7 @@ def lowrate_signal(dec, tone, nframes=2, lead=8, esn0=4.0, seed=7, rms=400.0, re
     fs = 12e6
     Rs, sps = fs / (2 * dec), 2 * dec
     off = 1.5e6 if tone else -0.8e6
-    y = rf.channel(tx, 8, sps, off / Rs + resid, 40.0, 0.2, 300.0, seed)      # no noise yet
+    y = rf.channel(tx, 8, sps, off / Rs + resid, ppm, 0.2, 300.0, seed)       # no noise yet
     ps = np.mean(np.abs(y) ** 2)
     n = len(y)
     y += np.sqrt(ps * sps / 10 ** (esn0 / 10) / 2) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
@@ -616,17 +618,24 @@ def test_rx_axi_lowrate(rx_axi_exe, name, dec, adcdiv, tone):
     FIR, configured as dvbs2-rx does it, ddc_config()) through the wrapper,
     the offset from the LO removed by the DDC NCO: every DMA packet carries a
     transmitted BBFRAME, equal to the model chain."""
+    x, bb, finc = lowrate_signal(dec, tone)
+    lowrate_axi(rx_axi_exe, name, dec, adcdiv, x, bb, finc)
+
+
+def lowrate_axi(rx_axi_exe, name, dec, adcdiv, x, bb, finc, integ0=0):
+    """ADC samples x (QPSK 1/2 pilots) through the wrapper configured as
+    dvbs2-rx does it (ddc_config(dec), TIMING_INTEG preset integ0): every DMA
+    packet equals the model chain and carries a transmitted BBFRAME."""
     import bchdec
     import ldpcdec as ld
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
     rate_idx, pilots = 3, True
     kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
-    x, bb, finc = lowrate_signal(dec, tone)
     cfg = fx.ddc_config(dec)
     assert cfg["R"] > 1
     x2 = fx.ddc(x, cfg["coefs"], cfg["D"], finc, cfg["shift"], cfg["R"], cfg["cic_shift"])
-    r = fx.receive(x2, rate_idx + 1, pilots)
+    r = fx.receive(x2, rate_idx + 1, pilots, integ0=integ0)
     dm = ld.Decoder(rate_idx)
     want = []
     for f in r["frames"]:
@@ -649,7 +658,7 @@ def test_rx_axi_lowrate(rx_axi_exe, name, dec, adcdiv, tone):
     log = rxsim.run(rx_axi_exe, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=adcdiv, stall=20,
                     modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb, finc=finc, dec=cfg["D"],
                     ntaps=len(cfg["coefs"]), shift=cfg["shift"], cicr=cfg["R"], cicshift=cfg["cic_shift"],
-                    tkp=kp, tki=ki, thresh=fx.fs_threshold(),
+                    tkp=kp, tki=ki, tinteg0=integ0, thresh=fx.fs_threshold(),
                     pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, **{"in": fin, "out": fout})
     print(log)
     os.remove(fin)
@@ -669,6 +678,27 @@ def test_rx_axi_lowrate(rx_axi_exe, name, dec, adcdiv, tone):
         body = pkt[1:].view(np.uint8)[: kb // 8]
         assert np.array_equal(body, wb), f"packet {k} body"
         assert np.array_equal(np.unpackbits(body), bb[k]), f"packet {k} is not the transmitted BBFRAME"
+
+
+# name, symbol-rate error of the transmitter vs 12 MS/s / 36, TIMING_INTEG preset
+SR_OFFSET_CASES = [("333000_preset", -1000.0, True), ("333667_pullin", 1000.0, False)]
+
+
+@pytest.mark.parametrize("name,ppm,preset", SR_OFFSET_CASES, ids=[c[0] for c in SR_OFFSET_CASES])
+def test_rx_axi_sr_offset(rx_axi_exe, name, ppm, preset):
+    """Decimation 18 (333333 S/s nominal) with the transmitter 1000 ppm off:
+    333000 S/s, the integer-kS rate QO-100 stations use, with the timing
+    integrator preset from the known offset (TIMING_INTEG write,
+    timing_integ_preset()), and +1000 ppm pulled in by the loop from 0
+    (~20000 symbols: 12 dummy frames first). Every DMA packet carries a
+    transmitted BBFRAME, equal to the model chain."""
+    dec = 18
+    x, bb, finc = lowrate_signal(dec, False, ppm=ppm, lead=6 if preset else 12)
+    nominal = 12e6 / (2 * dec)
+    integ0 = fx.timing_integ_preset(nominal * (1 + ppm * 1e-6), nominal) if preset else 0
+    if preset:
+        assert integ0 == fx.timing_integ_preset(333000.0, nominal) == 33588
+    lowrate_axi(rx_axi_exe, f"sr_{name}", dec, 4, x, bb, finc, integ0)
 
 
 # ---------------------------------------------------------------------------

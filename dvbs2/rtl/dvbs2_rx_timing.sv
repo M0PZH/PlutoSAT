@@ -9,6 +9,9 @@
 // The AGC gain multiplies the filter outputs; it is updated per symbol from
 // the on-time symbol power (target 2^25).
 //
+// integ_init: the loop integrator's value at reset (Q.24 samples per symbol
+// beyond 2), for a known symbol-rate offset (model: timing_integ_preset()).
+//
 // One symbol takes NT + 17 clocks (42 for NT = 25): up to clk / 42 symbols
 // per second, e.g. 2.4 MBd at 100 MHz.
 
@@ -20,6 +23,7 @@ module dvbs2_rx_timing #(
 
   input  logic [15:0]        kp,
   input  logic [15:0]        ki,
+  input  logic signed [31:0] integ_init,
   input  logic               coef_we,
   input  logic [9:0]         coef_addr,     // {phase[4:0], tap[4:0]}
   input  logic signed [17:0] coef_data,
@@ -159,7 +163,7 @@ module dvbs2_rx_timing #(
       iss     <= 1'b0;
       k       <= 16'(NT);
       mu      <= '0;
-      integ   <= '0;
+      integ   <= integ_init;
       g       <= G_INIT;
       gacc    <= 32'(G_INIT) << 15;
       prev_i  <= '0;

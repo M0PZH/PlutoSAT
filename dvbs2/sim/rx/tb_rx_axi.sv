@@ -3,7 +3,7 @@
 // DMA packets ("hhhhhhhhhhhhhhhh last") and finally the status registers.
 //   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall= +hold=
 //   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift= +cicr= +cicshift=
-//                    +tkp= +tki= +thresh= +pkp= +pki= +maxit= +plscfg= (PLS_CFG, 0: default)
+//                    +tkp= +tki= +tinteg0= +thresh= +pkp= +pki= +maxit= +plscfg= (PLS_CFG, 0: default)
 `timescale 1ps/1ps
 module tb_rx_axi;
   logic clk = 0, adc_clk = 0, aresetn = 0;
@@ -90,6 +90,7 @@ module tb_rx_axi;
     axi_read(8'h4C, r);
     if (r != 32'(arg("cicr", 0) | (arg("cicshift", 0) << 8))) $fatal(1, "DDC_CIC reads %h", r);
     axi_write(8'h38, arg("tkp", 0) | (arg("tki", 0) << 16));
+    axi_write(8'h5C, arg("tinteg0", 0));
     axi_write(8'h3C, arg("thresh", 0));
     axi_write(8'h40, arg("pkp", 0));
     axi_write(8'h44, arg("pki", 0));

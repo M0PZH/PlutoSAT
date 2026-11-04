@@ -2,13 +2,14 @@
 //   +coef=<file>  1024 lines of 18-bit hex coefficients ({phase, tap})
 //   +in=<file>    input samples, "iiii qqqq" hex per line
 //   +out=<file>   output symbols, same format
-//   +kp=, +ki=    loop gains; +stall=<0..99> percent of idle input/output cycles
+//   +kp=, +ki=    loop gains; +integ0= integrator at reset; +stall=<0..99> percent of idle input/output cycles
 `timescale 1ns/1ps
 module tb_rx_timing;
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
 
   logic [15:0] kp, ki;
+  logic signed [31:0] integ_init;
   logic coef_we = 0;
   logic [9:0] coef_addr;
   logic signed [17:0] coef_data;
@@ -33,6 +34,7 @@ module tb_rx_timing;
     if (!$value$plusargs("coef=%s", fcoef)) $fatal(1, "+coef");
     if (!$value$plusargs("kp=%d", kp)) kp = 0;
     if (!$value$plusargs("ki=%d", ki)) ki = 0;
+    if (!$value$plusargs("integ0=%d", integ_init)) integ_init = 0;
     if (!$value$plusargs("stall=%d", stall)) stall = 0;
     fc = $fopen(fcoef, "r");
     fi = $fopen(fin, "r");

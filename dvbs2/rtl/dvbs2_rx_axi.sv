@@ -13,7 +13,8 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0200 (0x0001_0100: no PLS decoder, 0xB8.. read 0;
+//   0x00 VERSION      RO  0x0001_0200: PLS decoder and TIMING_INTEG preset (0x0001_0100:
+//                         neither, 0xB8.. read 0, a TIMING_INTEG write is ignored;
 //                         0x0001_0000: no CIC, DDC_CIC reads 0)
 //   0x04 ID           RO  "DVR2" (0x44565232)
 //   0x08 SCRATCH      RW
@@ -37,7 +38,10 @@
 //   0x50 IN_OVERFLOWS RO  2-sps samples lost at the core input FIFO
 //   0x54 DDC_DROPPED  RO  DDC outputs lost (input too fast for the taps)
 //   0x58 AGC_GAIN     RO  Q5.12
-//   0x5C TIMING_INTEG RO  timing loop integrator (Q.24 samples/symbol)
+//   0x5C TIMING_INTEG R   timing loop integrator (Q.24 samples/symbol beyond 2)
+//                     W   its value at the core reset (default 0): a known
+//                         symbol-rate offset, 2 (nominal / actual - 1) x 2^24
+//                         (model/rxfixed.py timing_integ_preset())
 //   0x60 FS_STATE     RO  [1:0] 0 search, 1 check, 2 locked
 //   0x64 FS_FOUND     RO  0x68 FS_FLYWHEEL RO  0x6C FS_LOST RO
 //   0x70 FREQ         RO  carrier frequency, turns * 2^32 per symbol
@@ -140,6 +144,7 @@ module dvbs2_rx_axi #(
   logic [5:0]  pls_h;
   logic [9:0]  pls_step;
   logic [31:0] pls_seen_clr;
+  logic [31:0] t_integ0;
 
   logic [3:0] srst_cnt;
   logic       core_rst;
@@ -179,6 +184,7 @@ module dvbs2_rx_axi #(
       ddc_caddr <= '0; rrc_caddr <= '0;
       t_kp <= dvbs2_rx_pkg::TIMING_KP_DEFAULT;
       t_ki <= dvbs2_rx_pkg::TIMING_KI_DEFAULT;
+      t_integ0 <= '0;
       fs_thresh <= dvbs2_rx_pkg::FS_THRESH_DEFAULT;
       pll_kp <= dvbs2_rx_pkg::PLL_KP_DEFAULT;
       pll_ki <= dvbs2_rx_pkg::PLL_KI_DEFAULT;
@@ -210,6 +216,7 @@ module dvbs2_rx_axi #(
           6'h11: pll_ki <= wdata_q[17:0];
           6'h12: max_it <= wdata_q[5:0];
           6'h13: begin ddc_cic_r <= wdata_q[5:0]; ddc_cic_shift <= wdata_q[11:8]; end
+          6'h17: t_integ0 <= wdata_q;
           6'h28: begin snap_arm <= wdata_q[0]; snap_src <= wdata_q[1]; end
           6'h29: begin snap_ra_we <= 1'b1; snap_ra_d <= wdata_q[9:0]; end
           6'h34: pls_seen_clr <= wdata_q;
@@ -276,7 +283,7 @@ module dvbs2_rx_axi #(
     .in_clk(clk), .in_rst(core_rst), .in_valid(d_valid), .in_i(d_i), .in_q(d_q), .in_overflows(in_ovf),
     .clk, .rst(core_rst),
     .coef_we(rrc_cwe), .coef_addr(rrc_caddr), .coef_data(cdata),
-    .timing_kp(t_kp), .timing_ki(t_ki), .modcod, .pilots, .fs_thresh, .gold_xa, .gold_xb,
+    .timing_kp(t_kp), .timing_ki(t_ki), .timing_integ0($signed(t_integ0)), .modcod, .pilots, .fs_thresh, .gold_xa, .gold_xb,
     .pll_kp, .pll_ki, .ldpc_max_it(max_it),
     .pls_h, .pls_step, .pls_seen_clr,
     .m_valid(b_valid), .m_ready(1'b1), .m_data(b_data), .m_last(b_last), .m_ok(b_ok), .m_ldpc_ok(b_ldpc_ok),

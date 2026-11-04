@@ -2,7 +2,7 @@
 //   +coef= +in= (samples "iiii qqqq") +out= (carrier LLRs "ll qq first last")
 //   +bytes= (BBFRAME bytes "dd last ok iters") +maxit=
 //   +period=<clocks per input sample> (no backpressure on the input)
-//   +modcod= +pilots= +thresh= +xa= +xb= +tkp= +tki= +pkp= +pki= +stall=<output %>
+//   +modcod= +pilots= +thresh= +xa= +xb= +tkp= +tki= +tinteg0= +pkp= +pki= +stall=<output %>
 //   +pls=<file> PLS decodes "code conf car grid best second freq" +plsh= +plsstep=
 `timescale 1ns/1ps
 module tb_rx;
@@ -16,6 +16,7 @@ module tb_rx;
   logic [9:0] coef_addr;
   logic signed [17:0] coef_data;
   logic [15:0] timing_kp, timing_ki;
+  logic signed [31:0] timing_integ0;
   logic [4:0] modcod;
   logic pilots;
   logic [31:0] fs_thresh;
@@ -80,6 +81,8 @@ module tb_rx;
     timing_kp = 16'(tmp);
     if (!$value$plusargs("tki=%d", tmp)) tmp = 0;
     timing_ki = 16'(tmp);
+    if (!$value$plusargs("tinteg0=%d", tmp)) tmp = 0;
+    timing_integ0 = 32'(tmp);
     if (!$value$plusargs("pkp=%d", tmp)) tmp = 0;
     pll_kp = 18'(tmp);
     if (!$value$plusargs("pki=%d", tmp)) tmp = 0;

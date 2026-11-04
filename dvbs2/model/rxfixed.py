@@ -332,14 +332,26 @@ def timing_gains(bw=None):
     return round(kp / 2 * 2 ** 19), round(ki / 2 * 2 ** 27)
 
 
+def timing_integ_preset(sym_rate, nominal):
+    """Start value of the timing loop integrator (TIMING_INTEG write) for a
+    transmitter at sym_rate when the receiver's nominal rate (ADC rate /
+    (2 x decimation)) is `nominal`: the integrator holds the step of the
+    sample position per symbol beyond 2 samples, 2 (nominal / sym_rate - 1)
+    in Q.24 samples. E.g. 333000 S/s at decimation 18 (333333 S/s): +33588."""
+    v = round(2 * (nominal / sym_rate - 1) * (1 << MU_F))
+    return max(-(1 << 31), min((1 << 31) - 1, v))
+
+
 class Timing:
-    def __init__(self, coefs, kp, ki, g_init=G_INIT):
+    def __init__(self, coefs, kp, ki, g_init=G_INIT, integ0=0):
+        """integ0: integrator start value (TIMING_INTEG, loaded at reset),
+        timing_integ_preset() for a known symbol-rate offset."""
         self.c = np.asarray(coefs, np.int64)
         self.kp, self.ki = kp, ki
         self.g = g_init
         self.gacc = g_init << 15
         self.mu = 0
-        self.integ = 0
+        self.integ = integ0
         self.prev = (0, 0)
         self.k = NT                     # newest sample of the on-time window
         self.trace = []
@@ -1196,11 +1208,12 @@ class PlsDecoder:
 # whole receiver
 # ---------------------------------------------------------------------------
 
-def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None):
-    """pls: dict(H=, step=) of the PLS decoder (default: the defaults)."""
+def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None, integ0=0):
+    """pls: dict(H=, step=) of the PLS decoder (default: the defaults);
+    integ0: timing integrator start value (TIMING_INTEG write)."""
     bw = TIMING_BW if bw is None else bw
     kp, ki = timing_gains(bw)
-    tr = Timing(timing_coefs(rolloff), kp, ki)
+    tr = Timing(timing_coefs(rolloff), kp, ki, integ0=integ0)
     sym = tr.run(x)
     fs = FrameSync(modcod, pilots)
     cr = Carrier(modcod, pilots, gold)

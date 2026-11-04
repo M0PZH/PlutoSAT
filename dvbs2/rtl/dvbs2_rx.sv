@@ -29,6 +29,7 @@ module dvbs2_rx #(
   input  logic signed [17:0] coef_data,
   input  logic [15:0]        timing_kp,
   input  logic [15:0]        timing_ki,
+  input  logic signed [31:0] timing_integ0,   // timing loop integrator at reset
   input  logic [4:0]         modcod,
   input  logic               pilots,
   input  logic [31:0]        fs_thresh,
@@ -112,7 +113,7 @@ module dvbs2_rx #(
   logic signed [15:0] t_i, t_q;
 
   dvbs2_rx_timing u_timing (
-    .clk, .rst, .kp(timing_kp), .ki(timing_ki),
+    .clk, .rst, .kp(timing_kp), .ki(timing_ki), .integ_init(timing_integ0),
     .coef_we, .coef_addr, .coef_data,
     .s_valid(f_valid), .s_ready(f_ready), .s_i($signed(f_data[15:0])), .s_q($signed(f_data[31:16])),
     .m_valid(t_valid), .m_ready(t_ready), .m_i(t_i), .m_q(t_q),

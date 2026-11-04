@@ -30,7 +30,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0200 = 1.2 (1.1: no PLS decoder, 0xB8..0xD8 read 0; 1.0: no CIC, DDC_CIC reads 0) */
+/* VERSION (ro): Core version, 0x0001_0200 = 1.2: PLS decoder and TIMING_INTEG preset (1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
 #define DVBS2_RX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -166,7 +166,7 @@
 #define DVBS2_RX_DDC_DROPPED 0x054
 /* AGC_GAIN (ro): Digital AGC gain, Q5.12 */
 #define DVBS2_RX_AGC_GAIN 0x058
-/* TIMING_INTEG (ro): Timing loop integrator (Q.24 samples/symbol, signed) */
+/* TIMING_INTEG (rw): Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the core reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200) */
 #define DVBS2_RX_TIMING_INTEG 0x05C
 /* FS_STATE (ro): Frame sync state */
 #define DVBS2_RX_FS_STATE 0x060
