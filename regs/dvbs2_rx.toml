@@ -8,7 +8,7 @@ title = "DVB-S2 receiver"
 uio = "dvbs2-rx"
 size = 0x10000
 id = { offset = 0x04, value = 0x44565232 }        # "DVR2"
-version = { offset = 0x00, value = 0x00010200 }
+version = { offset = 0x00, value = 0x00010300 }
 rtl = "dvbs2/rtl/dvbs2_rx_axi.sv"
 maps = ["regs", "dmac", "buffer"]
 
@@ -61,7 +61,7 @@ doc = "Symbols per constellation snapshot"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0200 = 1.2: PLS decoder and TIMING_INTEG preset (1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0)"
+doc = "Core version, 0x0001_0300 = 1.3: pilots-off carrier tracking and the PLS fix (frame sync checks every search peak at the data length) (1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]

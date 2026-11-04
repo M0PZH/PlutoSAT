@@ -13,9 +13,11 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0200: PLS decoder and TIMING_INTEG preset (0x0001_0100:
-//                         neither, 0xB8.. read 0, a TIMING_INTEG write is ignored;
-//                         0x0001_0000: no CIC, DDC_CIC reads 0)
+//   0x00 VERSION      RO  0x0001_0300: pilots-off carrier tracking and the PLS fix
+//                         (frame sync checks every search peak at the data length)
+//                         (0x0001_0200: PLS decoder and TIMING_INTEG preset;
+//                         0x0001_0100: neither, 0xB8.. read 0, a TIMING_INTEG write is
+//                         ignored; 0x0001_0000: no CIC, DDC_CIC reads 0)
 //   0x04 ID           RO  "DVR2" (0x44565232)
 //   0x08 SCRATCH      RW
 //   0x10 CTRL         RW  [0] enable (take ADC samples), [1] soft reset (self-clearing)
@@ -494,7 +496,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0200;
+          6'h00: s_axi_rdata <= 32'h0001_0300;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};

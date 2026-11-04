@@ -3,6 +3,7 @@
     cd sim/rx && ../../.venv/bin/python -m pytest -v test_rx.py
 """
 import os
+import re
 import sys
 
 import numpy as np
@@ -71,12 +72,19 @@ def model_symbols(x):
     return fx.Timing(fx.timing_coefs(0.35), kp, ki).run(x)
 
 
-@pytest.mark.parametrize("stall,pilots,esn0,drop", [(0, True, 8.0, None), (25, False, 3.0, None),
-                                                    (10, True, 8.0, (80000, 80100))])
-def test_framesync(framesync_exe, stall, pilots, esn0, drop):
-    """drop: remove symbols [a, b) -> shifted headers: flywheel, lost, search, re-lock."""
+@pytest.mark.parametrize("stall,pilots,esn0,drop,tx", [(0, True, 8.0, None, None), (25, False, 3.0, None, None),
+                                                       (10, True, 8.0, (80000, 80100), None),
+                                                       (15, False, 1.0, None, 0)])
+def test_framesync(framesync_exe, stall, pilots, esn0, drop, tx):
+    """drop: remove symbols [a, b) -> shifted headers: flywheel, lost, search, re-lock.
+    tx: another MODCOD (rate index) than the configured QPSK 1/2, no dummy frames: QPSK
+    1/4 without pilots is closer to the dummy header than to QPSK 1/2 (the search peak
+    is a "dummy" one, checked at the data length too)."""
     os.makedirs(WORK, exist_ok=True)
-    x, _ = signal(nframes=10 if drop else 3, lead=3, pilots=pilots, esn0=esn0)
+    if tx is None:
+        x, _ = signal(nframes=10 if drop else 3, lead=3, pilots=pilots, esn0=esn0)
+    else:
+        x, _ = signal(nframes=6, lead=0, rate_idx=tx, pilots=pilots, esn0=esn0)
     sym = model_symbols(x)
     if drop:
         sym = np.concatenate([sym[:drop[0]], sym[drop[1]:]])
@@ -95,7 +103,13 @@ def test_framesync(framesync_exe, stall, pilots, esn0, drop):
     got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
     bad = np.nonzero(got_tag != want_tag)[0]
     assert len(bad) == 0, f"tag mismatch at {bad[:5]}: {got_tag[bad[:5]]} vs {want_tag[bad[:5]]}"
-    assert (want_tag == 1).sum() >= 2
+    assert ((want_tag == 1) if tx is None else (want_tag != 0)).sum() >= 2
+    if tx is not None:
+        # two of the headers found (a frame or two apart: the next one is predicted at
+        # the dummy length again)
+        L = fx.frame_len(pilots)
+        f = [e[1] for e in fs.events if e[0] == "found"]
+        assert any((b - a) % L == 0 and b - a <= 2 * L for a, b in zip(f, f[1:])), fs.events
     if drop:
         kinds = [e[0] for e in fs.events]
         assert "flywheel" in kinds and "lost" in kinds and kinds[-1] == "found"
@@ -588,7 +602,7 @@ def check_pls_regs(regs, lines, pls, modcod, pilots):
     st = pls.status()
     last = st["last"]
     print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
-    assert regs[0x00] == 0x00010200
+    assert regs[0x00] == 0x00010300
     assert regs[0xB8] == pls_word(last, st["count"])
     assert regs[0xBC] == pls_word(st["data"], st["data_count"])
     assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
@@ -898,6 +912,14 @@ PLS_CASES = [
     ("lowsnr_grid", (0, True), (4, True), -2.0, 0.002, 4, 3, 40, 16),
     # symbols faster than the decoder: headers skipped
     ("skip", (6, True), (6, True), 6.0, 0.004, 6, 1, 6, 32),
+    # QPSK 1/4 and 2/5 without pilots and without dummy frames, RX told QPSK 1/2: their
+    # headers are closer to the dummy header than to the QPSK 1/2 one, so the frame sync's
+    # search peak is a "dummy" one, which it now also checks at the data length
+    ("lowrate_np", (0, False), (4, False), 1.0, 0.02, 0, 5, 40, 32),
+    ("lowrate_np25", (2, False), (4, False), 1.0, 0.01, 0, 5, 40, 32),
+    # pilots on, RX not told, no dummy frames: the frame sync cannot find the headers
+    # (dvbs2-rx --detect tries the other pilots), the decodes of what it tags are not them
+    ("pilots_untold", (0, True), (4, False), 3.0, 0.01, 0, 5, 40, 32),
 ]
 
 
@@ -927,11 +949,15 @@ def test_pls(pls_exe, name, tx, rx, esn0, cfo, lead, nfr, period, H):
     assert "skipped 0" in log
     assert got == want
     st = p.status()
-    assert (f"count {st['count']} data {st['data_count']} dcode {st['data']['code']:02x} dvalid 1 "
-            f"diff {st['diff_modcod']} {st['diff_pilots']} seen {st['seen']:08x} skipped 0") in log
+    dcode = f"{st['data']['code']:02x}" if st["data"] else ".."
+    assert re.search(f"count {st['count']} data {st['data_count']} dcode {dcode} dvalid {int(dcode != '..')} "
+                     f"diff {st['diff_modcod']} {st['diff_pilots']} seen {st['seen']:08x} skipped 0", log)
     conf = [d for d in p.results if d["conf"]]
-    assert all(d["code"] in (0, true_code) for d in conf), [d["code"] for d in conf]
     data = [k for k, d in enumerate(p.results) if d["conf"] and d["code"] == true_code]
+    if name == "pilots_untold":
+        assert not data
+        return
+    assert all(d["code"] in (0, true_code) for d in conf), [d["code"] for d in conf]
     assert data and data[0] <= (lead if lead else 1), data
     if name == "lowsnr":
         assert any(d["carrier_hyp"] and not d["grid"] for d in p.results)

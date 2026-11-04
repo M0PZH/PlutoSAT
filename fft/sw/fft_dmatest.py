@@ -9,7 +9,8 @@ numpy.
   fft_dmatest.py SRC CH LEN NAVG COUNT   (SRC 0 rx0, 1 rx1, 2 nbiq)
 
 axi_dmac takes one transfer as active and holds one more in TRANSFER_SUBMIT:
-two are queued at a time.
+two are queued at a time. SRC 2 needs the nbiq channel CH running (e.g.
+`nbiq -c 1:100k:48k -o /dev/null -q &`): without it there are no samples.
 """
 import glob
 import mmap
@@ -88,7 +89,8 @@ def main(src, ch, n, navg, count):
         t = time.time()
         while not (rd(d, D_DONE) >> tid) & 1:
             if time.time() - t > 5:
-                sys.exit(f"packet {k}: transfer {tid} not done (STR_SENT {rd(r, STR_SENT) - s0})")
+                sys.exit(f"packet {k}: transfer {tid} not done (STR_SENT {rd(r, STR_SENT) - s0})" +
+                         (": is nbiq channel %d running?" % ch if src == 2 and rd(r, STR_SENT) == s0 else ""))
         w = np.array(ring[slot * SLOT // 4: slot * SLOT // 4 + 4 + n], np.uint32)
         submit()
         magic, log2n, s_src, seq, navg_p = w[0] & 0xFF, (w[0] >> 8) & 15, (w[0] >> 12) & 3, int(w[1]), w[3] & 0x1FF

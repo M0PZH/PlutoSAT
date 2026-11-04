@@ -187,7 +187,7 @@ ADC ─► DDC ─► timing ─► frame sync ─┬─► carrier + demap ─�
 | Block | Algorithm |
 | --- | --- |
 | `dvbs2_rx_timing` | 32-phase polyphase RRC matched filter (25 taps/phase, loadable), Gardner TED, PI loop; AGC on the filter output (target power 2^25) |
-| `dvbs2_rx_framesync` | differential correlation with the 89 header differentials of the data MODCOD and of the dummy header (any carrier offset); search: the largest metric, checked at the dummy length first (the type is unreliable at low SNR) and then, for a data candidate, at the data length; lock after 2 checks in a row (each > 4x, both together > 10x the mean metric, i.e. the noise level: at -2 dB a header is only ~8x, the largest noise metric of a frame ~7x); locked: +-2 symbol window, but the predicted position unless beaten 2:1, threshold max(register, 1/4 of the average peak), flywheel; the next header is predicted from the carrier's frame type |
+| `dvbs2_rx_framesync` | differential correlation with the 89 header differentials of the data MODCOD and of the dummy header (any carrier offset); search: the largest metric, checked at the dummy length first and then at the data length, whichever candidate gave it (the type is unreliable at low SNR, and QPSK 1/4..2/5 headers are closer to the dummy header than to the QPSK 1/2 one); lock after 2 checks in a row (each > 4x, both together > 10x the mean metric, i.e. the noise level: at -2 dB a header is only ~8x, the largest noise metric of a frame ~7x); locked: +-2 symbol window, but the predicted position unless beaten 2:1, threshold max(register, 1/4 of the average peak), flywheel; the next header is predicted from the carrier's frame type |
 | `dvbs2_rx_ddc` | NCO, optional 3-stage CIC (decimation R = 2..32), decimating FIR (decimation D = 1..63, up to 512 loadable taps, 2 taps per clock): ADC rate -> 2 samples/symbol, total decimation R x D; see [DDC](#ddc) |
 | `dvbs2_ldpc_dec` | layered offset min-sum (offset 1 LSB), 18 lanes over the 360x360 circulants, APP 9 bit, messages 6 bit; phase A reads a check's edges, phase B writes L += R_new - R_old (circulants of one column group sharing a layer, which the DVB-S2 tables have, update in turn); stops when an iteration has no unsatisfied check and no APP sign change; ping-pong APP memories; output the Kldpc hard decisions and the channel's hard decisions of the same bits |
 | `dvbs2_bch_dec` | GF(2^16), t = 12/10/8: odd syndromes 8 bits per clock while the frame comes in, simplified inversionless Berlekamp-Massey, Chien search 8 positions per clock writing the corrected, BB-descrambled bits back into the frame buffer; ok = deg Lambda roots found; counts the pre-FEC bit errors (channel decisions vs. decoder output) |
@@ -374,13 +374,21 @@ symbols away); nothing in the receive path depends on it.
   the price of coherence without a frequency.
 * A wrong code at a wrong grid frequency can beat the right one at low SNR
   and then looks confident: a detection should want a few equal decodes
-  in a row (`dvbs2-rx --detect`: 3).
+  in a row (`dvbs2-rx --detect`: 3, with the core configured to them).
 * The frame sync must still find the headers: with the right pilots it
-  locks with any MODCOD (its correlation keeps the SOF and the pilot-bit
-  differentials); with the wrong pilots it predicts the wrong frame length
-  and finds data headers only next to dummy frames (with dummy frames the
-  first data header is decoded right after them). Without dummy frames the
-  software has to try pilots off and on: 2 hypotheses instead of 22.
+  finds them with any QPSK MODCOD (its correlation keeps the SOF and the
+  pilot-bit differentials: 59..87 of the 89 for another MODCOD, 7..37 for
+  the other pilots). Without pilots the headers of some MODCODs are closer
+  to the dummy header than to the configured one (QPSK 1/4 differs from it
+  in one differential, so with QPSK 1/2 configured the search peak is a
+  "dummy" one: it is checked at the data length too, and then every other
+  header is found, the next one being predicted at the dummy length). With
+  the wrong pilots it predicts the wrong frame length and finds data
+  headers only next to dummy frames, and tags symbols that are not headers
+  (noise-free QPSK data gives metrics up to ~260, a header ~2000, at -3 dB
+  ~300). So `dvbs2-rx --detect` reconfigures the core to the decoded code
+  and tries both pilots (below): with the right configuration the frame
+  sync locks to the real headers.
 * Time: ~1420 clocks per hypothesis (rotation 4 clocks per symbol on one
   DSP, 16 passes x 64 clocks, the metrics on a second DSP during the next
   pass), 94k clocks for 2H + 2 = 66 hypotheses: one dummy frame at 2.38
@@ -393,7 +401,9 @@ symbols away); nothing in the receive path depends on it.
   carrier input: TX QPSK 3/4 pilots with the RX told QPSK 1/2 without
   pilots, a different MODCOD at 0.03 cycles/symbol without dummy frames,
   -2.4 dB matched (carrier hypothesis), -2 dB mismatched (grid), symbols
-  too fast (skipped headers)); `test_rx_end_to_end` (every decode equals the
+  too fast (skipped headers), QPSK 1/4 and 2/5 without pilots or dummy
+  frames with QPSK 1/2 configured, QPSK 1/4 pilots with the RX told no
+  pilots); `test_framesync` (QPSK 1/4 without pilots, QPSK 1/2 configured); `test_rx_end_to_end` (every decode equals the
   model, the confident ones are the right codes); `test_rx_axi*` (the
   registers).
 
@@ -549,19 +559,27 @@ With a core >= VERSION 0x0001_0200 the status line ends with the last
 confident PLS decode of a data header (`, PLS qpsk3/4 pilots`, `!` when it
 is not the configured MODCOD/pilots, `, PLS -` before the first).
 
-`--detect` detects the MODCOD and pilots instead of receiving: it
-configures the core as usual (any `-m`/`-p`), waits for `--detect-count`
-(3) equal confident PLS decodes of data headers in a row, prints them
-(stdout: `MODCOD name pilots short offset_Hz`, the offset being the
-signal's frequency from the LO: `-o` plus the carrier's or the PLS
-decoder's estimate) and exits 0, or exits 1 after `--detect-timeout` (30
-s). The frame sync needs the right pilots (or dummy frames): without
-dummy frames, try `-p` and no `-p`. `--pls-grid H` sets the grid (default
-32; 2H + 2 hypotheses must fit in a dummy frame).
+`--detect` detects the MODCOD and pilots instead of receiving. The frame
+sync needs the right pilots (they set the frame length, and its correlation
+with the headers of the other pilots is weak) but finds the headers of any
+QPSK MODCOD with them, and with the wrong ones it tags symbols that are not
+headers, whose decodes can look confident. So `--detect` starts with the
+configured `-m`/`-p` and reconfigures the core (soft reset) to what the
+decodes say: to a confidently decoded QPSK normal-frame data header that is
+not the configured one (the first such decode since the last
+reconfiguration, or the same one twice in a row), and to the other pilots
+after 10 frames (at least 0.5 s) without a decode of the configured one. It
+prints the MODCOD and pilots after `--detect-count` (3) equal confident
+decodes of the configured one in a row (stdout: `MODCOD name pilots short
+offset_Hz`, the offset being the signal's frequency from the LO: `-o` plus
+the carrier's or the PLS decoder's estimate) and exits 0, or exits 1 after
+`--detect-timeout` (30 s). Codes the receiver cannot demodulate (8PSK..,
+short frames) are reported after 2 x `--detect-count` equal decodes in a
+row. `--pls-grid H` sets the grid (default 32; 2H + 2 hypotheses must fit
+in a dummy frame).
 
 ```
 dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
-dvbs2-rx -s 333333 -f 739.75e6 -p --detect   # if the first one times out
 ```
 
 ## Loopback self-test on the board

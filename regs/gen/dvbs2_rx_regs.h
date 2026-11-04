@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00010200u
+#define DVBS2_RX_VERSION_VALUE 0x00010300u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -30,7 +30,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0200 = 1.2: PLS decoder and TIMING_INTEG preset (1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
+/* VERSION (ro): Core version, 0x0001_0300 = 1.3: pilots-off carrier tracking and the PLS fix (frame sync checks every search peak at the data length) (1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
 #define DVBS2_RX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
