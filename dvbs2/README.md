@@ -710,8 +710,10 @@ tested offset up to +-2 % (`sr_offset_experiment.py --preset`).
 For the second DATV receive slot (`docs/rx2_design.md`) the timing, frame
 sync and carrier engines exist in two-slot versions: one engine serves both
 slots, per symbol, and per slot it does exactly what the single-slot engine
-does (bit exact per slot to the model). They are not yet used by
-`dvbs2_rx` (integration: rx2_design.md step 6).
+does (bit exact per slot to the model). The receiver core `dvbs2_rx` (RX
+2.0) is built from them, see [Two receive slots: the receiver
+(2.0)](#two-receive-slots-the-receiver-20); the single-slot engines stay as
+the generators' sources and the reference.
 
 | Module | How | Per slot | Shared |
 | --- | --- | --- | --- |
@@ -801,6 +803,101 @@ false lock and QPSK 1/4 no-pilots start-up, one in each slot at 1.67 + 0.67
 MBd and exchanged; different MODCODs and pilots; a slot reset during a
 data frame; one slot idle with the other at 2.27 MBd; the frames decode
 with the LDPC/BCH models).
+
+### Two receive slots: the receiver (2.0)
+
+```
+ADC ─► async FIFO ─┬─► DDC 0 ─► FIFO 0 ─┐                       ┌─► PLS decoder 0
+                   └─► DDC 1 ─► FIFO 1 ─┴─► timing2 ─► framesync2 ─► carrier2 ─► LLR queue (DDR) ─► LDPC ─► BCH ─► packets (bit 55: slot)
+      (the DDCs share one NCO ROM)                                └─► PLS decoder 1
+```
+
+`dvbs2_rx` (core) and `dvbs2_rx_axi` (wrapper, VERSION 0x0002_0000) run two
+receive slots on rx0. Each slot has its own DDC (frequency, decimation), symbol
+rate, MODCOD, pilots, Gold code, loop gains, iteration limit and PLS decoder;
+the two symbol rates together must stay below 2.38 MBd; in practice 2.27 MBd,
+as for one slot (a long run at 2.33 MBd overflows the faster slot's input
+FIFO, rx2_design.md 5.5).
+Per slot the receiver equals the single-slot model fed with that slot's
+samples, whatever the other slot does.
+
+* **Input:** one ADC FIFO feeds both DDCs with the same samples (a slot that
+  is disabled or in its reset is skipped). The DDCs share the NCO ROM (one
+  RAMB36, a port each; `dvbs2_rx_ddc` `EXT_NCO`). Each DDC writes into its
+  slot's synchronous FIFO (`dvbs2_sync_fifo`, 512 words, `FIFO_RAM` block or
+  distributed); `IN_OVERFLOWS` counts per slot.
+* **LLR queue:** always in the path (no bypass): the carrier's LLR words of
+  both slots, each tagged with its slot, go through the DDR ring to the
+  decoder, each frame with its slot's MODCOD/pilots, `LDPC_MAX_IT` and tag.
+  `LLRQ_BASE` is 0 after reset: the queue is off and nothing is decoded
+  until software writes the reserved region's address (UIO map 3, which
+  `dvbs2-rx` does), so the PL never writes into memory a device tree without
+  the region does not reserve. The ring layout (`LLRQ_BASE`, frames per
+  slot) takes effect at the receiver's soft reset (while the queue is off
+  also at a slot's); QHI and MAX_IT_LO are live.
+* **Packets:** one DMA stream, header bit 55 = slot, the frame counter
+  [31:16] counts per slot; the two 8 KB packet slots are shared.
+* **Resets:** `CTRL` (0x210) [1] resets the whole receiver. A slot's own
+  `CTRL` [1] resets the slot alone (DDC, FIFO, its context in the shared
+  engines, PLS decoder, its counters, including its LLR queue drop count);
+  the other slot runs on unaffected. A frame cut by the reset is not
+  decoded; frames already in the queue are (with the settings they were
+  received with).
+* **Constellation snapshot:** one buffer; arming it through a slot's bank
+  captures that slot (`SNAP_CTRL` [3] reads the slot).
+* **Counters:** every status register is per slot, in its bank; the decoder
+  counts (`LDPC_FRAMES`, `LDPC_FAILED`, `BCH`, `RAW_ERR`, ...) count the
+  slot's frames at the BCH output.
+
+Register map v2 (header of `rtl/dvbs2_rx_axi.sv`, `regs/dvbs2_rx.toml`): slot
+s's bank at 0x100 s holds the 1.x map at the 1.x offsets for that slot
+(VERSION, ID and SCRATCH read the same in every bank; `CTRL` is the slot's:
+[0] enable, [1] its reset); the shared registers are at 0x200: VERSION
+0x200, ID 0x204, SCRATCH 0x208, `CTRL` 0x210 ([1] receiver reset, [9:8]
+slot enables), `SNAP_*` 0x2A0..0x2A8 ([3] slot), the LLR queue's
+`LLRQ_BASE`/`CFG`/`STAT`/`DROPPED`/`AXI_ERR` at 0x2E0..0x2F0 (1.5:
+0xE0..0xF0; `LLRQ_CTRL` is gone). A slot bank's 0xEC is the slot's
+`LLRQ_DROPPED`. Software for one slot adds 0x100 s to the 1.x offsets; 1.x
+software runs on slot 0 (`test_rx_axi[v1]`) once `LLRQ_BASE` is set (its
+`CTRL` soft reset now resets slot 0 only). The major version is 2 because
+of that: without `LLRQ_BASE` (and the device tree's region) nothing is
+decoded, and 1.5's queue registers moved.
+
+Tests: `test_rx.py` runs every whole-receiver case of 1.x through the
+two-slot core in either slot with the other idle (`tb_rx`:
+`test_rx_end_to_end`, the regressions `test_rx_falselock`,
+`test_rx_falselock_cycle`, `test_rx_start_np14`, `test_rx_esn0_restart`),
+and `test_rx_axi` through the wrapper (slot 0 by map v2, slot 0 as 1.x
+software does it, slot 1, and without `LLRQ_BASE`: the slot demodulates,
+nothing is decoded, no memory access). `test_rx2.py`: `test_core2_*` (both slots at once
+through the core, per slot the LLRs, PLS decodes and status equal the model
+and every decoded frame equals the LDPC/BCH models of the slot's frames, in
+order: different MODCODs/pilots/offsets at 1.67 + 0.67 MBd, the 1.4
+regressions one in each slot both ways round, a reset of slot 1 in a data
+frame, slot 1 idle with slot 0 at 2.27 MBd, LLR queue drops with one-frame
+rings, the shared iteration cap), `test_axi2_two_signals` (both signals in one
+12 MS/s ADC stream: 2 MBd QPSK 1/2 pilots 2.6 MHz below the LO and 333 kBd
+QPSK 3/4 without pilots, another Gold code, 2 MHz above it, every packet of
+each slot equal to its model and a transmitted BBFRAME, per-slot frame
+counters, registers and PLS status, slot 1's snapshot).
+
+`dvbs2-rx` runs either slot or both (one process owns the DMA and sorts the
+packets by their slot bit):
+
+```
+dvbs2-rx --slot 0 -s 1.5e6 -m qpsk4/5 -p -o -2.4e6 -u 192.168.2.10:1234 \
+         --slot 1 -s 333333 -m qpsk1/2 -p -o 1.9e6 -u 192.168.2.10:1235 -f 740e6
+```
+
+Options before any `--slot` are slot 0's (without `--slot` dvbs2-rx is the
+1.x tool for slot 0, also on a 1.x core); `-f`, `-G`, `-F`, `-q`, `-n` are
+the receiver's. Slot 1's TS goes to slot 0's UDP port + 1 unless given. The
+status line shows both slots (`[s] MODCOD state offset Es/N0 BER frames/LDPC
+failed/BCH failed/dropped TS ...`), `-C` snapshots alternate between the
+slots that ask for one. It sets each slot's `LDPC_MAX_IT` (`-I`, default 30)
+and the queue's cap from rx2_design.md 6.2: MAX_IT_LO = the iterations the
+decoder can give every frame of both slots, QHI = slots in use + 1.
+`--detect` works with one slot (the slot's soft reset only).
 
 ### Fishball bitstream integration
 

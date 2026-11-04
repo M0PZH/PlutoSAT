@@ -5,8 +5,10 @@ Status: **final** study and prototypes, 2026-11-04. The carrier buffer fix
 `wt/carrier-bram`). Implementation steps 2 and 3 (section 12) are done on
 branch `wt/rx2-queue`: the per-frame rate and tag through the LDPC and BCH
 decoders, and the DDR LLR queue (`rtl/dvbs2_rx_llrq.sv`), usable today for
-the one slot (section 7.3). All prototype RTL, tests and OOC runs are in
-this directory (`rx2/`).
+the one slot (section 7.3). Steps 4 and 5 (the two-slot engines, section
+5.4) are on `wt/rx2-engines`; steps 6 and 7 (the integrated two-slot receiver,
+RX 2.0, register map v2, full build) on `wt/rx2`, section 5.5. All prototype
+RTL, tests and OOC runs are in this directory (`rx2/`).
 
 **Decided by the user (2026-11-04):**
 
@@ -314,6 +316,66 @@ BRAM FIFOs) +~1.5 (LLR queue staging/read FIFOs, step 3's estimate) =
 (decision 13): seg and zbuf of carrier2 in LUTRAM again: -4.5 tiles for an
 estimated +4.8k LUT. The same seg split (1K + 512 deep) would also save
 0.5 tile in today's single-slot carrier.
+
+### 5.5 The integrated receiver (implementation steps 6 and 7, RX 2.0)
+
+Branch `wt/rx2`; `dvbs2/README.md`, section "Two receive slots: the receiver
+(2.0)", has the details and the tests.
+
+* `rtl/dvbs2_rx.sv` is the two-slot core (the single-slot core of 1.x is
+  replaced; the single-slot engines stay as the generators' sources): per
+  slot a synchronous input FIFO (`rtl/dvbs2_sync_fifo.sv`, 512 words, one
+  RAMB18 each), `dvbs2_rx_timing2` -> `dvbs2_rx_framesync2` ->
+  `dvbs2_rx_carrier2` with a `dvbs2_rx_pls` per slot, the LLR queue always
+  on (no bypass), the LDPC/BCH decoders, per-slot decoder counters at the
+  BCH output. `rst_s[s]` resets a slot's FIFO, engine contexts, PLS
+  decoder, counters and its LLR queue drop count.
+* `rtl/dvbs2_rx_axi.sv`: two DDCs sharing one NCO ROM (`dvbs2_rx_ddc`
+  `EXT_NCO`, a dual-port RAMB36) fed in lockstep from one ADC FIFO (a slot
+  disabled or in reset is skipped), register map v2 (section 7.1 as
+  planned: slot banks 0x000 / 0x100 with the 1.x offsets, shared 0x200;
+  the LLR queue registers at 0x2E0..0x2F0, `LLRQ_CTRL` dropped), per-slot
+  `CTRL` (enable, reset), shared `CTRL` 0x210 (receiver reset, slot
+  enables), one snapshot buffer armed per slot bank, per-slot packet
+  counters, header bit 55. `regs/dvbs2_rx.toml` describes it (an `[[array]]`
+  SLOT). **VERSION 0x0002_0000**: 1.x single-slot software works on slot 0
+  (its offsets are slot 0's bank; tested) once `LLRQ_BASE` is set: its
+  reset value is 0, the queue off and nothing decoded, so that the PL never
+  writes into unreserved memory (e.g. 1.x software with an old device
+  tree); and 1.5's queue registers moved. Hence the major number.
+* Throughput: as with one slot, the timing engine's 42 clocks per symbol
+  leave about 95 % of the clock usable. A long run at 2.33 MBd in total
+  (2 MBd + 333 kBd, `tb_rx` with the wrapper test's signals) keeps the
+  faster slot's FIFO at 150..480 of 512 samples (the timing engine 95 %
+  busy, the carrier's header jobs holding the frame sync ~3 % of the time)
+  and overflows after ~20 M clocks; the shorter runs of the engine tests
+  do not get there. **The practical total is 2.27 MBd** (as for one slot: 44
+  clocks per symbol); `dvbs2-rx` refuses more than 2.28 MBd together. The
+  wrapper test runs 1.5 MBd + 667 kBd (2.17 MBd).
+
+Full fishball build (Vivado 2026.1, 100 MHz, no fallback needed: the
+carrier's seg/zbuf stay in BRAM, no recovery item, the full BCH, nbiq and
+FFT kept): **WNS +0.013 ns** (TNS 0, WHS +0.019 ns), 42218 LUTs (79.4 %),
+40100 FFs (37.7 %), slices 95.9 %, **135 of 140 BRAM tiles** (96.4 %), 155
+DSPs (70.5 %). The worst path is the slot enable's synchronizer into the
+ADC clock (`en_a`, timed as a 2 ns inter-clock path as 1.x's was; a false
+path constraint would take it out); within the 100 MHz clock the worst is
++0.199 ns (LDPC decoder; an earlier build of the same design: +0.154 ns,
+DDC reset fanout next). `dvbs2_rx` in the routed design (first build):
+25669 LUTs, 17715 FFs, 94 RAMB36 + 17 RAMB18 (102.5 tiles), 89 DSPs:
+
+| Block | LUT | FF | RAMB36 | RAMB18 | DSP |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| wrapper (registers, packet buffer 4, snapshot 1, NCO ROM 1) | 754 | 1551 | 6 | 0 | 0 |
+| DDC x 2 | 641 + 642 | 1044 + 1044 | 0 | 3 + 3 | 14 + 14 |
+| LDPC decoder | 7754 | 3685 | 80 | 1 | 0 |
+| carrier2 | 5957 | 3760 | 5 | 1 | 34 |
+| BCH decoder | 4077 | 1634 | 2 | 0 | 0 |
+| framesync2 | 2340 | 1877 | 0 | 7 | 8 |
+| timing2 | 1147 | 726 | 1 | 0 | 15 |
+| PLS decoder x 2 | 641 + 769 | 828 + 828 | 0 | 0 | 2 + 2 |
+| LLR queue | 769 | 490 | 0 | 0 | 0 |
+| core glue, input FIFOs | 93 | 160 | 0 | 2 | 0 |
 
 ## 6. Sharing the LDPC/BCH decoder
 
@@ -627,8 +689,8 @@ probably a few hundred LUT, no BRAM).
 | 3 | DDR LLR queue (writer, reader, descriptors, drop counter, iteration cap), HP1 (after the IIO DMA removal), DT reserved-memory; Verilator AXI memory model; tests (**done**, `wt/rx2-queue`; section 7.3) | 2.5-3 d | 2 |
 | 4 | timing2 production (per-slot reset is in the prototype but untested; coefficient bank addressing; README) | 0.5 d | |
 | 5 | framesync2 / carrier2 from the generators on post-PLS RTL; hand-review the context lists; per-slot reset of the shadow set; tests | 2.5-3 d | 1 |
-| 6 | Second DDC (shared NCO ROM), synchronous input FIFOs, `dvbs2_rx2` core, `dvbs2_rx_axi` map v2, packet slot bit, snapshot slot select; `tb_rx_axi` with 2 signals | 2 d | 3-5 |
-| 7 | BRAM recovery items as the build requires | 0.5-1 d | 6 |
+| 6 | Second DDC (shared NCO ROM), synchronous input FIFOs, `dvbs2_rx2` core, `dvbs2_rx_axi` map v2, packet slot bit, snapshot slot select; `tb_rx_axi` with 2 signals (**done**, `wt/rx2`, section 5.5: the core keeps the name `dvbs2_rx`) | 2 d | 3-5 |
+| 7 | BRAM recovery items as the build requires (**done**: none needed, 135 of 140 tiles, WNS +0.094 ns) | 0.5-1 d | 6 |
 | 8 | Software: `dvbs2-rx` per slot (`-S 0/1`), one DMA owner with demultiplexing (dvbs2-rx with two slots or plutosatd), regs TOML, README | 2 d | 6 |
 | 9 | Full build, timing closure (pblocks if needed), board tests | 1-3 d | 7, 8 |
 | | **Total** | **about 13-17 working days** | |
