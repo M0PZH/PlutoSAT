@@ -578,9 +578,15 @@ int main(int argc, char **argv)
 			dec++;
 	}
 	double fs = 2 * sr * dec;
-	if (adc_rate > 0 && fabs(fs - adc_rate) > 1e-4 * adc_rate) {
-		fprintf(stderr, "-d %d and -F %.0f disagree (ADC rate %.0f)\n", dec, adc_rate, fs);
-		return 2;
+	if (adc_rate > 0) {
+		if (fabs(fs - adc_rate) > 1e-4 * adc_rate) {
+			fprintf(stderr, "-d %d and -F %.0f disagree (ADC rate %.0f)\n", dec, adc_rate, fs);
+			return 2;
+		}
+		/* the ADC runs at the given rate (12 MS/s by default); the symbol
+		 * rate is the exact fs / (2 dec), e.g. 33333.33 for -s 33333 */
+		fs = adc_rate;
+		sr = fs / (2.0 * dec);
 	}
 	struct ddc_cfg dc;
 	if (dec < 1 || dec > DEC_MAX || fs > 61.44e6 || ddc_gain < 0 || ddc_gain > 8 ||
