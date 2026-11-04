@@ -4,7 +4,8 @@
 //                samples arriving with the slot's FIFO full are lost)
 //   +coef<s>=    RRC coefficients (1024)
 //   +out<s>=     carrier LLRs "ll qq first last"; "reset" where the slot was reset
-//   +bytes<s>=   BBFRAME bytes "dd last ok iters ldpc_ok nerr raw rate modcod pilots slot"
+//   +bytes<s>=   BBFRAME bytes "dd last ok iters ldpc_ok nerr raw rate modcod pilots slot";
+//                "reset" likewise
 //   +pls<s>=     PLS decodes "code conf car grid best second freq"; "reset" likewise
 //   +modcod<s>= +pilots<s>= +thresh<s>= +xa<s>= +xb<s>= +tkp<s>= +tki<s>= +tinteg0<s>=
 //   +pkp<s>= +pki<s>= +plsh<s>= +plsstep<s>= +maxit<s>=
@@ -167,6 +168,7 @@ module tb_rx;
           ph[s] = 0;
           $fdisplay(fo[s], "reset");
           $fdisplay(fp[s], "reset");
+          $fdisplay(fb[s], "reset");
           $rewind(fi[s]);
         end else begin
           if (ph[s] == 0) begin

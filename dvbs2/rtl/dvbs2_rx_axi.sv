@@ -14,6 +14,8 @@
 //           errors located, [55] receive slot, [63:56] 0xB5
 //   word 1+ BBFRAME bytes (BB-descrambled), then zeros
 // A frame that finds both packet slots full is dropped (PKT_DROPPED of its slot).
+// A packet is read out only once the DMA is ready (tready); a slot's reset
+// removes its packets not yet started.
 //
 // Register map v2 (byte offsets, 32-bit; 10 address bits): a bank per receive
 // slot (slot 0 from 0x000, slot 1 from 0x100), the shared registers at 0x200. A bank
@@ -532,7 +534,7 @@ module dvbs2_rx_axi #(
   logic [PW:0]   slot_nw [2];               // words with data (header + BBFRAME)
   logic [1:0]    slot_rx;                   // receive slot of each packet slot's frame
   logic          wslot, rslot;
-  logic          w_act, w_drop;
+  logic          w_act, w_drop, w_slot;     // w_slot: receive slot of the frame being written
   logic [PW-1:0] w_word;                    // next data word
   logic [2:0]    w_byte;
   logic [63:0]   w_acc;
@@ -544,6 +546,11 @@ module dvbs2_rx_axi #(
   logic [PW:0]   pb_waddr;
   logic [63:0]   pb_wdata;
   logic          clr_full, clr_slot;
+  logic          r_act;
+  // a slot's reset removes its packets not yet being read (the oldest: fl_r,
+  // the newer of two: fl_n) and aborts its frame being written
+  wire           fl_r = slot_full[rslot] && slot_rst[slot_rx[rslot]] && !r_act;
+  wire           fl_n = slot_full[!rslot] && slot_rst[slot_rx[!rslot]];
 
   always_ff @(posedge clk) begin
     pb_we <= 1'b0;
@@ -562,6 +569,7 @@ module dvbs2_rx_axi #(
         if (!w_act && !w_drop) begin
           // first byte: claim the write slot or drop the frame
           act = !slot_full[wslot];
+          w_slot <= b_slot;
           if (!act) begin
             w_drop <= 1'b1;
             pkt_dropped[b_slot] <= pkt_dropped[b_slot] + 16'd1;
@@ -604,6 +612,12 @@ module dvbs2_rx_axi #(
         wslot <= !wslot;
       end
       if (clr_full) slot_full[clr_slot] <= 1'b0;
+      if (fl_r) slot_full[rslot] <= 1'b0;
+      if (fl_n) begin slot_full[!rslot] <= 1'b0; wslot <= !rslot; end   // (both full: wslot == rslot)
+      if (slot_rst[w_slot]) begin
+        if (w_act) begin w_act <= 1'b0; w_drop <= !(b_valid && b_last); end
+        hdr_pending <= 1'b0;
+      end
       for (int s = 0; s < 2; s++)
         if (slot_rst[s]) begin pkt_cnt[s] <= '0; pkt_dropped[s] <= '0; end
     end
@@ -611,7 +625,6 @@ module dvbs2_rx_axi #(
   end
 
   // reader: words 0 .. PKT_WORDS-1 of the full slot, zeros after the data
-  logic          r_act;
   logic [PW-1:0] r_word;
   logic [PW:0]   r_nw;
   logic          rd_v, rd_pad, rd_last;
@@ -633,7 +646,10 @@ module dvbs2_rx_axi #(
       of_wp <= '0; of_rp <= '0;
       pkt_sent[0] <= '0; pkt_sent[1] <= '0;
     end else begin
-      if (!r_act && slot_full[rslot] && !clr_full) begin
+      if (fl_r) begin
+        rslot <= !rslot;                     // its packet was removed (the writer side clears it)
+      end else if (!r_act && slot_full[rslot] && !clr_full && m_axis_tready) begin
+        // (only with the DMA ready: a packet the DMA has not started stays removable)
         r_act  <= 1'b1;
         r_word <= '0;
         r_nw   <= slot_nw[rslot];

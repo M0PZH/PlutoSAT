@@ -857,9 +857,13 @@ samples, whatever the other slot does.
 * **Resets:** `CTRL` (0x210) [1] resets the whole receiver. A slot's own
   `CTRL` [1] resets the slot alone (DDC, FIFO, its context in the shared
   engines, PLS decoder, its counters, including its LLR queue drop count);
-  the other slot runs on unaffected. A frame cut by the reset is not
-  decoded; frames already in the queue are (with the settings they were
-  received with).
+  the other slot runs on unaffected. Nothing of the slot from before its
+  reset comes out after it: its frames carry an epoch bit (toggled by the
+  reset) through the queue and the decoders and are dropped at the decoder
+  output if it is not the current one, and the reset removes the slot's
+  packets in the packet buffer that the DMA has not started (a packet is
+  read out only once the DMA is ready). So restarting one slot (or 1.x
+  software's soft reset) gives no stale frames.
 * **Constellation snapshot:** one buffer; arming it through a slot's bank
   captures that slot (`SNAP_CTRL` [3] reads the slot).
 * **Counters:** every status register is per slot, in its bank; the decoder
@@ -884,14 +888,16 @@ Tests: `test_rx.py` runs every whole-receiver case of 1.x through the
 two-slot core in either slot with the other idle (`tb_rx`:
 `test_rx_end_to_end`, the regressions `test_rx_falselock`,
 `test_rx_falselock_cycle`, `test_rx_start_np14`, `test_rx_esn0_restart`),
-and `test_rx_axi` through the wrapper (slot 0 by map v2, slot 0 as 1.x
+`test_rx_axi_hold[True]` (a slot reset while the DMA is held removes the
+held packets), and `test_rx_axi` through the wrapper (slot 0 by map v2, slot 0 as 1.x
 software does it, slot 1, and without `LLRQ_BASE`: the slot demodulates,
 nothing is decoded, no memory access). `test_rx2.py`: `test_core2_*` (both slots at once
 through the core, per slot the LLRs, PLS decodes and status equal the model
 and every decoded frame equals the LDPC/BCH models of the slot's frames, in
 order: different MODCODs/pilots/offsets at 1.67 + 0.67 MBd, the 1.4
 regressions one in each slot both ways round, a reset of slot 1 in a data
-frame, slot 1 idle with slot 0 at 2.27 MBd, LLR queue drops with one-frame
+frame (also just after a frame left the carrier: that frame is not output),
+slot 1 idle with slot 0 at 2.27 MBd, LLR queue drops with one-frame
 rings, the shared iteration cap), `test_axi2_two_signals` (both signals in one
 12 MS/s ADC stream: 2 MBd QPSK 1/2 pilots 2.6 MHz below the LO and 333 kBd
 QPSK 3/4 without pilots, another Gold code, 2 MHz above it, every packet of

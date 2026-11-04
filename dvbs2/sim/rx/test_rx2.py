@@ -604,18 +604,30 @@ def core_run(exe, name, slots, stall=5, **common):
         bad = np.nonzero(np.any(got[:len(want), :2] != want, axis=1))[0]
         assert len(bad) == 0, f"slot {s}: {len(bad)} mismatches, first at word {bad[0]}"
         # the frames sent to the decoder: the complete ones of every segment
-        frames = []
-        for g in segs:
-            n = len(g) // 32400
-            frames += [g[k * 32400:(k + 1) * 32400, :2].astype(np.int8).reshape(64800) for k in range(n)]
-        # decoded frames of the slot
-        rows = rxsim.read_hex_cols(plus[f"bytes{s}"], (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
-        ends = list(np.nonzero(rows[:, 1])[0]) if len(rows) else []
-        got_f, p = [], 0
-        for e in ends:
-            got_f.append(rows[p:e + 1])
-            p = e + 1
-        assert p == len(rows)
+        segf = [[g[k * 32400:(k + 1) * 32400, :2].astype(np.int8).reshape(64800) for k in range(len(g) // 32400)]
+                for g in segs]
+        # decoded frames of the slot, per segment (split where the slot was reset)
+        bsegs = read_segments(plus[f"bytes{s}"], (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
+        assert len(bsegs) == nseg
+        gsegs = []
+        for rows in bsegs:
+            ends = list(np.nonzero(rows[:, 1])[0]) if len(rows) else []
+            gf, p = [], 0
+            for e in ends:
+                gf.append(rows[p:e + 1])
+                p = e + 1
+            assert p == len(rows)
+            gsegs.append(gf)
+        if nseg == 2:
+            # before the reset: a prefix of the first segment's frames (the rest were in the
+            # decoder or the queue: dropped); after it: the second segment's frames only
+            assert len(gsegs[0]) <= len(segf[0])
+            frames, got_f = segf[0][:len(gsegs[0])] + segf[1], gsegs[0] + gsegs[1]
+            print(f"slot {s}: {len(gsegs[0])} of {len(segf[0])} frames out before the reset")
+            pre = (len(gsegs[0]), len(segf[0]))
+        else:
+            frames, got_f = segf[0], gsegs[0]
+            pre = None
         rate_idx = sl["rate_idx"]
         assert all(np.all(g[:, 7:] == (rate_idx, rate_idx + 1, int(sl["pilots"]), s)) for g in got_f)
         drops = int(line.split("llrq dropped ")[1].split(",")[0])
@@ -640,10 +652,11 @@ def core_run(exe, name, slots, stall=5, **common):
             if ok:
                 assert g[-1, 6] == raw
             dec.append(np.unpackbits(g[:, 0].astype(np.uint8)))
-        n_ok = sum(1 for g in got_f if g[-1, 2])
-        assert f"ldpc frames {len(got_f)} failed {sum(1 for g in got_f if not g[-1, 4])}," in line, line
-        assert f"failed {len(got_f) - n_ok}, pls" in line, line
-        out.append(dict(r=r, llr=frames, dec=dec, line=line,
+        last = gsegs[-1]                     # (the slot's counters restart at its reset)
+        n_ok = sum(1 for g in last if g[-1, 2])
+        assert f"ldpc frames {len(last)} failed {sum(1 for g in last if not g[-1, 4])}," in line, line
+        assert f"failed {len(last) - n_ok}, pls" in line, line
+        out.append(dict(r=r, llr=frames, dec=dec, line=line, pre=pre,
                         iters=[(int(g[-1, 3]), int(g[-1, 4])) for g in got_f]))
     assert " axi err 0," in log
     return out, log
@@ -685,15 +698,22 @@ def test_core2_np14_falselock(rx_exe):
     check_falselock(out[1]["r"], np.concatenate(out[1]["llr"]).reshape(-1, 2), bbf, start)
 
 
-def test_core2_reset1(rx_exe):
+@pytest.mark.parametrize("rst_at", [95000, 185500])
+def test_core2_reset1(rx_exe, rst_at):
     """Slot 1 reset in the middle of a data frame while slot 0 runs: slot 0 equals the
     model and decodes as if nothing happened; slot 1's cut frame is not decoded, its
-    frames after the reset are (equal to the model of its input from the start)."""
-    xa, bba = signal(nframes=3, lead=8, rate_idx=3, pilots=True, esn0=4.0, cfo=0.003)
+    frames after the reset are (equal to the model of its input from the start).
+    185500: just after slot 1's second data frame left the carrier, so that frame is
+    in the queue or the decoder at the reset: it is dropped (nothing of the slot from
+    before the reset comes out after it)."""
+    xa, bba = signal(nframes=3 if rst_at < 100000 else 6, lead=8, rate_idx=3, pilots=True, esn0=4.0, cfo=0.003)
     xb, bbb = signal(nframes=3, lead=8, rate_idx=5, pilots=False, esn0=7.0, cfo=-0.004, seed=3)
-    out, log = core_run(rx_exe, "reset1", [dict(x=xa, rate_idx=3, pilots=True, period=30),
-                                            dict(x=xb, rate_idx=5, pilots=False, period=75, rst_at=95000)])
+    out, log = core_run(rx_exe, f"reset1_{rst_at}", [dict(x=xa, rate_idx=3, pilots=True, period=30),
+                                                      dict(x=xb, rate_idx=5, pilots=False, period=75,
+                                                           rst_at=rst_at)])
     assert all(all_decoded(out[0]["dec"], bba)) and all(all_decoded(out[1]["dec"], bbb))
+    if rst_at > 100000:
+        assert out[1]["pre"][0] < out[1]["pre"][1], out[1]["pre"]       # a frame was flushed
 
 
 def test_core2_idle1(rx_exe):

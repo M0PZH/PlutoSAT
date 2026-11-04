@@ -22,8 +22,11 @@
 // rst_s[s] (one clock or longer) resets slot s alone: its FIFO, its context
 // in the shared engines (dvbs2_rx_timing2.sv, the README "Two receive slots"),
 // its PLS decoder and its counters here (in_overflows, the LDPC/BCH counts,
-// the LLR queue's drop count). A frame of the slot cut by the reset is not
-// decoded; frames already queued are.
+// the LLR queue's drop count). No frame of the slot from before the reset
+// comes out after it: each slot's frames carry an epoch bit (toggled by the
+// slot's reset) through the queue and the decoders, and a frame whose epoch
+// is not the slot's current one (or of a slot in reset) is dropped at the
+// output, whole (decided at its first byte).
 //
 // The LLR queue is always in the path (llrq_en: on; off, nothing is decoded):
 // the frames of both slots go through the DDR ring (llrq_base, 2 MB) and are
@@ -275,6 +278,14 @@ module dvbs2_rx #(
   logic       cap_en;
   logic [5:0] cap;
   logic       q_ready;
+  logic       d_epoch;
+  logic [1:0] epoch, rst_s_q;                 // per slot: toggled by its reset
+
+  always_ff @(posedge clk) begin
+    rst_s_q <= rst_s;
+    if (rst) epoch <= '0;
+    else epoch <= epoch ^ (rst_s & ~rst_s_q);
+  end
 
   assign l_ready = q_ready || !llrq_en;
 
@@ -283,9 +294,9 @@ module dvbs2_rx #(
     .max_it0(ldpc_max_it[0]), .max_it1(ldpc_max_it[1]), .qhi(llrq_qhi), .it_lo(llrq_it_lo),
     .clr_dropped(rst_s),
     .s_valid(l_valid && llrq_en), .s_ready(q_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
-    .s_slot(l_slot), .s_modcod(modcod[l_slot]), .s_pilots(pilots[l_slot]),
+    .s_slot(l_slot), .s_modcod(modcod[l_slot]), .s_pilots(pilots[l_slot]), .s_epoch(epoch[l_slot]),
     .m_valid(d_valid), .m_ready(d_ready), .m_llr_i(d_i), .m_llr_q(d_q), .m_first(d_first),
-    .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots),
+    .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots), .m_epoch(d_epoch),
     .it_cap_en(cap_en), .it_cap(cap),
     .st_depth(st_llrq_depth), .st_depth_max(st_llrq_depth_max), .st_frames(st_llrq_frames),
     .st_dropped0(st_llrq_dropped[0]), .st_dropped1(st_llrq_dropped[1]), .st_axi_err(st_llrq_axi_err),
@@ -297,17 +308,18 @@ module dvbs2_rx #(
     .m_axi_rlast, .m_axi_rvalid, .m_axi_rready);
 
   // ---------------------------------------------------------------- LDPC, BCH
-  // per-frame tag through the LDPC and BCH decoders: {0, slot, pilots, MODCOD}
+  // per-frame tag through the LDPC and BCH decoders: {epoch, slot, pilots, MODCOD}
   logic       c_valid, c_ready, c_last, c_ok;   // LDPC -> BCH
   logic [7:0] c_data, c_chan;
   logic [5:0] c_iters;
   logic [3:0] c_rate;
   logic [7:0] c_tag, m_tag;
+  logic       x_valid, x_ready;
 
   dvbs2_ldpc_dec #(.ROM_FILE(LDPC_ROM_FILE)) u_ldpc (
     .clk, .rst,
     .s_valid(d_valid), .s_ready(d_ready), .s_llr_i(d_i), .s_llr_q(d_q), .s_first(d_first),
-    .s_rate(d_rate), .s_max_it(d_max_it), .s_tag({1'b0, d_slot, d_pilots, d_modcod}),
+    .s_rate(d_rate), .s_max_it(d_max_it), .s_tag({d_epoch, d_slot, d_pilots, d_modcod}),
     .it_cap_en(cap_en), .it_cap(cap),
     .m_valid(c_valid), .m_ready(c_ready), .m_data(c_data), .m_last(c_last), .m_ok(c_ok), .m_iters(c_iters), .m_chan(c_chan),
     .m_rate(c_rate), .m_tag(c_tag),
@@ -317,9 +329,22 @@ module dvbs2_rx #(
     .clk, .rst,
     .s_valid(c_valid), .s_ready(c_ready), .s_data(c_data), .s_last(c_last), .s_ok(c_ok), .s_iters(c_iters), .s_chan(c_chan),
     .s_rate(c_rate), .s_tag(c_tag),
-    .m_valid, .m_ready, .m_data, .m_last, .m_ok, .m_ldpc_ok, .m_iters, .m_nerr, .m_raw_err,
+    .m_valid(x_valid), .m_ready(x_ready), .m_data, .m_last, .m_ok, .m_ldpc_ok, .m_iters, .m_nerr, .m_raw_err,
     .m_rate, .m_tag,
     .st_frames(), .st_corrected(), .st_failed());
+
+  // frames of a slot from before its reset are dropped (whole)
+  logic x_in, x_fresh;
+  wire  x_fresh_now = m_tag[7] == epoch[m_tag[6]] && !rst_s[m_tag[6]];
+  wire  x_keep = x_in ? x_fresh : x_fresh_now;
+  assign m_valid = x_valid && x_keep;
+  assign x_ready = m_ready || !x_keep;
+  always_ff @(posedge clk)
+    if (rst) x_in <= 1'b0;
+    else if (x_valid && x_ready) begin
+      if (!x_in) x_fresh <= x_fresh_now;
+      x_in <= !m_last;
+    end
 
   assign m_modcod = m_tag[4:0];
   assign m_pilots = m_tag[5];

@@ -329,7 +329,10 @@ Branch `wt/rx2`; `dvbs2/README.md`, section "Two receive slots: the receiver
   `dvbs2_rx_carrier2` with a `dvbs2_rx_pls` per slot, the LLR queue always
   on (no bypass), the LDPC/BCH decoders, per-slot decoder counters at the
   BCH output. `rst_s[s]` resets a slot's FIFO, engine contexts, PLS
-  decoder, counters and its LLR queue drop count.
+  decoder, counters and its LLR queue drop count; an epoch bit per frame
+  and the packet buffer's flush keep anything of the slot from before the
+  reset from coming out after it (found on the board: 1.x software's
+  restart got the previous run's held packets).
 * `rtl/dvbs2_rx_axi.sv`: two DDCs sharing one NCO ROM (`dvbs2_rx_ddc`
   `EXT_NCO`, a dual-port RAMB36) fed in lockstep from one ADC FIFO (a slot
   disabled or in reset is skipped), register map v2 (section 7.1 as

@@ -64,6 +64,7 @@ module dvbs2_rx_llrq #(
   input  logic        s_slot,
   input  logic [4:0]  s_modcod,
   input  logic        s_pilots,
+  input  logic        s_epoch,               // opaque per-frame bit (taken with s_first), out as m_epoch
 
   // to the LDPC decoder (per-frame values constant within a frame)
   output logic        m_valid,
@@ -76,6 +77,7 @@ module dvbs2_rx_llrq #(
   output logic        m_slot,
   output logic [4:0]  m_modcod,
   output logic        m_pilots,
+  output logic        m_epoch,
   output logic        it_cap_en,
   output logic [5:0]  it_cap,
 
@@ -185,10 +187,10 @@ module dvbs2_rx_llrq #(
   logic [4:0]  occ     [2];                  // ring entries allocated, not yet read back
   logic [12:0] pk_beat [2];                  // beats pushed for the frame
   logic [47:0] pk_acc  [2];                  // words 0..2 of the beat
-  (* ram_style = "distributed" *) logic [5:0] meta [32];   // {pilots, MODCOD} of [slot, frame]
+  (* ram_style = "distributed" *) logic [6:0] meta [32];   // {epoch, pilots, MODCOD} of [slot, frame]
   logic        meta_we;
   logic [4:0]  meta_wa;
-  logic [5:0]  meta_wd;
+  logic [6:0]  meta_wd;
   always_ff @(posedge clk) if (meta_we) meta[meta_wa] <= meta_wd;
 
   // abandoning a frame: the pad (s_ready low) fills the frame's last burst so
@@ -252,7 +254,7 @@ module dvbs2_rx_llrq #(
   logic [14:0] rd_wc;
   logic [1:0]  rd_ws;
   logic [4:0]  rd_modcod;
-  logic        rd_pilots;
+  logic        rd_pilots, rd_epoch;
   logic [5:0]  rd_maxit;
   wire  [4:0]  ar_len = (rd_ab == LBURST) ? 5'd4 : 5'd16;
 
@@ -366,7 +368,7 @@ module dvbs2_rx_llrq #(
         rd_act <= 1'b1;
         rd_s <= d[4]; rd_f <= d[3:0];
         rd_ab <= '0; rd_rcv <= '0; rd_wc <= '0; rd_ws <= '0;
-        {rd_pilots, rd_modcod} <= meta[d];
+        {rd_epoch, rd_pilots, rd_modcod} <= meta[d];
         rd_maxit <= d[4] ? max_it1 : max_it0;
       end
       if (m_axi_arvalid && m_axi_arready) rd_ab <= rd_ab + 13'(m_axi_arlen) + 13'd1;
@@ -385,6 +387,7 @@ module dvbs2_rx_llrq #(
           m_slot   <= rd_s;
           m_modcod <= rd_modcod;
           m_pilots <= rd_pilots;
+          m_epoch  <= rd_epoch;
           rd_ws <= rd_ws + 2'd1;
           if (rd_ws == 2'd3) rf_rp <= rf_rp + 1'b1;
           rd_wc <= rd_wc + 15'd1;
@@ -440,7 +443,7 @@ module dvbs2_rx_llrq #(
           if (act) begin
             meta_we <= 1'b1;
             meta_wa <= {s, pk_head[s]};
-            meta_wd <= {s_pilots, s_modcod};
+            meta_wd <= {s_epoch, s_pilots, s_modcod};
           end
         end
         pk_act[s] <= act;

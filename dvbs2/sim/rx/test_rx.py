@@ -1173,15 +1173,19 @@ def test_bch_mixed(bch_exe):
     assert pos == len(got)
 
 
-def test_rx_axi_hold(rx_axi_exe):
+@pytest.mark.parametrize("reset", [False, True])
+def test_rx_axi_hold(rx_axi_exe, reset):
     """No DMA for the first frames (both packet slots fill, later frames are
     dropped), then the DMA starts: the two held frames and every later
-    frame come out, in order (the board starts this way)."""
+    frame come out, in order (the board starts this way). reset: the slot's
+    soft reset while the DMA is held, after its first frames were decoded:
+    the held packets are removed, and only frames received after the reset
+    come out (the counter from 0)."""
     import grref
     import rxmodel as rf
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
-    rate_idx, pilots, dec, nframes = 3, True, 3, 8
+    rate_idx, pilots, dec, nframes = 3, True, 3, 12 if reset else 8
     kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
     rng = np.random.default_rng(5)
     ts = rng.integers(0, 256, ((nframes + 1) * kb // 1504 + 3, 188), dtype=np.uint8)
@@ -1211,11 +1215,13 @@ def test_rx_axi_hold(rx_axi_exe):
     frame_clk = (32400 + 90 + 792) * 2 * dec * 4                  # ADC samples x adcdiv
     hold = 2 * (8 * 3330 * 2 * dec * 4) + 11 * frame_clk          # ~5 frames decoded
     pkp, pki = fx.pll_gains()
+    # reset: after frames 0..2 are decoded (two held, one dropped), frame 3 coming in
+    extra = {"rst0at": 8 * 3330 * 2 * dec + 7 * 33282 * dec} if reset else {}
     log = rxsim.run(rx_axi_exe, **axi_args(0, ddccoef=fddc, rrccoef=frrc, regs=fregs, adcdiv=4, stall=10,
                                            hold=hold, modcod=rate_idx + 1, pilots=int(pilots), xa=xa, xb=xb,
                                            finc=0, dec=dec, ntaps=len(dcoef), shift=12, tkp=kp, tki=ki,
                                            thresh=fx.fs_threshold(), pkp=pkp, pki=pki, maxit=30,
-                                           **{"in": fin, "out": fout}))
+                                           **{"in": fin, "out": fout}, **extra))
     print(log)
     regs, lines = read_regs(fregs)
     words = [int(l.split()[0], 16) for l in open(fout)]
@@ -1227,6 +1233,13 @@ def test_rx_axi_hold(rx_axi_exe):
     got = [np.frombuffer(np.array(p[1:], dtype="<u8").tobytes(), np.uint8)[: kb // 8] for p in pk]
     sent = [next((k for k, b in enumerate(bb) if np.array_equal(np.packbits(b), g)), -1) for g in got]
     print("packets", len(pk), "counters", cnts, "frames", sent, "dropped", regs[0x8C], "sent", regs[0x90])
+    if reset:
+        assert "slot 0 reset" in log
+        # (frames right after the re-acquisition may fail: BCH ok bit 49)
+        good = [k for h, k in zip(hdr, sent) if (h >> 49) & 1]
+        assert cnts == list(range(len(pk))) and regs[0x90] == len(pk) and len(good) >= 1
+        assert -1 not in good and min(good) >= 4 and good == sorted(good), sent    # none from before
+        return
     assert regs[0x8C] >= 1, "the hold must make the RX drop frames"
     assert cnts == list(range(len(pk))), "packet counter must run on"
     assert len(pk) + regs[0x8C] == nframes, (len(pk), regs[0x8C])
