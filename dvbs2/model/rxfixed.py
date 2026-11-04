@@ -727,6 +727,12 @@ class Carrier:
                 self._header_type()
                 typ = self.typ
                 f = self._header_freq()
+                if not self.pilots:
+                    # the decision-directed PLL's frequency goes into the NCO
+                    # (same total): otherwise the two integrators share the
+                    # same error and fhat random-walks, fp following it
+                    self.upd += self.fp
+                    self.fp = 0
                 theta = self._block_end(self.H, self.Esum, 90, self.cur)
                 self.dth = theta
                 if not self.pilots:

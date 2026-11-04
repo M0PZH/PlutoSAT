@@ -821,8 +821,13 @@ module dvbs2_rx_carrier
         M_FLL_END2, M_FLL_NOUPD: begin
           ff   <= f_c;
           ff89 <= 43'(f_c) * 43'sd89;
-          // update with gain 2^-fsh (0 for the acquisition update)
-          if (st == M_FLL_END2) fhat <= fhat + 32'(f_c >>> fsh);
+          // update with gain 2^-fsh (0 for the acquisition update); pilots
+          // off: the PLL's frequency moves into the NCO (same total), so
+          // fhat does not random-walk against fp
+          if (!pilots) begin
+            fhat <= fhat + (st == M_FLL_END2 ? 32'(f_c >>> fsh) : 32'd0) + fp;
+            fp   <= '0;
+          end else if (st == M_FLL_END2) fhat <= fhat + 32'(f_c >>> fsh);
           cor_x <= 50'(Hi);
           cor_y <= 50'(Hq);
           bsum  <= Esum;
