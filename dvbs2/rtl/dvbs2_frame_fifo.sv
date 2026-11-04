@@ -31,7 +31,8 @@ module dvbs2_frame_fifo #(
   output logic [1:0] sym_data,      // {b0 (I sign), b1 (Q sign)}
   input  logic       sym_rd,
 
-  output logic [AW:0] level         // symbols stored
+  output logic [AW:0] level,        // symbols stored
+  output logic [2:0]  frames         // complete frames not yet popped (0..4)
 );
 
   // ---------------------------------------------------------------- symbol RAM
@@ -63,6 +64,7 @@ module dvbs2_frame_fifo #(
   end
 
   assign level = count;
+  assign frames = cfg_n;
 
   // FWFT read side
   assign rd_issue = !inflight && (!sym_valid || sym_rd) && (count != 0);

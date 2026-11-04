@@ -1,6 +1,7 @@
 """dvbs2_tx_axi: AXI-Lite registers, DMA packet adapter, CDC + DAC selector.
 
-* registers read back, COEF_DATA auto-increments COEF_ADDR
+* registers read back (VERSION 1.1, the CIC register), COEF_DATA
+  auto-increments COEF_ADDR
 * a good packet produces a data PLFRAME; bad header / short / long packets
   are counted and do not break frame alignment
 * with DAC select on, the samples at dac_out (DAC clock domain, one sample
@@ -140,8 +141,14 @@ async def axi_regs_packets_and_dac(dut):
     await ClockCycles(dut.s_axi_aclk, 20)
 
     assert await axi.read(0x04) == 0x44565332
+    assert await axi.read(0x00) == 0x00010001
     await axi.write(0x08, 0xDEADBEEF)
     assert await axi.read(0x08) == 0xDEADBEEF
+    assert await axi.read(0x2C) == 0                  # CIC off after reset
+    await axi.write(0x2C, 0xFFFFFFFF)
+    assert await axi.read(0x2C) == 0xF3F              # R [5:0], SHIFT [11:8]
+    await axi.write(0x2C, 0)                          # the samples below: RRC alone
+    assert await axi.read(0x48) == 0                  # no FECFRAME waiting
 
     # configuration
     await axi.write(0x14, SPS)

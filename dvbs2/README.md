@@ -2,12 +2,12 @@
 
 QPSK, normal FECFRAMEs, all 11 code rates (1/4 to 9/10), pilots on or off per
 frame, any Gold code, dummy PLFRAMEs when no data is queued, and polyphase RRC
-interpolation to an integer multiple of the symbol rate followed by an NCO.
-Verified against GNU Radio gr-dtv.
+interpolation to an integer multiple of the symbol rate (with a CIC behind it
+for the low rates) followed by an NCO. Verified against GNU Radio gr-dtv.
 
 ```
-BBFRAME bytes ─► BB scrambler ─► BCH ─► LDPC ─► FECFRAME FIFO ─► PL framer ─► RRC ×SPS ─► NCO ─► I/Q
-(+ {pilots, rate})   dvbs2_fec                  dvbs2_frame_fifo  dvbs2_plframer  dvbs2_rrc_interp  dvbs2_nco
+BBFRAME bytes ─► BB scrambler ─► BCH ─► LDPC ─► FECFRAME FIFO ─► PL framer ─► RRC ×P ─► [CIC ×R] ─► NCO ─► I/Q
+(+ {pilots, rate})   dvbs2_fec                  dvbs2_frame_fifo  dvbs2_plframer  dvbs2_rrc_interp  dvbs2_cic_interp  dvbs2_nco
 ```
 
 | Path | Contents |
@@ -41,9 +41,13 @@ cd ../sim && ./run.sh                                     # RTL vs gr-dtv and mo
 * `test_fec.py`: the RTL FEC chain equals gr-dtv bit for bit for all 11
   rates, also with random input gaps and output backpressure.
 * `test_tx.py`: RTL PLFRAME symbols equal gr-dtv; dummy frames and every
-  output sample (RRC + NCO) equal the model.
+  output sample (RRC + CIC + NCO) equal the model, also at 33.33, 66.67 and
+  125 kS/s (CIC) and 250 and 333.33 kS/s (RRC alone), on dummy-frame
+  prefixes (a whole frame at 360 samples/symbol is too slow to simulate),
+  and for the CIC at R = 32 with a full-scale input.
 * `test_loopback.py`: RTL output samples -> gr-dvbs2rx (independent
-  receiver) -> MPEG-TS; every packet equals the input, none missing.
+  receiver) -> MPEG-TS; every packet equals the input, none missing. Once
+  with the RRC alone (2 samples/symbol), once with RRC x2 + CIC x3.
 * `test_tx_axi.py`: block-design wrapper: registers, DMA packet format
   (bad header / short / long packets), DAC-domain samples equal the model.
 * `sw/test_bbframe.py`: the C BBFRAME builder equals gr-dtv's bbheader.
@@ -61,15 +65,91 @@ samples per symbol; the tests take every other sample.
   `s_user = {pilots, rate_idx}`, where rate_idx 0..10 is MODCOD 1..11. It is
   sampled on the first byte and can change every frame. A wrong `s_last`
   position is counted in `cnt_len_errors`.
-* Output: 16-bit I/Q at SPS samples per symbol, pulled with `m_ready`.
-* `sps`: 2..64. RRC coefficients go in through `coef_*`, phase-major
-  (`addr = p*16 + j` holds `h[p + sps*j]`); `model/txmodel.py:rrc_coefs()`
-  generates them.
+* Output: 16-bit I/Q at P x R samples per symbol, pulled with `m_ready`.
+* `sps` (RRC interpolation P): 2..64; `cic_r` (CIC interpolation R): 0 or 1
+  = off, 2..32, with `cic_shift`. RRC coefficients go in through `coef_*`,
+  phase-major (`addr = p*16 + j` holds `h[p + P*j]`);
+  `model/txmodel.py:tx_config()` chooses P, R and generates them (see
+  [Low symbol rates](#low-symbol-rates-cic-interpolator)).
 * `gold_xa/gold_xb`: x-sequence states for Gold code n
   (`txmodel.gold_init(n)`). For n = 0 they are `PLS_XA_GOLD0/PLS_XB_GOLD0`.
 * PlutoDVB2 (F5OEO) uses the ORI `dvb_fpga` VHDL modulator and changes the
   AD9363 rate per symbol rate. This core instead keeps the DAC at a fixed
   rate (12 MS/s in the design notes) and interpolates by an integer SPS.
+
+## Low symbol rates: CIC interpolator
+
+```
+symbols ─► RRC ×P (16 taps/phase) ─► CIC3 ×R ─► NCO ─► 12 MS/s     samples/symbol = P x R
+```
+
+The DAC rate stays at 12 MS/s, so 33.33 kS/s needs 360 samples per symbol;
+the RRC alone goes up to 64 (187.5 kS/s).
+
+* `dvbs2_cic_interp` (CIC register, 0x2C): two combs at the RRC rate, the
+  sample held for R outputs, two integrators at the output rate (the same
+  as 3 combs, zero stuffing and 3 integrators), 26-bit wrap-around
+  arithmetic (exact up to R = 32), output sat16(round(. / 2^shift)),
+  shift = floor(log2 R^2). R = 0 or 1 (the reset value): the RRC output
+  passes unchanged, so old software and coefficients give the same samples
+  as before.
+* Taps (`model/txmodel.py:rrc_coefs(P, ..., cic_r=R)`): the RRC at P
+  samples/symbol convolved with [-a, 1 + 2a, -a], a = 3 (1 - 1/R^2) / 24,
+  the second-order inverse of the CIC droop, and scaled by 2^shift / R^2
+  (<= 1) against the CIC gain, so the output level is the same at every
+  rate.
+* Choice (`txmodel.tx_split()` / `tx_config()`, the same in
+  `sw/dvbs2_tx.c`): up to 64 samples/symbol the RRC alone; above, the
+  largest P <= 64 with R = sps / P in 2..32. That gives P >= 11 for every
+  supported value (smaller P raises the CIC images: P = 4 gives -53 dB, P
+  = 3 -44 dB). Supported: 2..64 and 753 of 65..2048, e.g. 96 (48 x 2), 180
+  (60 x 3), 360 (60 x 6), 720, 2048 (64 x 32); not primes above 64 and
+  e.g. 134 or 202. `dvbs2-tx --dump-coefs -s SR` prints P, R, the shift
+  and the taps.
+
+Measured on the bit-exact model (3000 random QPSK symbols, NCO off). MER:
+ideal float RRC matched filter (64 symbols) at the symbol instants. PSD:
+Welch, Blackman-Harris, resolution Rs/64, relative to the in-band PSD;
+ACLR: power in [Rs, 2 Rs] (a neighbour at 1.5 Rs) over the wanted signal.
+Roll-off 0.35 / 0.25 / 0.20:
+
+| symbol rate | sps = P x R | MER (dB) | PSD at 0.75 Rs | max beyond Rs | max beyond 2 Rs | ACLR | CIC images |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 MS/s | 6 | 55.3 / 60.4 / 45.4 | -48.2 / -48.7 / -46.8 | -55.9 / -52.8 / -54.0 | -64.1 / -60.1 / -64.7 | -62.0 / -58.7 / -61.1 | - |
+| 1 MS/s | 12 | 55.3 / 60.4 / 45.5 | -48.2 / -48.7 / -46.7 | -56.0 / -53.1 / -53.9 | -65.5 / -61.4 / -65.5 | -62.4 / -59.2 / -61.1 | - |
+| 333.33 kS/s | 36 | 55.3 / 60.4 / 45.5 | -48.2 / -48.8 / -46.7 | -56.1 / -53.1 / -53.9 | -65.9 / -61.8 / -65.5 | -62.4 / -59.3 / -61.2 | - |
+| 250 kS/s | 48 | 55.3 / 60.4 / 45.5 | -48.2 / -48.8 / -46.7 | -56.1 / -53.1 / -53.9 | -66.0 / -61.9 / -65.6 | -62.5 / -59.3 / -61.2 | - |
+| 125 kS/s | 96 = 48 x 2 | 55.3 / 60.4 / 45.5 | -48.3 / -48.8 / -46.7 | -56.1 / -53.1 / -53.9 | -66.0 / -61.9 / -65.6 | -62.5 / -59.3 / -61.2 | -93.4 / -89.4 / -93.8 |
+| 66.67 kS/s | 180 = 60 x 3 | 55.3 / 60.4 / 45.5 | -48.3 / -48.8 / -46.7 | -56.1 / -53.1 / -54.0 | -66.0 / -61.9 / -65.6 | -62.5 / -59.3 / -61.2 | -95.9 / -92.5 / -96.5 |
+| 33.33 kS/s | 360 = 60 x 6 | 55.3 / 60.4 / 45.5 | -48.2 / -48.8 / -46.7 | -56.1 / -53.1 / -53.9 | -66.0 / -61.9 / -65.6 | -62.5 / -59.3 / -61.2 | -96.9 / -93.5 / -97.4 |
+
+The low rates match the high ones to 0.1 dB: both are set by the 16-symbol
+RRC (the MER by its truncation; the receiver works far below 45 dB, so its
+MER does not change). The CIC images (the largest PSD beyond P/2 x Rs) are
+>= 89 dB down, below the RRC's own floor (-75 dB beyond 5 Rs). Without
+the droop compensation the MER would drop to 49 dB at P = 12 (0.1 dB at P
+= 60). With an NCO offset the far floor is higher at every rate (-59 dB
+beyond 2 Rs instead of -66 dB, at 333 kS/s and 33 kS/s alike): the NCO's
+10-bit phase (-59.4 dB) and the per-axis clipping of the rotated 0.8 full
+scale peak (0.25 % of the samples, -60.5 dB).
+
+Resources (`syn/ooc.tcl 100 dvbs2_tx`, xc7z020-2): before 1024 LUTs, 1196
+FFs, 13.5 BRAM tiles, 16 DSPs, WNS +3.21 ns; now 1368 LUTs, 1520 FFs,
+13.5 BRAM, 16 DSPs, WNS +3.18 ns (the LDPC encoder's path, as before). The
+CIC is 277 LUTs and 324 FFs; the RRC's output FIFO read mux adds ~66 LUTs
+because it now feeds the comb subtractors. The alternative, the RRC alone
+up to 512 samples/symbol, costs few LUTs but 2 more BRAM tiles (the
+coefficient banks grow from 4 RAMB18 to 4 RAMB36); BRAM is the scarcest
+resource of the full design (92 %).
+
+Throughput: at 33.33 kS/s a PLFRAME with pilots lasts 1.0 s (without
+pilots 0.98 s, a dummy frame 0.1 s); the FEC and framer idle and the DMA
+waits on the core's backpressure for up to a frame. `dvbs2-tx` therefore
+keeps at most max(2, 0.5 s of air time) BBFRAMEs submitted but not yet on
+air (from DATA_FRAMES), sizes the UDP receive buffer to about 1 s of
+channel capacity (8 kB .. 4 MB) so a too fast TS is dropped rather than
+queued for minutes, and at the end of a file waits until every frame has
+been sent. At high rates nothing changes (the DMA queue limits first).
 
 ## Fishball bitstream integration
 

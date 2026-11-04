@@ -32,6 +32,7 @@
 #include "bbframe.h"
 
 /* ---------------------------------------------------------------- registers */
+#define R_VERSION     0x00
 #define R_ID          0x04
 #define R_CTRL        0x10
 #define   CTRL_ENABLE   (1u << 0)
@@ -45,12 +46,14 @@
 #define R_NCO_FINC    0x20
 #define R_COEF_ADDR   0x24
 #define R_COEF_DATA   0x28
+#define R_CIC         0x2C          /* [5:0] R (0, 1 = off), [11:8] shift; core >= 1.1 */
 #define R_DATA_FRAMES 0x30
 #define R_DUMMY_FRAMES 0x34
 #define R_LEN_ERR     0x38
 #define R_HDR_ERR     0x3C
 #define R_FIFO_LEVEL  0x40
 #define R_DAC_UNDERRUN 0x44
+#define R_FIFO_FRAMES 0x48
 
 #define DMAC_IRQ_MASK  0x080
 #define DMAC_CONTROL   0x400
@@ -61,7 +64,11 @@
 #define DMAC_Y_LENGTH  0x41C
 
 #define TPP 16
-#define MAX_SPS 64
+#define P_MAX 64            /* RRC interpolation factor (SPS register) */
+#define CIC_N 3
+#define CIC_RMAX 32
+#define VERSION_CIC 0x00010001
+#define QUEUE_S 0.5         /* queued air time beyond which BBFRAMEs wait (at least 2 frames) */
 #define SLOT_BYTES 8192
 #define NSLOTS 16
 
@@ -157,31 +164,77 @@ static void *uio_map(int uio, int fd, int map, uint32_t *phys, size_t *size)
 }
 
 /* ---------------------------------------------------------------- DSP setup */
-/* Same formula and scaling as dvbs2/model/txmodel.py:rrc_coefs() */
-static void rrc_coefs(int sps, double alpha, int32_t *c)
+static double rrc(double t, double alpha)
 {
-	const int n = sps * TPP;
-	double h[MAX_SPS * TPP], worst = 0;
+	if (fabs(t) < 1e-12)
+		return 1 - alpha + 4 * alpha / M_PI;
+	if (fabs(fabs(4 * alpha * t) - 1) < 1e-9)
+		return alpha / sqrt(2) * ((1 + 2 / M_PI) * sin(M_PI / (4 * alpha)) +
+					  (1 - 2 / M_PI) * cos(M_PI / (4 * alpha)));
+	return (sin(M_PI * t * (1 - alpha)) + 4 * alpha * t * cos(M_PI * t * (1 + alpha))) /
+	       (M_PI * t * (1 - (4 * alpha * t) * (4 * alpha * t)));
+}
 
-	for (int i = 0; i < n; i++) {
-		double t = (i - (n - 1) / 2.0) / sps;
-		if (fabs(t) < 1e-12)
-			h[i] = 1 - alpha + 4 * alpha / M_PI;
-		else if (fabs(fabs(4 * alpha * t) - 1) < 1e-9)
-			h[i] = alpha / sqrt(2) * ((1 + 2 / M_PI) * sin(M_PI / (4 * alpha)) +
-						  (1 - 2 / M_PI) * cos(M_PI / (4 * alpha)));
-		else
-			h[i] = (sin(M_PI * t * (1 - alpha)) + 4 * alpha * t * cos(M_PI * t * (1 + alpha))) /
-			       (M_PI * t * (1 - (4 * alpha * t) * (4 * alpha * t)));
+/* CIC output shift floor(log2 R^2): txmodel.py:cic_shift_for() */
+static int cic_shift_for(int r)
+{
+	int s = 0;
+	if (r < 2)
+		return 0;
+	for (unsigned v = (unsigned)(r * r); v > 1; v >>= 1)
+		s++;
+	return s;
+}
+
+/* (P, R) for sps samples per symbol, txmodel.py:tx_split(): the RRC alone up
+ * to P_MAX, else the largest P <= P_MAX with R = sps / P in 2..CIC_RMAX.
+ * Returns 0 if sps is not supported. */
+static int tx_split(int sps, int *p, int *r)
+{
+	if (sps >= 2 && sps <= P_MAX) {
+		*p = sps;
+		*r = 1;
+		return 1;
 	}
-	for (int p = 0; p < sps; p++) {
+	for (int k = P_MAX; k >= 2; k--)
+		if (sps % k == 0 && sps / k >= 2 && sps / k <= CIC_RMAX) {
+			*p = k;
+			*r = sps / k;
+			return 1;
+		}
+	return 0;
+}
+
+/* Same formula and scaling as dvbs2/model/txmodel.py:rrc_coefs(): RRC
+ * interpolation by p; with a CIC by r >= 2 behind it the taps also
+ * pre-compensate the CIC droop ([-a, 1 + 2a, -a], a = 3 (1 - 1/r^2) / 24) and
+ * include 2^shift / r^2, the inverse of the CIC gain. */
+static void rrc_coefs(int p, int r, double alpha, int32_t *c)
+{
+	const int n = p * TPP;
+	double h[P_MAX * TPP], worst = 0, k = 1;
+
+	if (r >= 2) {
+		double a = CIC_N * (1 - 1.0 / ((double)r * r)) / 24;
+		for (int i = 0; i < n; i++) {
+			double hm = rrc((i - 1 - (n - 1) / 2.0) / p, alpha);
+			double h0 = rrc((i - (n - 1) / 2.0) / p, alpha);
+			double hp = rrc((i + 1 - (n - 1) / 2.0) / p, alpha);
+			h[i] = h0 + a * (2 * h0 - hm - hp);
+		}
+		k = (double)(1 << cic_shift_for(r)) / ((double)r * r);
+	} else {
+		for (int i = 0; i < n; i++)
+			h[i] = rrc((i - (n - 1) / 2.0) / p, alpha);
+	}
+	for (int q = 0; q < p; q++) {
 		double s = 0;
 		for (int j = 0; j < TPP; j++)
-			s += fabs(h[p + sps * j]);
+			s += fabs(h[q + p * j]);
 		if (s > worst)
 			worst = s;
 	}
-	double scale = 0.80 * 32767 * (1 << 17) / (worst * 23170);
+	double scale = 0.80 * 32767 * (1 << 17) / (worst * 23170) * k;
 	for (int i = 0; i < n; i++)
 		c[i] = (int32_t)lround(h[i] * scale);
 }
@@ -269,7 +322,8 @@ static void usage(const char *p)
 {
 	fprintf(stderr,
 		"usage: %s [options]\n"
-		"  -s, --sym-rate SR      symbol rate in S/s (fs/SR must be an integer, default 500000)\n"
+		"  -s, --sym-rate SR      symbol rate in S/s (default 500000); fs/SR must be an integer,\n"
+		"                         2..64, or P x R with P <= 64, R 2..32 (e.g. 96, 180, 360)\n"
 		"  -F, --fs FS            AD9363 sample rate (default 12000000)\n"
 		"  -m, --modcod MC        qpsk1/4 .. qpsk9/10 (default qpsk1/2)\n"
 		"  -p, --pilots           pilots on\n"
@@ -283,7 +337,10 @@ static void usage(const char *p)
 		"  -t, --flush-ms MS      send a partly filled BBFRAME after MS without data (default 100)\n"
 		"  -n, --no-iio           do not touch the AD9363 / DAC data source\n"
 		"  -T, --tone             carrier only: an unmodulated test tone at --offset (needs a\n"
-		"                         non-zero offset; no TS input)\n",
+		"                         non-zero offset; no TS input)\n"
+		"      --dump-coefs       print the shaping setup and exit (no hardware access):\n"
+		"                         'P R CIC_SHIFT', the P x 16 taps in COEF_DATA order,\n"
+		"                         'GOLD_XA GOLD_XB', NCO_FINC\n",
 		p);
 	exit(2);
 }
@@ -291,7 +348,7 @@ static void usage(const char *p)
 int main(int argc, char **argv)
 {
 	double sr = 500e3, fs = 12e6, rolloff = 0.35, offset = 0, freq = 0, atten = -1;
-	int rate_idx = 3, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0, tone = 0;
+	int rate_idx = 3, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0, tone = 0, dump = 0;
 	uint32_t gold = 0;
 	const char *input = NULL;
 
@@ -300,7 +357,8 @@ int main(int argc, char **argv)
 		{ "pilots", 0, 0, 'p' }, { "rolloff", 1, 0, 'r' }, { "gold", 1, 0, 'g' },
 		{ "offset", 1, 0, 'o' }, { "freq", 1, 0, 'f' }, { "atten", 1, 0, 'a' },
 		{ "udp", 1, 0, 'u' }, { "input", 1, 0, 'i' }, { "flush-ms", 1, 0, 't' },
-		{ "no-iio", 0, 0, 'n' }, { "tone", 0, 0, 'T' }, { 0, 0, 0, 0 },
+		{ "no-iio", 0, 0, 'n' }, { "tone", 0, 0, 'T' }, { "dump-coefs", 0, 0, 1 },
+		{ 0, 0, 0, 0 },
 	};
 	for (int c; (c = getopt_long(argc, argv, "s:F:m:pr:g:o:f:a:u:i:t:nT", lo, NULL)) != -1;) {
 		switch (c) {
@@ -325,17 +383,33 @@ int main(int argc, char **argv)
 		case 't': flush_ms = atoi(optarg); break;
 		case 'n': no_iio = 1; break;
 		case 'T': tone = 1; break;
+		case 1: dump = 1; break;
 		default: usage(argv[0]);
 		}
 	}
-	int sps = (int)lround(fs / sr);
-	if (sps < 2 || sps > MAX_SPS || fabs(sps * sr - fs) > 0.5) {
-		fprintf(stderr, "fs/sym-rate must be an integer in 2..%d\n", MAX_SPS);
+	/* fs / sr within 100 ppm of an integer (so 33333 means 12e6 / 360) */
+	int sps = (int)lround(fs / sr), sps_p = 0, cic_r = 1;
+	if (sps < 2 || fabs(sps * sr - fs) > fmax(0.5, 1e-4 * fs) || !tx_split(sps, &sps_p, &cic_r)) {
+		fprintf(stderr, "fs/sym-rate must be an integer in 2..%d, or P x R with P <= %d and "
+			"R in 2..%d\n", P_MAX, P_MAX, CIC_RMAX);
 		return 2;
 	}
+	sr = fs / sps;
+	const int cic_shift = cic_shift_for(cic_r);
 	if (gold >= 262143) {
 		fprintf(stderr, "Gold code must be < 262143\n");
 		return 2;
+	}
+	int32_t coefs[P_MAX * TPP];
+	rrc_coefs(sps_p, cic_r, rolloff, coefs);
+	const uint32_t finc = (uint32_t)(int64_t)llround(offset / fs * 4294967296.0);
+	if (dump) {
+		printf("%d %d %d\n", sps_p, cic_r, cic_shift);
+		for (int p = 0; p < sps_p; p++)
+			for (int j = 0; j < TPP; j++)
+				printf("%d%c", coefs[p + sps_p * j], p == sps_p - 1 && j == TPP - 1 ? '\n' : ' ');
+		printf("%u %u\n%u\n", gold_x(gold), gold_x(gold + 131072), finc);
+		return 0;
 	}
 
 	/* ---- hardware */
@@ -359,6 +433,12 @@ int main(int argc, char **argv)
 	}
 	if (rd(regs, R_ID) != 0x44565332) {
 		fprintf(stderr, "dvbs2-tx core not found (ID %08x)\n", rd(regs, R_ID));
+		return 1;
+	}
+	const uint32_t version = rd(regs, R_VERSION);
+	if (cic_r >= 2 && version < VERSION_CIC) {
+		fprintf(stderr, "core version %u.%u has no CIC: at most %d samples per symbol "
+			"(symbol rate >= %.0f S/s)\n", version >> 16, version & 0xFFFF, P_MAX, fs / P_MAX);
 		return 1;
 	}
 
@@ -386,21 +466,21 @@ int main(int argc, char **argv)
 			fprintf(stderr, "warning: cannot select DAC data source via %s\n", path);
 	}
 
-	int32_t coefs[MAX_SPS * TPP];
-	rrc_coefs(sps, rolloff, coefs);
 	/* stop the DMA first: transfers a previous run left queued would
 	 * otherwise flow into the core right after its reset */
 	wr(dmac, DMAC_CONTROL, 0);
 	wr(regs, R_CTRL, CTRL_RESET);
 	usleep(10);
-	wr(regs, R_SPS, sps);
+	wr(regs, R_SPS, sps_p);
+	if (version >= VERSION_CIC)
+		wr(regs, R_CIC, (cic_r >= 2 ? (uint32_t)cic_r : 0) | (uint32_t)cic_shift << 8);
 	wr(regs, R_GOLD_XA, gold_x(gold));
 	wr(regs, R_GOLD_XB, gold_x(gold + 131072));
-	wr(regs, R_NCO_FINC, (uint32_t)(int64_t)llround(offset / fs * 4294967296.0));
+	wr(regs, R_NCO_FINC, finc);
 	wr(regs, R_COEF_ADDR, 0);
-	for (int p = 0; p < sps; p++)
+	for (int p = 0; p < sps_p; p++)
 		for (int j = 0; j < TPP; j++)
-			wr(regs, R_COEF_DATA, (uint32_t)coefs[p + sps * j] & 0x3FFFF);
+			wr(regs, R_COEF_DATA, (uint32_t)coefs[p + sps_p * j] & 0x3FFFF);
 	uint32_t ctrl = CTRL_ENABLE | CTRL_DACSEL | (offset == 0 ? CTRL_NCOBYP : 0);
 	if (tone) {
 		if (offset == 0) {
@@ -433,7 +513,13 @@ int main(int argc, char **argv)
 	} else {
 		struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port),
 					 .sin_addr.s_addr = htonl(INADDR_ANY) };
-		int rcvbuf = 4 << 20;
+		/* about 1 s of channel capacity (between 8 kB and 4 MB): data
+		 * arriving faster than the channel carries is dropped by the
+		 * kernel instead of piling up seconds of latency (at 33 kS/s,
+		 * QPSK 1/2 carries ~4 kB/s) */
+		unsigned kb = dvbs2_kbch_bytes(rate_idx);
+		double cap = (kb - BBHEADER_BYTES) * sr / (90 + 32400 + (pilots ? 22 * 36 : 0));
+		int rcvbuf = (int)fmin(4 << 20, fmax(8192, cap));
 		in->fd = socket(AF_INET, SOCK_DGRAM, 0);
 		in->is_udp = 1;
 		setsockopt(in->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
@@ -443,14 +529,22 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	fprintf(stderr, "dvbs2-tx: %s%s, %.0f S/s (sps %d), roll-off %.2f, Gold %u, offset %.0f Hz\n",
-		modcods[rate_idx], pilots ? " pilots" : "", sr, sps, rolloff, gold, offset);
+	fprintf(stderr, "dvbs2-tx: %s%s, %.2f S/s (sps %d = RRC %d x CIC %d), roll-off %.2f, Gold %u, "
+		"offset %.0f Hz\n", modcods[rate_idx], pilots ? " pilots" : "", sr, sps, sps_p, cic_r,
+		rolloff, gold, offset);
 
 	struct bbframer bf;
 	bbframer_init(&bf, rate_idx, rolloff);
 	const unsigned frame_bytes = bf.kbch / 8;
 	const unsigned df_bytes = frame_bytes - BBHEADER_BYTES;
 	unsigned slot = 0, frames = 0;
+	/* PLFRAME duration; BBFRAMEs that have not started on air are limited
+	 * to QUEUE_S of air time (but at least 2, so the next frame is always
+	 * ready): at low symbol rates a frame lasts up to ~1 s and the DMA and
+	 * core buffers alone would hold several seconds. Frames not yet on air
+	 * = BBFRAMEs submitted - DATA_FRAMES (counted at each frame start). */
+	const double frame_s = (90 + 32400 + (pilots ? 22 * 36 : 0)) / sr;
+	const unsigned max_queued = (unsigned)fmax(2, ceil(QUEUE_S / frame_s));
 	struct timespec last_data, now;
 	clock_gettime(CLOCK_MONOTONIC, &last_data);
 
@@ -480,6 +574,8 @@ int main(int argc, char **argv)
 			memcpy(buf + 4, frame, frame_bytes);
 			for (unsigned i = 0; i < len / 8; i++)
 				dst[i] = pkt[i];
+			while (!stop && frames - rd(regs, R_DATA_FRAMES) >= max_queued)
+				usleep(1000);
 			dma_submit(slot, len);
 			slot = (slot + 1) % NSLOTS;
 			frames++;
@@ -491,9 +587,16 @@ int main(int argc, char **argv)
 			break;
 	}
 
-	/* let queued frames go out, then report */
-	if (in->eof)
-		sleep(1);
+	/* let queued frames go out (each started, then the last one sent), then report */
+	if (in->eof) {
+		double t = 0, tmax = (frames - rd(regs, R_DATA_FRAMES) + 2) * frame_s + 1;
+		while (!stop && frames - rd(regs, R_DATA_FRAMES) != 0 && t < tmax) {
+			usleep(10000);
+			t += 0.01;
+		}
+		struct timespec ts = { (time_t)(frame_s + 0.1), (long)(fmod(frame_s + 0.1, 1) * 1e9) };
+		nanosleep(&ts, NULL);
+	}
 	fprintf(stderr, "dvbs2-tx: %u BBFRAMEs queued; core: %u data / %u dummy PLFRAMEs, "
 		"%u length / %u header errors, %u DAC underruns\n", frames,
 		rd(regs, R_DATA_FRAMES), rd(regs, R_DUMMY_FRAMES), rd(regs, R_LEN_ERR),

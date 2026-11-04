@@ -6,6 +6,12 @@ frames are cut at PLFRAME boundaries, played in a seamless loop into
 packet with the same sequence number; all packets carried by the frames
 must be seen. (gr-dvbs2rx needs more frames to lock than the RTL sim can
 produce in reasonable time, hence the loop.)
+
+Two shaping setups: the RRC alone at 2 samples/symbol, and the RRC by 2
+followed by the CIC by 3 (6 samples/symbol). The low symbol rates use the
+same CIC with a larger P (bit-exact against the model in test_tx.py); P = 2
+keeps the simulation as short as the RRC-only case, the RRC being the
+slowest stage (4 clocks per sample).
 """
 
 import os
@@ -23,31 +29,46 @@ import txmodel as m
 from axis import Sink, Source
 
 TPP = 16
-RATE_IDX, PILOTS, SPS, ROLLOFF = 3, 1, 2, 0.35
+RATE_IDX, PILOTS, ROLLOFF = 3, 1, 0.35
 NFRAMES = 8
 OUT = os.path.join(os.path.dirname(__file__), "sim_build", "loopback")
 
 
 @cocotb.test()
 async def loopback_gr_dvbs2rx(dut):
+    """RRC alone, 2 samples/symbol."""
+    await loopback(dut, 2, 1)
+
+
+@cocotb.test()
+async def loopback_cic_gr_dvbs2rx(dut):
+    """RRC by 2, CIC by 3: 6 samples/symbol."""
+    await loopback(dut, 2, 3)
+
+
+async def loopback(dut, P, R):
+    SPS = P * R
+    cs = m.cic_shift_for(R)
     os.makedirs(OUT, exist_ok=True)
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     dut.rst.value = 1
     dut.enable.value = 0
-    dut.sps.value = SPS
+    dut.sps.value = P
     xa, xb = m.gold_init(0)
     dut.gold_xa.value, dut.gold_xb.value = xa, xb
     dut.nco_finc.value = 0
     dut.nco_bypass.value = 1
     dut.carrier_only.value = 0
+    dut.cic_r.value = R if R >= 2 else 0
+    dut.cic_shift.value = cs
     dut.coef_we.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst.value = 0
-    coefs = m.rrc_coefs(SPS, ROLLOFF, TPP)
-    for p in range(SPS):
+    coefs = m.rrc_coefs(P, ROLLOFF, TPP, cic_r=R)
+    for p in range(P):
         for j in range(TPP):
             dut.coef_addr.value = p * TPP + j
-            dut.coef_data.value = int(coefs[p + SPS * j]) & 0x3FFFF
+            dut.coef_data.value = int(coefs[p + P * j]) & 0x3FFFF
             dut.coef_we.value = 1
             await RisingEdge(dut.clk)
     dut.coef_we.value = 0
@@ -96,8 +117,8 @@ async def loopback_gr_dvbs2rx(dut):
     a = lead_dummies * 3330 * SPS
     b = a + nfr * 33282 * SPS
     assert len(samples) >= b
-    iq_file = os.path.join(OUT, "tx_rtl.fc32")
-    ts_file = os.path.join(OUT, "rx.ts")
+    iq_file = os.path.join(OUT, f"tx_rtl_sps{SPS}.fc32")
+    ts_file = os.path.join(OUT, f"rx_sps{SPS}.ts")
     samples[a:b].tofile(iq_file)
     dut._log.info(f"{lead_dummies} leading dummies, {nfr} data frames -> {iq_file}")
 

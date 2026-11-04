@@ -3,6 +3,9 @@
 * PLFRAME symbols (tap before shaping) vs gr-dtv dvbs2_physical_cc: exact.
 * Dummy PLFRAMEs vs the model.
 * Output samples (RRC interpolation + NCO) vs the bit-exact model: exact.
+* Low symbol rates (RRC by P + CIC by R, P x R up to 360 samples per symbol)
+  and FIR-only rates: dummy-frame symbols and every output sample vs the
+  model, with output backpressure; the CIC at R = 32 with a full-scale input.
 """
 
 import cocotb
@@ -32,11 +35,19 @@ def gr_reference(rate_idx, pilots, gold, seed):
     return ref["bbframe"][:kbch], signs
 
 
-async def setup(dut, sps, gold, finc, rolloff=0.35):
+async def setup(dut, sps, gold, finc, rolloff=0.35, cfg=None):
+    """Reset and configure; sps = samples per symbol of the RRC alone, or
+    cfg = a txmodel.tx_config() dict (P, R, cic_shift, coefs). Returns the
+    coefficients."""
+    if cfg is None:
+        cfg = dict(P=sps, R=1, cic_shift=0, coefs=m.rrc_coefs(sps, rolloff, TPP))
+    sps = cfg["P"]
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     dut.rst.value = 1
     dut.enable.value = 0
     dut.sps.value = sps
+    dut.cic_r.value = cfg["R"] if cfg["R"] >= 2 else 0
+    dut.cic_shift.value = cfg["cic_shift"]
     xa, xb = m.gold_init(gold)
     dut.gold_xa.value = xa
     dut.gold_xb.value = xb
@@ -46,7 +57,7 @@ async def setup(dut, sps, gold, finc, rolloff=0.35):
     dut.coef_we.value = 0
     await ClockCycles(dut.clk, 4)
     dut.rst.value = 0
-    coefs = m.rrc_coefs(sps, rolloff, TPP)
+    coefs = cfg["coefs"]
     for p in range(sps):
         for j in range(TPP):
             dut.coef_addr.value = p * TPP + j
@@ -172,3 +183,95 @@ async def tx_carrier_only(dut):
     amp = np.abs(rtl[2000:, 0] + 1j * rtl[2000:, 1])
     assert amp.std() < 0.01 * amp.mean(), "not a constant-envelope tone"
     dut._log.info(f"{n} carrier-only samples match the model; amplitude {amp.mean():.0f}")
+
+
+async def run_rate(dut, cfg, finc, nsym, stall=0.3, carrier=False):
+    """Dummy PLFRAMEs (no data) through a tx_config() shaping setup: the
+    symbol tap must equal the model's dummy frame, and every output sample
+    nco_mix(tx_shape(symbols)) (whole frames would be too slow to simulate at
+    360 samples per symbol)."""
+    await setup(dut, 0, 0, finc, cfg=cfg)
+    sps = cfg["P"] * cfg["R"]
+    syms = []
+    cocotb.start_soon(symbol_monitor(dut, syms))
+    snk = Sink(dut, ["i", "q"], stall_prob=stall, seed=11)
+    cocotb.start_soon(snk.run())
+    dut.carrier_only.value = int(carrier)
+    dut.enable.value = 1
+    while len(snk.beats) < nsym * sps:
+        await RisingEdge(dut.clk)
+    dut.enable.value = 0
+    s = np.array(syms, dtype=np.uint8)[:, :2]
+    dref = m.dummy_plframe_signs(0)
+    assert len(s) <= len(dref) and np.array_equal(s, dref[:len(s)]), "dummy PLFRAME symbols differ"
+    if carrier:
+        s = np.zeros_like(s)
+    model = m.nco_mix(m.tx_shape(m.signs_to_iq(s), cfg, TPP), finc)
+    rtl = np.array([(to_signed16(i), to_signed16(q)) for i, q in snk.beats], dtype=np.int64)
+    n = len(rtl)
+    assert len(model) >= n
+    bad = np.flatnonzero((rtl != model[:n]).any(axis=1))
+    assert bad.size == 0, f"{bad.size} sample mismatches, first {bad[:5]}: {rtl[bad[:3]]} vs {model[bad[:3]]}"
+    rms = np.sqrt((rtl[n // 2:] ** 2).sum(axis=1).mean())
+    dut._log.info(f"sps {sps} = P {cfg['P']} x R {cfg['R']} (shift {cfg['cic_shift']}): {len(s)} symbols, "
+                  f"{n} samples match the model bit-exactly; rms {rms:.0f}, peak {np.abs(rtl).max()}")
+    return rtl
+
+
+def rate_cfg(sps, rolloff):
+    """Shaping for 12 MS/s / sps (what dvbs2-tx programs)."""
+    return m.tx_config(sps, rolloff, TPP)
+
+
+@cocotb.test()
+async def tx_rate_33k(dut):
+    """33.33 kS/s: 360 samples per symbol = RRC x60, CIC x6, NCO on."""
+    await run_rate(dut, rate_cfg(360, 0.35), 0x01234567, nsym=260)
+
+
+@cocotb.test()
+async def tx_rate_66k(dut):
+    """66.67 kS/s: 180 = 60 x 3 (R not a power of 2), roll-off 0.2."""
+    await run_rate(dut, rate_cfg(180, 0.20), 0xF0000000, nsym=300)
+
+
+@cocotb.test()
+async def tx_rate_125k(dut):
+    """125 kS/s: 96 = 48 x 2, roll-off 0.25, no backpressure."""
+    await run_rate(dut, rate_cfg(96, 0.25), 0x00C49BA6, nsym=400, stall=0.0)
+
+
+@cocotb.test()
+async def tx_rate_250k(dut):
+    """250 kS/s: 48 samples per symbol, RRC alone (CIC off)."""
+    cfg = rate_cfg(48, 0.35)
+    assert cfg["R"] == 1
+    await run_rate(dut, cfg, 0x0A3D70A4, nsym=500)
+
+
+@cocotb.test()
+async def tx_rate_333k(dut):
+    """333.33 kS/s: 36 samples per symbol, RRC alone."""
+    cfg = rate_cfg(36, 0.20)
+    assert cfg["R"] == 1
+    await run_rate(dut, cfg, 0, nsym=500)
+
+
+@cocotb.test()
+async def tx_cic_full_scale(dut):
+    """CIC at R = 32 (shift 10) behind P = 2 with the largest taps: the RRC
+    output saturates at +-full scale, so the integrators reach their
+    largest values (exact in 26 bits) and the output saturation is used."""
+    cfg = dict(P=2, R=32, cic_shift=m.cic_shift_for(32),
+               coefs=np.full(2 * TPP, (1 << 17) - 1, dtype=np.int64))
+    cfg["coefs"][1::4] = -(1 << 17)
+    rtl = await run_rate(dut, cfg, 0, nsym=120, stall=0.2)
+    assert np.abs(rtl).max() >= 32767
+
+
+@cocotb.test()
+async def tx_cic_carrier_only(dut):
+    """Carrier-only tone through the CIC (360 = 60 x 6) and the NCO."""
+    rtl = await run_rate(dut, rate_cfg(360, 0.35), 0x0C49BA5E, nsym=60, carrier=True)
+    amp = np.abs(rtl[len(rtl) // 2:, 0] + 1j * rtl[len(rtl) // 2:, 1])
+    assert amp.std() < 0.01 * amp.mean(), "not a constant-envelope tone"

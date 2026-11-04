@@ -8,7 +8,7 @@ title = "DVB-S2 transmitter"
 uio = "dvbs2-tx"
 size = 0x10000
 id = { offset = 0x04, value = 0x44565332 }        # "DVS2"
-version = { offset = 0x00, value = 0x00010000 }
+version = { offset = 0x00, value = 0x00010001 }
 rtl = "dvbs2/rtl/dvbs2_tx_axi.sv"
 maps = ["regs", "dmac", "buffer"]
 
@@ -25,7 +25,22 @@ doc = "Smallest samples per symbol"
 [[const]]
 name = "SPS_MAX"
 value = 64
-doc = "Largest samples per symbol"
+doc = "Largest RRC interpolation factor P (SPS register); samples per symbol = P x CIC.R"
+
+[[const]]
+name = "CIC_R_MIN"
+value = 2
+doc = "Smallest CIC interpolation factor R (0 and 1 switch the CIC off)"
+
+[[const]]
+name = "CIC_R_MAX"
+value = 32
+doc = "Largest CIC interpolation factor R"
+
+[[const]]
+name = "VERSION_CIC"
+value = 0x00010001
+doc = "First core version with the CIC register"
 
 [[const]]
 name = "GOLD_MAX"
@@ -41,7 +56,7 @@ doc = "HDR.MAGIC value of a valid DMA packet"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0000 = 1.0"
+doc = "Core version, 0x0001_0001 = 1.1 (1.1: CIC register)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -95,11 +110,11 @@ doc = "Control"
 name = "SPS"
 offset = 0x14
 access = "rw"
-doc = "Samples per symbol"
+doc = "RRC interpolation factor P"
   [[reg.field]]
   name = "SPS"
   bits = [0, 6]
-  doc = "Samples per symbol, 2..64"
+  doc = "RRC interpolation factor P, 2..64; samples per symbol = P x CIC.R (P alone when the CIC is off)"
 
 [[reg]]
 name = "GOLD_XA"
@@ -147,6 +162,21 @@ doc = "Write the coefficient at COEF_ADDR, then COEF_ADDR++"
   bits = [0, 17]
   signed = true
   doc = "RRC coefficient"
+
+[[reg]]
+name = "CIC"
+offset = 0x2C
+access = "rw"
+reset = 0
+doc = "CIC interpolator after the RRC (3 stages, gain R^2 / 2^SHIFT); core >= 1.1"
+  [[reg.field]]
+  name = "R"
+  bits = [0, 5]
+  doc = "Interpolation factor: 0, 1 = off (the RRC output passes unchanged), 2..32"
+  [[reg.field]]
+  name = "SHIFT"
+  bits = [8, 11]
+  doc = "Output shift, floor(log2 R^2) (0 when off); the RRC taps include 2^SHIFT / R^2"
 
 [[reg]]
 name = "DATA_FRAMES"

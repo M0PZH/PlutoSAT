@@ -203,16 +203,15 @@ def signs_to_iq(signs):
 
 COEF_W = 18
 ACC_SHIFT = 17  # output = round(sum(coef * sym) / 2^ACC_SHIFT), saturated to 16 bit
+P_MAX = 64      # RRC interpolation factor (polyphase branches)
+CIC_N = 3       # CIC interpolator after the RRC (rtl/dvbs2_cic_interp.sv)
+CIC_W = 26
+CIC_RMAX = 32
 
 
-def rrc_coefs(sps, rolloff, taps_per_phase, peak=0.80):
-    """Integer RRC coefficients, length sps*taps_per_phase.
-
-    Scaled so a worst-case QPSK sequence stays below `peak` of full scale.
-    """
-    n = sps * taps_per_phase
-    t = (np.arange(n) - (n - 1) / 2) / sps
-    h = np.empty(n)
+def _rrc(t, rolloff):
+    """Root-raised-cosine impulse response at times t (in symbols)."""
+    h = np.empty(len(t))
     for i, ti in enumerate(t):
         if abs(ti) < 1e-12:
             h[i] = 1 - rolloff + 4 * rolloff / np.pi
@@ -222,29 +221,108 @@ def rrc_coefs(sps, rolloff, taps_per_phase, peak=0.80):
         else:
             h[i] = (np.sin(np.pi * ti * (1 - rolloff)) + 4 * rolloff * ti * np.cos(np.pi * ti * (1 + rolloff))) \
                 / (np.pi * ti * (1 - (4 * rolloff * ti) ** 2))
+    return h
+
+
+def cic_shift_for(R):
+    """CIC output shift floor(log2 R^2): gain R^2 / 2^shift in [1, 2)."""
+    return (R * R).bit_length() - 1 if R >= 2 else 0
+
+
+def tx_split(sps):
+    """(P, R) for `sps` samples per symbol, or None if not supported: the RRC
+    alone (R = 1) up to P_MAX, else the largest P <= P_MAX with R = sps / P
+    an integer in 2..CIC_RMAX (the largest P keeps the CIC images and droop
+    smallest)."""
+    if 2 <= sps <= P_MAX:
+        return sps, 1
+    for P in range(P_MAX, 1, -1):
+        if sps % P == 0 and 2 <= sps // P <= CIC_RMAX:
+            return P, sps // P
+    return None
+
+
+def rrc_coefs(sps, rolloff, taps_per_phase, peak=0.80, cic_r=1):
+    """Integer RRC coefficients, length sps*taps_per_phase (sps = the RRC's
+    interpolation factor P).
+
+    Scaled so a worst-case QPSK sequence stays below `peak` of full scale.
+    With a CIC after the RRC (cic_r = R >= 2) the taps are at the RRC rate
+    P x symbol rate; they then also
+      * pre-compensate the CIC droop: convolved with [-a, 1 + 2a, -a],
+        a = CIC_N (1 - 1/R^2) / 24, whose response 1 + 4a sin^2(pi f)
+        matches 1 / H_cic(f) ~ 1 + CIC_N pi^2 (1 - 1/R^2) f^2 / 6 to second
+        order (f in cycles per RRC-rate sample); the RRC is evaluated one
+        sample beyond each end so the result keeps its length;
+      * include 2^cic_shift / R^2 (<= 1), the inverse of the CIC gain after
+        its shift, so the output level does not depend on R.
+    """
+    n = sps * taps_per_phase
+    if cic_r >= 2:
+        he = _rrc((np.arange(-1, n + 1) - (n - 1) / 2) / sps, rolloff)
+        a = CIC_N * (1 - 1 / cic_r ** 2) / 24
+        h = he[1:-1] + a * (2 * he[1:-1] - he[:-2] - he[2:])
+        k = (1 << cic_shift_for(cic_r)) / cic_r ** 2
+    else:
+        h = _rrc((np.arange(n) - (n - 1) / 2) / sps, rolloff)
+        k = 1.0
     # worst-case |output| for symbols +-SYM_A: max over phases of sum|h|
+    # (the CIC's impulse response is positive, so it cannot raise the peak)
     worst = max(np.abs(h[p::sps]).sum() for p in range(sps)) * SYM_A
-    scale = peak * 32767 * (1 << ACC_SHIFT) / worst
+    scale = peak * 32767 * (1 << ACC_SHIFT) / worst * k
     c = np.round(h * scale).astype(np.int64)
     assert np.abs(c).max() < (1 << (COEF_W - 1))
     return c
 
 
+def tx_config(sps, rolloff, taps_per_phase=16):
+    """Shaping settings for `sps` samples per symbol at the DAC:
+    dict(P, R, cic_shift, coefs) (SPS register = P, CIC register = R and
+    cic_shift; R = 1 means no CIC). Raises ValueError if not supported.
+    The same rules are in sw/dvbs2_tx.c."""
+    sp = tx_split(sps)
+    if sp is None:
+        raise ValueError(f"{sps} samples per symbol is not supported")
+    P, R = sp
+    return dict(P=P, R=R, cic_shift=cic_shift_for(R),
+                coefs=rrc_coefs(P, rolloff, taps_per_phase, cic_r=R))
+
+
 def rrc_interp(iq, coefs, sps, taps_per_phase):
     """Polyphase interpolation: y[n*sps + p] = sum_j coefs[p + sps*j] * x[n - j]."""
+    iq = np.asarray(iq, dtype=np.int64)
     nsym = len(iq)
-    hist = np.zeros((taps_per_phase, 2), dtype=np.int64)
-    out = np.empty((nsym * sps, 2), dtype=np.int64)
-    k = 0
-    for n in range(nsym):
-        hist = np.roll(hist, 1, axis=0)
-        hist[0] = iq[n]
-        for p in range(sps):
-            c = coefs[p::sps][:taps_per_phase]
-            acc = (c[:, None] * hist).sum(axis=0)
-            out[k] = np.clip((acc + (1 << (ACC_SHIFT - 1))) >> ACC_SHIFT, -32768, 32767)
-            k += 1
-    return out
+    out = np.empty((nsym, sps, 2), dtype=np.int64)
+    for p in range(sps):
+        c = np.asarray(coefs[p::sps][:taps_per_phase], dtype=np.int64)
+        for ax in range(2):
+            out[:, p, ax] = np.convolve(iq[:, ax], c)[:nsym]
+    out = np.clip((out + (1 << (ACC_SHIFT - 1))) >> ACC_SHIFT, -32768, 32767)
+    return out.reshape(-1, 2)
+
+
+def _wrapw(v, w):
+    return ((v + (1 << (w - 1))) & ((1 << w) - 1)) - (1 << (w - 1))
+
+
+def cic_interp(x, R, cshift):
+    """3-stage CIC interpolator by R (rtl/dvbs2_cic_interp.sv):
+      d[m] = x[m] - 2 x[m-1] + x[m-2], u[n] = d[n // R],
+      w = u integrated twice, y[n] = sat16((w[n] + rc) >> cshift),
+    rc = 2^(cshift-1) (0 for cshift 0); samples before the first are zero.
+    R <= 1 with cshift 0 returns x unchanged."""
+    x = np.asarray(x, dtype=np.int64).reshape(-1, 2)
+    R = max(int(R), 1)
+    d = np.diff(x, n=2, axis=0, prepend=np.zeros((2, 2), np.int64))
+    w = np.cumsum(np.cumsum(np.repeat(d, R, axis=0), axis=0), axis=0)
+    rc = (1 << (cshift - 1)) if cshift else 0
+    return np.clip(_wrapw(w + rc, CIC_W) >> cshift, -32768, 32767)
+
+
+def tx_shape(iq, cfg, taps_per_phase=16):
+    """Symbols -> DAC-rate samples before the NCO, for a tx_config() dict."""
+    y = rrc_interp(iq, cfg["coefs"], cfg["P"], taps_per_phase)
+    return cic_interp(y, cfg["R"], cfg["cic_shift"]) if cfg["R"] >= 2 else y
 
 
 NCO_LUT_AW = 10

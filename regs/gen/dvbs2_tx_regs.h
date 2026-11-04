@@ -6,7 +6,7 @@
 #define DVBS2_TX_UIO "dvbs2-tx"
 #define DVBS2_TX_SIZE 0x00010000u
 #define DVBS2_TX_ID_VALUE 0x44565332u
-#define DVBS2_TX_VERSION_VALUE 0x00010000u
+#define DVBS2_TX_VERSION_VALUE 0x00010001u
 #define DVBS2_TX_MAP_REGS 0
 #define DVBS2_TX_MAP_DMAC 1
 #define DVBS2_TX_MAP_BUFFER 2
@@ -15,14 +15,20 @@
 #define DVBS2_TX_TPP 16
 /* Smallest samples per symbol */
 #define DVBS2_TX_SPS_MIN 2
-/* Largest samples per symbol */
+/* Largest RRC interpolation factor P (SPS register); samples per symbol = P x CIC.R */
 #define DVBS2_TX_SPS_MAX 64
+/* Smallest CIC interpolation factor R (0 and 1 switch the CIC off) */
+#define DVBS2_TX_CIC_R_MIN 2
+/* Largest CIC interpolation factor R */
+#define DVBS2_TX_CIC_R_MAX 32
+/* First core version with the CIC register */
+#define DVBS2_TX_VERSION_CIC 65537
 /* Largest PL scrambling Gold code number */
 #define DVBS2_TX_GOLD_MAX 262142
 /* HDR.MAGIC value of a valid DMA packet */
 #define DVBS2_TX_HDR_MAGIC 181
 
-/* VERSION (ro): Core version, 0x0001_0000 = 1.0 */
+/* VERSION (ro): Core version, 0x0001_0001 = 1.1 (1.1: CIC register) */
 #define DVBS2_TX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_TX_VERSION_MINOR_SHIFT 0
@@ -58,9 +64,9 @@
 #define DVBS2_TX_CTRL_CARRIER_ONLY_SHIFT 4
 #define DVBS2_TX_CTRL_CARRIER_ONLY_WIDTH 1
 #define DVBS2_TX_CTRL_CARRIER_ONLY_MASK 0x00000010u
-/* SPS (rw): Samples per symbol */
+/* SPS (rw): RRC interpolation factor P */
 #define DVBS2_TX_SPS 0x014
-/*   [6:0] SPS: Samples per symbol, 2..64 */
+/*   [6:0] SPS: RRC interpolation factor P, 2..64; samples per symbol = P x CIC.R (P alone when the CIC is off) */
 #define DVBS2_TX_SPS_SPS_SHIFT 0
 #define DVBS2_TX_SPS_SPS_WIDTH 7
 #define DVBS2_TX_SPS_SPS_MASK 0x0000007Fu
@@ -90,6 +96,16 @@
 #define DVBS2_TX_COEF_DATA_DATA_SHIFT 0
 #define DVBS2_TX_COEF_DATA_DATA_WIDTH 18
 #define DVBS2_TX_COEF_DATA_DATA_MASK 0x0003FFFFu
+/* CIC (rw): CIC interpolator after the RRC (3 stages, gain R^2 / 2^SHIFT); core >= 1.1 */
+#define DVBS2_TX_CIC 0x02C
+/*   [5:0] R: Interpolation factor: 0, 1 = off (the RRC output passes unchanged), 2..32 */
+#define DVBS2_TX_CIC_R_SHIFT 0
+#define DVBS2_TX_CIC_R_WIDTH 6
+#define DVBS2_TX_CIC_R_MASK 0x0000003Fu
+/*   [11:8] SHIFT: Output shift, floor(log2 R^2) (0 when off); the RRC taps include 2^SHIFT / R^2 */
+#define DVBS2_TX_CIC_SHIFT_SHIFT 8
+#define DVBS2_TX_CIC_SHIFT_WIDTH 4
+#define DVBS2_TX_CIC_SHIFT_MASK 0x00000F00u
 /* DATA_FRAMES (ro): Data PLFRAMEs sent */
 #define DVBS2_TX_DATA_FRAMES 0x030
 /* DUMMY_FRAMES (ro): Dummy PLFRAMEs sent */

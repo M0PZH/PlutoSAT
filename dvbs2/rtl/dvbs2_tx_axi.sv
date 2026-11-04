@@ -3,7 +3,7 @@
 // core's channel 0 DAC input.
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0000 (1.0)
+//   0x00 VERSION      RO  0x0001_0001 (1.1: CIC register)
 //   0x04 ID           RO  "DVS2" (0x44565332)
 //   0x08 SCRATCH      RW
 //   0x10 CTRL         RW  [0] enable PLFRAME generation
@@ -12,12 +12,16 @@
 //                         [3] NCO bypass
 //                         [4] carrier only: constant symbols (a test tone at the
 //                             NCO offset; framing keeps running)
-//   0x14 SPS          RW  [6:0] samples per symbol (2..64)
+//   0x14 SPS          RW  [6:0] RRC interpolation factor P (2..64); samples per
+//                         symbol = P x CIC R (P alone when the CIC is off)
 //   0x18 GOLD_XA      RW  [17:0]
 //   0x1C GOLD_XB      RW  [17:0]
 //   0x20 NCO_FINC     RW  phase increment per sample, 2^32 = sample rate
 //   0x24 COEF_ADDR    RW  [9:0] RRC coefficient address (p*16 + j)
 //   0x28 COEF_DATA    WO  [17:0] write coefficient at COEF_ADDR, then COEF_ADDR++
+//   0x2C CIC          RW  CIC interpolator after the RRC (reset 0 = off)
+//                         [5:0]  R: 0, 1 = off; 2..32
+//                         [11:8] SHIFT: output shift, floor(log2 R^2) (0 when off)
 //   0x30 DATA_FRAMES  RO  data PLFRAMEs sent
 //   0x34 DUMMY_FRAMES RO  dummy PLFRAMEs sent
 //   0x38 LEN_ERRORS   RO  bad-length packets (adapter) + core length errors
@@ -71,6 +75,9 @@ module dvbs2_tx_axi #(
   logic [31:0] scratch, nco_finc;
   logic [4:0]  ctrl;
   logic [6:0]  sps;
+  logic [5:0]  cic_r;
+  logic [3:0]  cic_shift;
+  logic [2:0]  fifo_frames;
   logic [17:0] gold_xa, gold_xb;
   logic [9:0]  coef_addr;
   logic        coef_we;
@@ -107,6 +114,7 @@ module dvbs2_tx_axi #(
       aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b0;
       ctrl <= 5'b00000; sps <= 7'd8; scratch <= '0; nco_finc <= '0;
       gold_xa <= 18'h00001; gold_xb <= 18'h01008; coef_addr <= '0;
+      cic_r <= '0; cic_shift <= '0;
     end else begin
       if (s_axi_awvalid && s_axi_awready) begin aw_hold <= 1'b1; awaddr_q <= s_axi_awaddr; end
       if (s_axi_wvalid && s_axi_wready)   begin w_hold  <= 1'b1; wdata_q  <= s_axi_wdata;  end
@@ -122,6 +130,7 @@ module dvbs2_tx_axi #(
           6'h08: nco_finc  <= wdata_q;
           6'h09: coef_addr <= wdata_q[9:0];
           6'h0A: begin coef_data <= wdata_q[17:0]; coef_we <= 1'b1; end
+          6'h0B: begin cic_r <= wdata_q[5:0]; cic_shift <= wdata_q[11:8]; end
           default: ;
         endcase
       end
@@ -139,7 +148,7 @@ module dvbs2_tx_axi #(
         s_axi_arready <= 1'b0;
         s_axi_rvalid  <= 1'b1;
         case (s_axi_araddr[7:2])
-          6'h00: s_axi_rdata <= 32'h0001_0000;
+          6'h00: s_axi_rdata <= 32'h0001_0001;
           6'h01: s_axi_rdata <= 32'h4456_5332;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {27'd0, ctrl};
@@ -148,12 +157,14 @@ module dvbs2_tx_axi #(
           6'h07: s_axi_rdata <= {14'd0, gold_xb};
           6'h08: s_axi_rdata <= nco_finc;
           6'h09: s_axi_rdata <= {22'd0, coef_addr};
+          6'h0B: s_axi_rdata <= {20'd0, cic_shift, 2'd0, cic_r};
           6'h0C: s_axi_rdata <= cnt_data;
           6'h0D: s_axi_rdata <= cnt_dummy;
           6'h0E: s_axi_rdata <= cnt_len_core + cnt_len_adp;
           6'h0F: s_axi_rdata <= cnt_hdr;
           6'h10: s_axi_rdata <= {15'd0, fifo_level};
           6'h11: s_axi_rdata <= cnt_unf;
+          6'h12: s_axi_rdata <= {29'd0, fifo_frames};
           default: s_axi_rdata <= '0;
         endcase
       end
@@ -189,12 +200,12 @@ module dvbs2_tx_axi #(
 
   dvbs2_tx #(.LDPC_ROM_FILE(LDPC_ROM_FILE), .NCO_LUT_FILE(NCO_LUT_FILE)) i_tx (
     .clk, .rst(core_rst),
-    .enable(ctrl[0]), .sps, .gold_xa, .gold_xb, .nco_finc, .nco_bypass(ctrl[3]), .carrier_only(ctrl[4]),
+    .enable(ctrl[0]), .sps, .cic_r, .cic_shift, .gold_xa, .gold_xb, .nco_finc, .nco_bypass(ctrl[3]), .carrier_only(ctrl[4]),
     .coef_we, .coef_addr, .coef_data,
     .s_valid(b_valid), .s_ready(b_ready), .s_data(b_data), .s_user(b_user), .s_last(b_last),
     .m_valid(t_valid), .m_ready(t_ready), .m_i(t_i), .m_q(t_q),
     .cnt_data_frames(cnt_data), .cnt_dummy_frames(cnt_dummy), .cnt_len_errors(cnt_len_core),
-    .fifo_level,
+    .fifo_level, .fifo_frames,
     .sym_valid(), .sym_si(), .sym_sq(), .sym_sof(), .sym_dummy());
 
   // ---------------------------------------------------------------- CDC to the DAC clock

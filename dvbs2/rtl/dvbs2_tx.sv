@@ -4,11 +4,14 @@
 //     -> BB scrambler -> BCH -> LDPC                (dvbs2_fec)
 //     -> FECFRAME buffer                            (dvbs2_frame_fifo)
 //     -> PL framing, pilots, PL scrambling, dummies (dvbs2_plframer)
-//     -> QPSK amplitude, RRC polyphase interpolation by SPS (dvbs2_rrc_interp)
+//     -> QPSK amplitude, RRC polyphase interpolation by P (dvbs2_rrc_interp)
+//     -> CIC interpolation by R, off for R <= 1     (dvbs2_cic_interp)
 //     -> NCO frequency shift                        (dvbs2_nco)
-//   m_axis (16-bit I/Q at SPS * symbol rate, e.g. 12 MS/s)
+//   m_axis (16-bit I/Q at P * R * symbol rate, e.g. 12 MS/s)
 //
 // Single clock domain; the sample output is pulled by the DAC side (m_ready).
+// Samples per symbol = P (sps, 2..MAX_SPS) times R (cic_r, 2..32); with
+// R = 0 or 1 (and cic_shift = 0) the CIC passes the RRC output unchanged.
 // QPSK, normal FECFRAMEs, all 11 code rates, pilots on/off per frame.
 
 module dvbs2_tx #(
@@ -24,7 +27,9 @@ module dvbs2_tx #(
 
   // configuration (static while enabled, except coefficients)
   input  logic        enable,        // start emitting PLFRAMEs
-  input  logic [6:0]  sps,           // samples per symbol
+  input  logic [6:0]  sps,           // RRC interpolation factor P
+  input  logic [5:0]  cic_r,         // CIC interpolation factor R (0, 1: off)
+  input  logic [3:0]  cic_shift,     // CIC output shift, floor(log2 R^2)
   input  logic [17:0] gold_xa,
   input  logic [17:0] gold_xb,
   input  logic [31:0] nco_finc,
@@ -52,6 +57,7 @@ module dvbs2_tx #(
   output logic [31:0] cnt_dummy_frames,
   output logic [31:0] cnt_len_errors,
   output logic [16:0] fifo_level,
+  output logic [2:0]  fifo_frames,
 
   // symbol tap (before shaping), for test and debug
   output logic        sym_valid,
@@ -84,7 +90,7 @@ module dvbs2_tx #(
     .s_valid(f_valid), .s_ready(f_ready), .s_data(f_data), .s_user(f_user), .s_last(f_last),
     .frame_avail, .frame_cfg, .frame_pop,
     .sym_valid(fs_valid), .sym_data(fs_data), .sym_rd(fs_rd),
-    .level);
+    .level, .frames(fifo_frames));
 
   assign fifo_level = 17'(level);
 
@@ -106,8 +112,8 @@ module dvbs2_tx #(
   assign sym_dummy = p_dummy;
 
   // ---------------------------------------------------------------- shaping + NCO
-  logic               r_valid, r_ready;
-  logic signed [15:0] r_i, r_q;
+  logic               r_valid, r_ready, c_valid, c_ready;
+  logic signed [15:0] r_i, r_q, c_i, c_q;
 
   dvbs2_rrc_interp #(.TPP(TPP), .MACS(MACS), .MAX_SPS(MAX_SPS)) i_rrc (
     .clk, .rst, .sps,
@@ -116,10 +122,15 @@ module dvbs2_tx #(
     .s_i((p_si && !carrier_only) ? -SYM_A : SYM_A), .s_q((p_sq && !carrier_only) ? -SYM_A : SYM_A),
     .m_valid(r_valid), .m_ready(r_ready), .m_i(r_i), .m_q(r_q));
 
+  dvbs2_cic_interp i_cic (
+    .clk, .rst, .r(cic_r), .cshift(cic_shift),
+    .s_valid(r_valid), .s_ready(r_ready), .s_i(r_i), .s_q(r_q),
+    .m_valid(c_valid), .m_ready(c_ready), .m_i(c_i), .m_q(c_q));
+
   logic signed [15:0] n_i, n_q;
   dvbs2_nco #(.LUT_FILE(NCO_LUT_FILE)) i_nco (
     .clk, .rst, .finc(nco_finc), .bypass(nco_bypass),
-    .s_valid(r_valid), .s_ready(r_ready), .s_i(r_i), .s_q(r_q),
+    .s_valid(c_valid), .s_ready(c_ready), .s_i(c_i), .s_q(c_q),
     .m_valid, .m_ready, .m_i(n_i), .m_q(n_q));
 
   assign m_i = n_i;
