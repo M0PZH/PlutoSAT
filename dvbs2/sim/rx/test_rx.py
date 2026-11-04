@@ -575,8 +575,38 @@ def check_ldpc_out(got, want):
 ])
 def test_ldpc(ldpc_exe, name, rate_idx, esn0, nframes, max_it, stall, gap):
     """RTL decoder output (bytes, converged flag, iterations) equals the model."""
-    os.makedirs(WORK, exist_ok=True)
     llrs, want = ldpc_case(rate_idx, esn0, nframes, seed=rate_idx + 7, max_it=max_it)
+    ldpc_check(ldpc_exe, name, rate_idx, llrs, want, max_it, stall, gap)
+
+
+def test_ldpc_saturated(ldpc_exe):
+    """High SNR: every |LLR| at full scale (127 / -128), one or two of them
+    wrong (an impulse): a wrong parity bit (degree 2), the last parity bit
+    (degree 1), one symbol (both bits) in the parity part, an info bit. With
+    the channel clip (ldpcdec.LCH) all converge in a few iterations (without
+    it the parity ones never did: LDPC failed, BCH clean)."""
+    import ldpcdec as ld
+    import txmodel as m
+    ri = 5                                     # 2/3
+    rng = np.random.default_rng(23)
+    dec = ld.Decoder(ri)
+    K = dec.code.K
+    llrs, want = [], []
+    for flip in ([K + 1000], [64799], [K + 6002, K + 6003], [100]):
+        cw = m.fec_frame(rng.integers(0, 2, dec.code.kbch).astype(np.uint8), ri)
+        llr = np.where(cw == 1, -128, 127).astype(np.int64)
+        for b in flip:
+            llr[b] = 127 if cw[b] else -128
+        hard, it, conv = dec.decode(llr)
+        assert conv and it <= 3 and np.array_equal(hard, cw), (flip, it, conv)
+        want.append((np.packbits(hard[:K]), conv, it, True, np.packbits((llr[:K] < 0).astype(np.uint8))))
+        llrs.append(llr.astype(np.int8))
+    ldpc_check(ldpc_exe, "saturated", ri, np.array(llrs), want, 30, 0, 0)
+
+
+def ldpc_check(ldpc_exe, name, rate_idx, llrs, want, max_it, stall, gap):
+    os.makedirs(WORK, exist_ok=True)
+    nframes = len(llrs)
     fin = os.path.join(WORK, f"l_in_{name}.hex")
     fout = os.path.join(WORK, f"l_out_{name}.hex")
     write_ldpc_in(fin, [(llr, rate_idx, max_it, 0x40 + k) for k, llr in enumerate(llrs)])

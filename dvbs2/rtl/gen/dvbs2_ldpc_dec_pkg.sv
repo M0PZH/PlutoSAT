@@ -5,6 +5,7 @@ package dvbs2_ldpc_dec_pkg;
   localparam int LD_ROM_DEPTH = 6828;
   localparam int LD_RMAX = 63;
   localparam int LD_OFFSET = 1;
+  localparam int LD_LCH = 61;
   localparam logic [15:0] LD_BASE [11] = '{16'd0, 16'd540, 16'd1140, 16'd1788, 16'd2418, 16'd3210, 16'd3810, 16'd4440, 16'd5088, 16'd5748, 16'd6288};
   localparam logic [15:0] LD_Q [11] = '{16'd135, 16'd120, 16'd108, 16'd90, 16'd72, 16'd60, 16'd45, 16'd36, 16'd30, 16'd20, 16'd18};
   localparam logic [15:0] LD_NG [11] = '{16'd45, 16'd60, 16'd72, 16'd90, 16'd108, 16'd120, 16'd135, 16'd144, 16'd150, 16'd160, 16'd162};

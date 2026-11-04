@@ -23,7 +23,8 @@
 // the slot disabled or in its soft reset.
 //   0x200 VERSION     RO  0x0002_0000: two receive slots, register map v2, the DDR LLR
 //                         queue always on (0x0001_0500: DDR LLR queue (0xDC..0xF0), the
-//                         packet header's MODCOD/pilots are the frame's own; 0x0001_0401:
+//                         packet header's MODCOD/pilots are the frame's own; 0x0001_0402:
+//                         the LDPC decoder clips channel LLRs to +-61; 0x0001_0401:
 //                         a whole-frame search after a PLS drop; 0x0001_0400: frame sync
 //                         confirms headers by their PLS decode (no false lock
 //                         on repeating frames), acquisition headers typed by the frame

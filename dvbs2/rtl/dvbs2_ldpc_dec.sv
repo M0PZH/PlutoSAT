@@ -8,9 +8,9 @@
 // m_chan: the channel's hard decisions (input LLR signs) of the same bits.
 //
 // Input: 32400 words of two LLRs (bit 2i from I, 2i+1 from Q) per frame, as
-// produced by dvbs2_rx_carrier; s_first restarts a frame. Per frame (sampled
-// on its first word, i.e. with s_first or the word after the previous
-// frame's last): the code rate s_rate, the iteration limit s_max_it and an
+// produced by dvbs2_rx_carrier, clipped to +-LD_LCH; s_first restarts a frame.
+// Per frame (sampled on its first word, i.e. with s_first or the word after
+// the previous frame's last): the code rate s_rate, the iteration limit s_max_it and an
 // opaque tag s_tag ({slot, MODCOD, pilots} in dvbs2_rx), which come out
 // again with the frame's bytes (m_rate, m_tag). Each of the two APP buffers
 // keeps its frame's values, so consecutive frames may have different rates.
@@ -94,6 +94,15 @@ module dvbs2_ldpc_dec
 
   function automatic logic [5:0] norm(input logic [5:0] x);
     norm = (x > 6'(LD_OFFSET)) ? x - 6'(LD_OFFSET) : 6'd0;
+  endfunction
+
+  // channel LLR clipped to +-LD_LCH (model: LCH): a check message (<= 62)
+  // must be able to overrule it, also on degree-1/2 parity variables
+  localparam logic signed [7:0] LCH = 8'(LD_LCH);
+  function automatic logic signed [W-1:0] lch(input logic signed [7:0] x);
+    if (x > LCH)       lch = W'(LCH);
+    else if (x < -LCH) lch = -W'(LCH);
+    else               lch = W'(x);
   endfunction
 
   function automatic logic signed [W-1:0] sat9(input logic signed [10:0] x);
@@ -328,7 +337,7 @@ module dvbs2_ldpc_dec
         iw_we    <= 1'b1;
         iw_wlane <= ln;
         iw_waddr <= base + AW'(w);
-        iw_wdata <= {llr[7], llr};
+        iw_wdata <= lch(llr);
         begin : sgw
           logic [31:0] wv;
           wv = sg_sr;
