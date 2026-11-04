@@ -125,6 +125,7 @@ module dvbs2_ldpc_dec
   logic [4:0]  b, e, ld_e;
   logic [11:0] r_addr;
   logic [13:0] sg_base;
+  logic [13:0] sg_wa5;
   logic [12:0] ed_base;
   logic [7:0]  ed_g  [32];
   logic [4:0]  ed_w0 [32], ed_k0 [32];
@@ -368,6 +369,7 @@ module dvbs2_ldpc_dec
       for (int l = 0; l < P; l++) lv4[l] <= $signed(ld_q[(l + int'(k3)) % P]);
       // T+3: phase A: R_old, Q; phase B: L + R_new - R_old
       v5 <= v4; e5 <= e4; k5 <= k4; inv5 <= inv4; a5 <= a4;
+      sg_wa5 <= sg_base + 14'(e4);           // sign write address (sg_base is static in phase A)
       if (v4 && !phase_b) begin
         for (int l = 0; l < P; l++) begin : pa
           logic [5:0] mg;
@@ -421,7 +423,7 @@ module dvbs2_ldpc_dec
         end
         fifo[fifo_wp] <= fw;
         fifo_wp <= fifo_wp + 5'd1;
-        smem[sg_base + 14'(e5)] <= sgn;
+        smem[sg_wa5] <= sgn;
       end
       if (v5 && phase_b) begin
         for (int l = 0; l < P; l++) begin

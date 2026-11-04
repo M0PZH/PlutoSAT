@@ -190,3 +190,12 @@ carrier offset, Es/N0 estimate, pre-FEC and post-LDPC bit error rates
 (RAW_ERR / RAW_BITS / BCH_BITERR, over BCH-good frames) and frame/packet
 counters; `-C FILE` writes a 1024-symbol constellation snapshot (carrier
 output, or the timing loop output with `--constellation-raw`) every second.
+
+## Loopback self-test on the board
+
+`dvbs2-selftest` (package `selftest`, source `awgn/`) runs a PRBS transport
+stream through `dvbs2-tx`, an AD9363 loopback and `dvbs2-rx`, with the PL
+noise source in front of the receiver setting Es/N0, and prints the packet
+error rate per point. `-L digital` uses the AD9363 data-port loopback
+(nothing transmitted), `-L rf` an external TX1 → RX1 cable. See
+[awgn/README.md](../awgn/README.md).
