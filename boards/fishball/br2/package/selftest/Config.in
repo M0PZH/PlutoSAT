@@ -1,0 +1,8 @@
+config BR2_PACKAGE_SELFTEST
+	bool "selftest"
+	help
+	  Loopback self-test: rx-awgn (the PL noise source on the
+	  receive samples), ts-prbs (test transport stream generator /
+	  checker) and dvbs2-selftest (DVB-S2 end-to-end loopback with an
+	  Es/N0 sweep, AD9363 digital or external RF loopback).
+	  Source: awgn/sw in plutosdr-fw.

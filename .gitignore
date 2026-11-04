@@ -58,3 +58,16 @@ dvbs2/syn/*.jou
 __pycache__/
 .pytest_cache/
 dvbs2/syn/clockInfo.txt
+
+# narrowband IQ channels
+nbiq/sim/build/
+nbiq/sw/nbiq
+nbiq/syn/out_*/
+nbiq/syn/*.log
+nbiq/syn/.Xil/
+awgn/sim/build/
+awgn/sw/rx-awgn
+awgn/sw/ts-prbs
+awgn/syn/out/
+nbiq/syn/clockInfo.txt
+awgn/syn/clockInfo.txt

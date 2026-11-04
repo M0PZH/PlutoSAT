@@ -1,0 +1,7 @@
+config BR2_PACKAGE_NBIQ
+	bool "nbiq"
+	help
+	  User-space tool for the PL narrowband IQ channels: four
+	  programmable NCO + CIC + FIR channels (100 kSPS .. 1 MSPS at
+	  12 MSPS) streamed to files, stdout or UDP.
+	  Source: nbiq/sw in plutosdr-fw.

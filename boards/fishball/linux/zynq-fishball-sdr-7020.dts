@@ -127,7 +127,7 @@
 };
 
 /* DVB-S2 transmitter and receiver (dvbs2/): registers, their axi_dmac and
- * uncached buffers at the top of RAM (16 MB TX, 1 MB RX), exported to user
+ * uncached buffers at the top of RAM (16 MB TX, 1 MB RX; 4 MB for nbiq), exported to user
  * space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
  * uio_pdrv_genirq.of_id=generic-uio on the command line. */
 / {
@@ -143,6 +143,11 @@
 
 		dvbs2_rx_buffer: dvbs2-rx-buffer@3ef00000 {
 			reg = <0x3ef00000 0x00100000>;
+			no-map;
+		};
+
+		nbiq_buffer: nbiq-buffer@3eb00000 {
+			reg = <0x3eb00000 0x00400000>;
 			no-map;
 		};
 	};
@@ -165,5 +170,20 @@
 		      <0x3ef00000 0x00100000>;  /* DMA buffer */
 		interrupt-parent = <&intc>;
 		interrupts = <0 53 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/* narrowband IQ channels (nbiq/): registers and the four 1 MB rings */
+	nbiq@7c520000 {
+		compatible = "generic-uio";
+		reg = <0x7c520000 0x10000>,     /* nbiq registers */
+		      <0x3eb00000 0x00400000>;  /* ring buffers */
+		interrupt-parent = <&intc>;
+		interrupts = <0 52 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/* self-test noise source on the receive data (awgn/) */
+	rx-awgn@7c530000 {
+		compatible = "generic-uio";
+		reg = <0x7c530000 0x10000>;
 	};
 };

@@ -240,6 +240,17 @@ ad_add_decimation_filter "rx_fir_decimator" 8 2 1 {61.44} {61.44} \
 ad_ip_instance ilslice decim_slice
 ad_ip_instance util_cpack2 cpack
 
+# Self-test noise source (awgn/): between the AD9363 receive data and all of
+# its users (FIR decimator / IIO DMA, dvbs2_rx, nbiq). Adds programmable
+# AWGN to rx0; delays all four lanes by 6 ADC clocks.
+
+set awgn_dir [file normalize [file join $ad_hdl_dir .. awgn]]
+add_files -norecurse [concat \
+  [glob [file join $awgn_dir rtl *.sv]] \
+  [list [file join $awgn_dir ip rx_awgn_bd.v]]]
+update_compile_order -fileset sources_1
+create_bd_cell -type module -reference rx_awgn_bd rx_awgn
+
 # connections
 
 ad_connect  rx_clk_in_p axi_ad9361/rx_clk_in_p
@@ -265,20 +276,26 @@ ad_connect  axi_ad9361/l_clk axi_ad9361/clk
 
 ad_connect axi_ad9361/l_clk rx_fir_decimator/aclk
 
-ad_connect axi_ad9361/adc_valid_i0 rx_fir_decimator/valid_in_0
+ad_connect axi_ad9361/l_clk rx_awgn/adc_clk
+foreach l {i0 q0 i1 q1} {
+  ad_connect axi_ad9361/adc_valid_$l rx_awgn/adc_valid_$l
+  ad_connect axi_ad9361/adc_data_$l  rx_awgn/adc_data_$l
+}
+
+ad_connect rx_awgn/out_valid_i0 rx_fir_decimator/valid_in_0
 ad_connect axi_ad9361/adc_enable_i0 rx_fir_decimator/enable_in_0
-ad_connect axi_ad9361/adc_data_i0 rx_fir_decimator/data_in_0
-ad_connect axi_ad9361/adc_valid_q0 rx_fir_decimator/valid_in_1
+ad_connect rx_awgn/out_data_i0 rx_fir_decimator/data_in_0
+ad_connect rx_awgn/out_valid_q0 rx_fir_decimator/valid_in_1
 ad_connect axi_ad9361/adc_enable_q0 rx_fir_decimator/enable_in_1
-ad_connect axi_ad9361/adc_data_q0 rx_fir_decimator/data_in_1
+ad_connect rx_awgn/out_data_q0 rx_fir_decimator/data_in_1
 
 ad_connect axi_ad9361/l_clk cpack/clk
 ad_connect axi_ad9361/rst cpack/reset
 
 ad_connect axi_ad9361/adc_enable_i1 cpack/enable_2
-ad_connect axi_ad9361/adc_data_i1 cpack/fifo_wr_data_2
+ad_connect rx_awgn/out_data_i1 cpack/fifo_wr_data_2
 ad_connect axi_ad9361/adc_enable_q1 cpack/enable_3
-ad_connect axi_ad9361/adc_data_q1 cpack/fifo_wr_data_3
+ad_connect rx_awgn/out_data_q1 cpack/fifo_wr_data_3
 
 ad_connect cpack/enable_0 rx_fir_decimator/enable_out_0
 ad_connect cpack/enable_1 rx_fir_decimator/enable_out_1
@@ -422,9 +439,9 @@ ad_cpu_interrupt ps-10 mb-10 axi_dvbs2_dma/irq
 create_bd_cell -type module -reference dvbs2_rx_bd dvbs2_rx
 
 ad_connect axi_ad9361/l_clk          dvbs2_rx/adc_clk
-ad_connect axi_ad9361/adc_valid_i0   dvbs2_rx/adc_valid
-ad_connect axi_ad9361/adc_data_i0    dvbs2_rx/adc_data_i
-ad_connect axi_ad9361/adc_data_q0    dvbs2_rx/adc_data_q
+ad_connect rx_awgn/out_valid_i0     dvbs2_rx/adc_valid
+ad_connect rx_awgn/out_data_i0      dvbs2_rx/adc_data_i
+ad_connect rx_awgn/out_data_q0      dvbs2_rx/adc_data_q
 
 ad_ip_instance axi_dmac axi_dvbs2_rx_dma
 ad_ip_parameter axi_dvbs2_rx_dma CONFIG.DMA_TYPE_SRC 1
@@ -453,3 +470,36 @@ ad_connect sys_cpu_resetn axi_dvbs2_rx_dma/m_dest_axi_aresetn
 ad_cpu_interconnect 0x7C490000 axi_dvbs2_rx_dma
 ad_cpu_interconnect 0x7C510000 dvbs2_rx
 ad_cpu_interrupt ps-9 mb-9 axi_dvbs2_rx_dma/irq
+
+# Narrowband IQ channels (nbiq/): 4 x (NCO, CIC, FIR) from either receive
+# channel -> one DDR ring per channel, written through S_AXI_GP0 (the HP
+# ports are taken).
+
+set nbiq_dir [file normalize [file join $ad_hdl_dir .. nbiq]]
+add_files -norecurse [concat \
+  [glob [file join $nbiq_dir rtl *.sv]] \
+  [list [file join $nbiq_dir rtl gen nbiq_lut.mem] \
+        [file join $nbiq_dir ip nbiq_bd.v]]]
+update_compile_order -fileset sources_1
+
+create_bd_cell -type module -reference nbiq_bd nbiq
+
+ad_connect axi_ad9361/l_clk          nbiq/adc_clk
+ad_connect rx_awgn/out_valid_i0     nbiq/adc_valid
+ad_connect rx_awgn/out_data_i0      nbiq/adc_data_i0
+ad_connect rx_awgn/out_data_q0      nbiq/adc_data_q0
+ad_connect rx_awgn/out_data_i1      nbiq/adc_data_i1
+ad_connect rx_awgn/out_data_q1      nbiq/adc_data_q1
+
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_GP0 {1}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_GP0_ACLK
+ad_connect nbiq/m_axi sys_ps7/S_AXI_GP0
+create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
+                    [get_bd_addr_spaces nbiq/m_axi] \
+                    [get_bd_addr_segs sys_ps7/S_AXI_GP0/GP0_DDR_LOWOCM] \
+                    SEG_sys_ps7_GP0_DDR_LOWOCM
+
+ad_cpu_interconnect 0x7C520000 nbiq
+ad_cpu_interrupt ps-8 mb-8 nbiq/irq
+
+ad_cpu_interconnect 0x7C530000 rx_awgn

@@ -121,3 +121,28 @@ set_max_delay -datapath_only 10.0 \
   -from [get_cells -hier -filter "NAME =~ ${dvbs2_rx_cdc}/mem_reg*"]
 set_false_path -to [get_cells -hier -filter {NAME =~ */dvbs2_rx/*/en_s_reg[0]}]
 set_false_path -to [get_cells -hier -filter {NAME =~ */dvbs2_rx/*/rst_s_reg[0]}]
+
+# Narrowband IQ channels: AD9361 l_clk -> sys_cpu_clk ADC sample FIFO inside nbiq
+set nbiq_cdc [get_cells -hier -filter {NAME =~ */nbiq/*/u_adc_fifo}]
+set_max_delay -datapath_only 5.0 \
+  -from [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/wgray_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/wgray_r1_reg*"]
+set_max_delay -datapath_only 5.0 \
+  -from [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/rgray_r_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/rgray_w1_reg*"]
+set_max_delay -datapath_only 10.0 \
+  -from [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/mem_reg*"]
+set_false_path -to [get_cells -hier -filter {NAME =~ */nbiq/*/rst_s_reg[0]}]
+
+# Self-test noise source: synchronisers, quasi-static configuration
+# (sys_cpu_clk -> l_clk) and the power meter results (l_clk -> sys_cpu_clk)
+set awgn_i [get_cells -hier -filter {NAME =~ */rx_awgn/*/i_rx_awgn_axi}]
+set_false_path -to [get_cells -hier -filter "NAME =~ ${awgn_i}/arst_s_reg[0]"]
+set_false_path -to [get_cells -hier -filter "NAME =~ ${awgn_i}/cfg_s_reg[0]"]
+set_false_path -to [get_cells -hier -filter "NAME =~ ${awgn_i}/p_s_reg[0]"]
+set_max_delay -datapath_only 10.0 \
+  -from [get_cells -hier -filter "NAME =~ ${awgn_i}/en_reg || NAME =~ ${awgn_i}/gain_reg* || NAME =~ ${awgn_i}/nscale_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${awgn_i}/a_en_reg || NAME =~ ${awgn_i}/a_gain_reg* || NAME =~ ${awgn_i}/a_nscale_reg*"]
+set_max_delay -datapath_only 10.0 \
+  -from [get_cells -hier -filter "NAME =~ ${awgn_i}/h_in_reg* || NAME =~ ${awgn_i}/h_out_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${awgn_i}/r_in_reg* || NAME =~ ${awgn_i}/r_out_reg*"]
