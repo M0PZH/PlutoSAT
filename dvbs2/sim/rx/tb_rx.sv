@@ -3,6 +3,7 @@
 //   +bytes= (BBFRAME bytes "dd last ok iters") +maxit=
 //   +period=<clocks per input sample> (no backpressure on the input)
 //   +modcod= +pilots= +thresh= +xa= +xb= +tkp= +tki= +pkp= +pki= +stall=<output %>
+//   +pls=<file> PLS decodes "code conf car grid best second freq" +plsh= +plsstep=
 `timescale 1ns/1ps
 module tb_rx;
   logic clk = 0, rst = 1;
@@ -37,12 +38,22 @@ module tb_rx;
   logic [35:0] st_energy;
   logic [17:0] st_gain;
   logic [15:0] st_acq, st_fa, st_retype;
+  logic [5:0] pls_h;
+  logic [9:0] pls_step;
+  logic [31:0] pls_seen_clr = 0;
+  logic st_pls_v;
+  logic [6:0] st_pls_code, st_pls_dcode;
+  logic [3:0] st_pls_flags, st_pls_dflags;
+  logic [17:0] st_pls_best, st_pls_second;
+  logic [31:0] st_pls_seen;
+  logic [15:0] st_pls_freq, st_pls_count, st_pls_dcount, st_pls_diff_modcod, st_pls_diff_pilots;
+  logic [15:0] st_pls_skipped;
 
   dvbs2_rx #(.LUT_FILE("../../rtl/gen/nco_lut.mem"), .LDPC_ROM_FILE("../../rtl/gen/ldpc_dec_rom.mem")) dut (
     .in_clk(clk), .in_rst(rst), .clk, .rst, .*);
 
-  string fin, fout, fcoef, fbytes;
-  int fi, fo, fc, fb, stall, period, rc, tmp, n_in, n_out, n_bytes;
+  string fin, fout, fcoef, fbytes, fpls;
+  int fi, fo, fc, fb, fp, stall, period, rc, tmp, n_in, n_out, n_bytes;
   logic [17:0] cv;
   logic [15:0] vi, vq;
   logic eof = 0;
@@ -73,6 +84,12 @@ module tb_rx;
     pll_kp = 18'(tmp);
     if (!$value$plusargs("pki=%d", tmp)) tmp = 0;
     pll_ki = 18'(tmp);
+    if (!$value$plusargs("plsh=%d", tmp)) tmp = dvbs2_rx_pkg::PLS_H_DEFAULT;
+    pls_h = 6'(tmp);
+    if (!$value$plusargs("plsstep=%d", tmp)) tmp = dvbs2_rx_pkg::PLS_STEP_DEFAULT;
+    pls_step = 10'(tmp);
+    if (!$value$plusargs("pls=%s", fpls)) fpls = "/dev/null";
+    fp = $fopen(fpls, "w");
     fc = $fopen(fcoef, "r");
     fi = $fopen(fin, "r");
     fo = $fopen(fout, "w");
@@ -110,6 +127,11 @@ module tb_rx;
       n_out++;
     end
 
+  always @(posedge clk)
+    if (st_pls_v)
+      $fdisplay(fp, "%02h %0d %0d %0d %05h %05h %04h", st_pls_code, st_pls_flags[0], st_pls_flags[1],
+                st_pls_flags[2], st_pls_best, st_pls_second, st_pls_freq);
+
   int idle = 0;
   always @(posedge clk) begin
     m_ready <= ($urandom % 100) >= stall;
@@ -120,11 +142,12 @@ module tb_rx;
     if (m_valid || dut.l_valid || dut.u_ldpc.dst != 0 || !eof) idle = 0;
     else idle++;
     if (eof && idle > 200000) begin
-      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, t %0t",
+      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, pls %0d skipped %0d, t %0t",
                n_in, in_overflows, n_out, st_frames, st_fs_found, st_fs_flywheel, st_fs_lost,
-               st_agc_gain, $signed(st_freq), st_amp, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, $time);
+               st_agc_gain, $signed(st_freq), st_amp, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, st_pls_count, st_pls_skipped, $time);
       $fclose(fo);
       $fclose(fb);
+      $fclose(fp);
       $finish;
     end
   end

@@ -13,7 +13,8 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0100 (0x0001_0000: no CIC, DDC_CIC reads 0)
+//   0x00 VERSION      RO  0x0001_0200 (0x0001_0100: no PLS decoder, 0xB8.. read 0;
+//                         0x0001_0000: no CIC, DDC_CIC reads 0)
 //   0x04 ID           RO  "DVR2" (0x44565232)
 //   0x08 SCRATCH      RW
 //   0x10 CTRL         RW  [0] enable (take ADC samples), [1] soft reset (self-clearing)
@@ -56,6 +57,31 @@
 //                         frame, Kldpc bits of each BCH-good frame), wraps
 //   0xB0 RAW_BITS     RO  bits counted in RAW_ERR, wraps
 //   0xB4 BCH_BITERR   RO  bit errors corrected by BCH (post-LDPC errors), wraps
+//   PLS decoder (dvbs2_rx_pls.sv, model/rxfixed.py pls_decode()): the PLS code of
+//   every PLHEADER the frame sync tags, whatever MODCOD/pilots are configured
+//   (detection only). Confident: best > 2 x second and best > 2^8.
+//   0xB8 PLS_LAST     RO  the last decode: [4:0] MODCOD, [8] pilots, [9] short frame,
+//                         [12] confident, [13] from the carrier's frequency, [14] the
+//                         frequency grid was searched, [15] valid (a decode since reset),
+//                         [31:16] decodes (wraps)
+//   0xBC PLS_DATA     RO  the last confident decode of a data header (MODCOD != 0), same
+//                         fields, [15] valid, [31:16] confident data decodes (wraps)
+//   0xC0 PLS_FREQ     RO  frequency of the last decode's hypothesis, turns * 2^32 per
+//                         symbol (multiples of 2^16; relative to the DDC, like FREQ)
+//   0xC4 PLS_BEST     RO  [17:0] metric of the last decode (|correlation|^2 / 256; a
+//                         header at -3 dB Es/N0 gives >= ~300, noise alone <= ~220)
+//   0xC8 PLS_SECOND   RO  [17:0] largest metric of another code at the same frequency
+//   0xCC PLS_DIFF     RO  confident data decodes whose [15:0] MODCOD or frame size,
+//                         [31:16] pilots differ from the configured ones (wrap)
+//   0xD0 PLS_SEEN     R/W1C bit m: a confident normal-frame decode of MODCOD m (bit 0:
+//                         dummy frames) since cleared (a clear wins over a decode in
+//                         the same clock)
+//   0xD4 PLS_CFG      RW  [5:0] H, [25:16] step (turns * 2^16 per symbol): frequency
+//                         hypotheses h * step, h = -H..H (default 32, 262: +-0.128
+//                         cycles/symbol), after the carrier's frequency once acquired;
+//                         ~1420 clocks per hypothesis (2H + 2 of them) must fit
+//                         between two headers (94k clocks: 2.38 MBd dummy frames)
+//   0xD8 PLS_SKIPPED  RO  [15:0] headers not decoded (decoder still busy), wraps
 
 module dvbs2_rx_axi #(
   parameter string LUT_FILE      = "nco_lut.mem",
@@ -111,6 +137,9 @@ module dvbs2_rx_axi #(
   logic        ddc_cwe, rrc_cwe;
   logic [17:0] cdata;
   logic [15:0] t_kp, t_ki;
+  logic [5:0]  pls_h;
+  logic [9:0]  pls_step;
+  logic [31:0] pls_seen_clr;
 
   logic [3:0] srst_cnt;
   logic       core_rst;
@@ -139,6 +168,7 @@ module dvbs2_rx_axi #(
     rrc_cwe <= 1'b0;
     snap_arm <= 1'b0;
     snap_ra_we <= 1'b0;
+    pls_seen_clr <= '0;
     if (!s_axi_aresetn) begin
       aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b0;
       ctrl <= '0; scratch <= '0;
@@ -154,6 +184,8 @@ module dvbs2_rx_axi #(
       pll_ki <= dvbs2_rx_pkg::PLL_KI_DEFAULT;
       max_it <= 6'd30;
       snap_src <= 1'b0;
+      pls_h <= dvbs2_rx_pkg::PLS_H_DEFAULT;
+      pls_step <= dvbs2_rx_pkg::PLS_STEP_DEFAULT;
     end else begin
       if (s_axi_awvalid && s_axi_awready) begin aw_hold <= 1'b1; awaddr_q <= s_axi_awaddr; end
       if (s_axi_wvalid && s_axi_wready)   begin w_hold  <= 1'b1; wdata_q  <= s_axi_wdata;  end
@@ -180,6 +212,8 @@ module dvbs2_rx_axi #(
           6'h13: begin ddc_cic_r <= wdata_q[5:0]; ddc_cic_shift <= wdata_q[11:8]; end
           6'h28: begin snap_arm <= wdata_q[0]; snap_src <= wdata_q[1]; end
           6'h29: begin snap_ra_we <= 1'b1; snap_ra_d <= wdata_q[9:0]; end
+          6'h34: pls_seen_clr <= wdata_q;
+          6'h35: begin pls_h <= wdata_q[5:0]; pls_step <= wdata_q[25:16]; end
           default: ;
         endcase
       end
@@ -231,6 +265,12 @@ module dvbs2_rx_axi #(
   logic [35:0] st_energy;
   logic [17:0] st_gain;
   logic [15:0] st_acq, st_fa, st_retype;
+  logic        pls_v;
+  logic [6:0]  pls_code, pls_dcode;
+  logic [3:0]  pls_flags, pls_dflags;
+  logic [17:0] pls_best, pls_second;
+  logic [31:0] pls_seen;
+  logic [15:0] pls_freq, pls_count, pls_dcount, pls_diff_m, pls_diff_p, pls_skipped;
 
   dvbs2_rx #(.LUT_FILE(LUT_FILE), .LDPC_ROM_FILE(LDPC_ROM_FILE)) u_rx (
     .in_clk(clk), .in_rst(core_rst), .in_valid(d_valid), .in_i(d_i), .in_q(d_q), .in_overflows(in_ovf),
@@ -238,6 +278,7 @@ module dvbs2_rx_axi #(
     .coef_we(rrc_cwe), .coef_addr(rrc_caddr), .coef_data(cdata),
     .timing_kp(t_kp), .timing_ki(t_ki), .modcod, .pilots, .fs_thresh, .gold_xa, .gold_xb,
     .pll_kp, .pll_ki, .ldpc_max_it(max_it),
+    .pls_h, .pls_step, .pls_seen_clr,
     .m_valid(b_valid), .m_ready(1'b1), .m_data(b_data), .m_last(b_last), .m_ok(b_ok), .m_ldpc_ok(b_ldpc_ok),
     .m_iters(b_iters), .m_nerr(b_nerr), .m_raw_err(b_raw_err),
     .snap_c_v, .snap_c_i, .snap_c_q, .snap_t_v, .snap_t_i, .snap_t_q,
@@ -245,7 +286,17 @@ module dvbs2_rx_axi #(
     .st_fs_found(fs_found), .st_fs_flywheel(fs_fly), .st_fs_lost(fs_lost),
     .st_freq, .st_amp, .st_energy, .st_gain, .st_frames(frames), .st_acq, .st_fa, .st_retype,
     .st_ldpc_frames(ldpc_frames), .st_ldpc_failed(ldpc_failed),
-    .st_bch_corrected(bch_corr), .st_bch_failed(bch_failed));
+    .st_bch_corrected(bch_corr), .st_bch_failed(bch_failed),
+    .st_pls_v(pls_v), .st_pls_code(pls_code), .st_pls_flags(pls_flags), .st_pls_best(pls_best),
+    .st_pls_second(pls_second), .st_pls_freq(pls_freq), .st_pls_count(pls_count),
+    .st_pls_dcode(pls_dcode), .st_pls_dflags(pls_dflags), .st_pls_dcount(pls_dcount),
+    .st_pls_diff_modcod(pls_diff_m), .st_pls_diff_pilots(pls_diff_p),
+    .st_pls_seen(pls_seen), .st_pls_skipped(pls_skipped));
+
+  // {MODCOD, short, pilots} + {valid, grid, carrier, confident} -> PLS_LAST / PLS_DATA fields
+  function automatic logic [15:0] pls_word(input logic [6:0] c, input logic [3:0] fl);
+    pls_word = {fl, 2'd0, c[1], c[0], 3'd0, c[6:2]};
+  endfunction
 
   // ---------------------------------------------------------------- constellation snapshot
   (* ram_style = "block" *) logic [31:0] snap_mem [1024];
@@ -436,7 +487,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0100;
+          6'h00: s_axi_rdata <= 32'h0001_0200;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};
@@ -479,6 +530,15 @@ module dvbs2_rx_axi #(
           6'h2B: s_axi_rdata <= raw_err;
           6'h2C: s_axi_rdata <= raw_bits;
           6'h2D: s_axi_rdata <= bch_biterr;
+          6'h2E: s_axi_rdata <= {pls_count, pls_word(pls_code, pls_flags)};
+          6'h2F: s_axi_rdata <= {pls_dcount, pls_word(pls_dcode, pls_dflags)};
+          6'h30: s_axi_rdata <= {pls_freq, 16'd0};
+          6'h31: s_axi_rdata <= {14'd0, pls_best};
+          6'h32: s_axi_rdata <= {14'd0, pls_second};
+          6'h33: s_axi_rdata <= {pls_diff_p, pls_diff_m};
+          6'h34: s_axi_rdata <= pls_seen;
+          6'h35: s_axi_rdata <= {6'd0, pls_step, 10'd0, pls_h};
+          6'h36: s_axi_rdata <= {16'd0, pls_skipped};
           default: s_axi_rdata <= '0;
         endcase
       end

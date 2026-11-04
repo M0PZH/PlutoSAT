@@ -76,6 +76,18 @@
 #define R_RAW_ERR       0xAC
 #define R_RAW_BITS      0xB0
 #define R_BCH_BITERR    0xB4
+#define R_PLS_LAST      0xB8     /* PLS decoder (core >= VERSION_PLS) */
+#define R_PLS_DATA      0xBC
+#define R_PLS_FREQ      0xC0
+#define R_PLS_BEST      0xC4
+#define R_PLS_SECOND    0xC8
+#define R_PLS_DIFF      0xCC
+#define R_PLS_SEEN      0xD0
+#define R_PLS_CFG       0xD4
+#define R_PLS_SKIPPED   0xD8
+#define PLS_CONF        (1u << 12)
+#define PLS_CARRIER     (1u << 13)
+#define PLS_VALID       (1u << 15)
 
 #define DMAC_IRQ_MASK   0x080
 #define DMAC_CONTROL    0x400
@@ -111,6 +123,7 @@
 #define DEC_MAX (CIC_RMAX * DDC_FIR_ONLY_MAX)
 #define CORE_CLK 100e6           /* sys_cpu_clk */
 #define VERSION_CIC 0x00010100   /* first core version with the CIC (DDC_CIC) */
+#define VERSION_PLS 0x00010200   /* first core version with the PLS decoder */
 
 static volatile uint32_t *regs, *dmac;
 static uint8_t *dmabuf;
@@ -434,6 +447,17 @@ static const char *modcods[11] = {
 	"qpsk3/4", "qpsk4/5", "qpsk5/6", "qpsk8/9", "qpsk9/10",
 };
 
+/* all 32 MODCODs (PLS decoder): 0 dummy, 29..31 reserved */
+static const char *pls_names[32] = {
+	"dummy", "qpsk1/4", "qpsk1/3", "qpsk2/5", "qpsk1/2", "qpsk3/5", "qpsk2/3", "qpsk3/4",
+	"qpsk4/5", "qpsk5/6", "qpsk8/9", "qpsk9/10", "8psk3/5", "8psk2/3", "8psk3/4", "8psk5/6",
+	"8psk8/9", "8psk9/10", "16apsk2/3", "16apsk3/4", "16apsk4/5", "16apsk5/6", "16apsk8/9",
+	"16apsk9/10", "32apsk3/4", "32apsk4/5", "32apsk5/6", "32apsk8/9", "32apsk9/10",
+	"reserved29", "reserved30", "reserved31",
+};
+
+static int has_pls;                 /* core version >= VERSION_PLS */
+
 static void usage(const char *p)
 {
 	fprintf(stderr,
@@ -461,13 +485,34 @@ static void usage(const char *p)
 		"  -n, --no-iio         leave the AD9363 alone\n"
 		"  -C, --constellation FILE  write 1024 symbols (\"I Q\" lines) to FILE every second\n"
 		"      --constellation-raw   ... the timing loop output instead of the carrier output\n"
-		"      --dump-coefs     print the filter coefficients and exit\n", p);
+		"      --dump-coefs     print the filter coefficients and exit\n"
+		"      --detect         detect the MODCOD and pilots from the PLHEADERs (any -m/-p\n"
+		"                       will do; the frame sync needs the right pilots or dummy\n"
+		"                       frames): print them and exit 0 after --detect-count equal\n"
+		"                       decodes of data headers, exit 1 after --detect-timeout\n"
+		"      --detect-count N equal decodes in a row (default 3)\n"
+		"      --detect-timeout S  seconds (default 30)\n"
+		"      --pls-grid H     PLS decoder frequency hypotheses -H..H x 0.004 cycles/symbol\n"
+		"                       (default 32; 2H + 2 hypotheses x ~14 us must fit in a\n"
+		"                       dummy frame, 3330 symbols)\n", p);
 	exit(2);
 }
 
-static void status(int rate_idx, double sr, unsigned long ts_pkts, struct bbdeframer *d,
+static void status(int rate_idx, int pilots, double sr, unsigned long ts_pkts, struct bbdeframer *d,
 		   unsigned long bad)
 {
+	/* PLS: the last confident decode of a data header ('!': not the configured one) */
+	char pls[48] = "";
+	if (has_pls) {
+		uint32_t p = rd(regs, R_PLS_DATA);
+		if (p & PLS_VALID)
+			snprintf(pls, sizeof(pls), ", PLS %s%s%s%s", pls_names[p & 31], (p >> 8) & 1 ? " pilots" : "",
+				 (p >> 9) & 1 ? " short" : "",
+				 ((p & 31) != (uint32_t)rate_idx + 1 || ((p >> 8) & 1) != (uint32_t)pilots ||
+				  ((p >> 9) & 1)) ? "!" : "");
+		else
+			snprintf(pls, sizeof(pls), ", PLS -");
+	}
 	static const char *st[4] = { "search", "check", "locked", "?" };
 	double amp = rd(regs, R_AMP), en = (double)rd(regs, R_ENERGY) * 16;
 	double snr = en > amp * amp ? 10 * log10(amp * amp / (en - amp * amp)) : 99;
@@ -480,13 +525,56 @@ static void status(int rate_idx, double sr, unsigned long ts_pkts, struct bbdefr
 	double ber_post = nb > 0 ? (uint32_t)(bch - bch0) / nb : NAN;
 	raw0 = raw; bits0 = bits; bch0 = bch;
 	fprintf(stderr, "\r%s %s, %+.0f Hz, Es/N0 %.1f dB, BER %.2e (after LDPC %.1e), AGC %.2f, frames %u (LDPC failed %u, BCH corrected %u failed %u, dropped %u), "
-		"TS %lu (CRC %lu, bad %lu), fs %u/%u/%u, acq %u fa %u retype %u, ovf %u   ",
+		"TS %lu (CRC %lu, bad %lu), fs %u/%u/%u, acq %u fa %u retype %u, ovf %u%s   ",
 		modcods[rate_idx], st[rd(regs, R_FS_STATE) & 3], f, snr, ber_pre, ber_post, rd(regs, R_AGC_GAIN) / 4096.0,
 		rd(regs, R_LDPC_FRAMES), rd(regs, R_LDPC_FAILED), rd(regs, R_BCH) & 0xFFFF, rd(regs, R_BCH) >> 16,
 		rd(regs, R_PKT_DROPPED),
 		ts_pkts, d->crc_errors, bad, rd(regs, R_FS_FOUND), rd(regs, R_FS_FLYWHEEL),
 		rd(regs, R_FS_LOST), rd(regs, R_CARRIER_ACQ) & 0xFFFF, rd(regs, R_CARRIER_ACQ) >> 16,
-		rd(regs, R_CARRIER_RETYPE), rd(regs, R_IN_OVF) + rd(regs, R_DDC_DROPPED));
+		rd(regs, R_CARRIER_RETYPE), rd(regs, R_IN_OVF) + rd(regs, R_DDC_DROPPED), pls);
+}
+
+/* --detect: wait for `count` equal confident decodes of data headers in a
+ * row; print them (stdout: "MODCOD name pilots short offset_hz") */
+static int detect(double sr, double offset, int count, double timeout)
+{
+	uint32_t n0 = rd(regs, R_PLS_DATA) >> 16, code = 0;
+	int n = 0;
+	struct timespec t0, now;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	fprintf(stderr, "dvbs2-rx: detecting (%d equal PLS decodes, %.0f s)\n", count, timeout);
+	while (!stop) {
+		uint32_t p = rd(regs, R_PLS_DATA), nd = p >> 16;
+		if (nd != n0) {
+			n0 = nd;
+			uint32_t c = p & 0x31F;          /* MODCOD, pilots, short */
+			n = (n && c == code) ? n + 1 : 1;
+			code = c;
+			fprintf(stderr, "PLS %s%s%s (%d)\n", pls_names[c & 31], (c >> 8) & 1 ? " pilots" : "",
+				(c >> 9) & 1 ? " short" : "", n);
+			if (n >= count)
+				break;
+		}
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if ((now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) * 1e-9 > timeout)
+			break;
+		usleep(2000);
+	}
+	if (n < count) {
+		fprintf(stderr, "dvbs2-rx: no MODCOD detected (fs %s, %u PLS decodes, %u confident data decodes)\n",
+			(const char *[]){ "search", "check", "locked", "?" }[rd(regs, R_FS_STATE) & 3],
+			rd(regs, R_PLS_LAST) >> 16, rd(regs, R_PLS_DATA) >> 16);
+		return 1;
+	}
+	/* signal frequency from the last decode (if confident): the carrier's
+	 * estimate if it used it, else its frequency hypothesis (+-0.002 cycles/symbol) */
+	uint32_t l = rd(regs, R_PLS_LAST);
+	int32_t fr = (l & PLS_CARRIER) ? (int32_t)rd(regs, R_FREQ) : (int32_t)rd(regs, R_PLS_FREQ);
+	double off = (l & PLS_CONF) ? offset + fr / 4294967296.0 * sr : offset;
+	fprintf(stderr, "dvbs2-rx: detected %s%s%s, signal at %+.0f Hz from the LO\n", pls_names[code & 31],
+		(code >> 8) & 1 ? " pilots" : "", (code >> 9) & 1 ? " short frames (not supported)" : "", off);
+	printf("%u %s %u %u %.0f\n", code & 31, pls_names[code & 31], (code >> 8) & 1, (code >> 9) & 1, off);
+	return 0;
 }
 
 /* constellation snapshot: write the 1024 captured symbols to path, arm again */
@@ -514,6 +602,8 @@ int main(int argc, char **argv)
 	uint32_t gold = 0;
 	const char *udp = "127.0.0.1:1234", *output = NULL, *constel = NULL;
 	int constel_raw = 0, adc_set = 0;
+	int det = 0, det_count = 3, pls_h = -1;
+	double det_timeout = 30;
 
 	static const struct option lo[] = {
 		{ "sym-rate", 1, 0, 's' }, { "decim", 1, 0, 'd' }, { "modcod", 1, 0, 'm' },
@@ -522,7 +612,8 @@ int main(int argc, char **argv)
 		{ "ddc-gain", 1, 0, 'S' }, { "iterations", 1, 0, 'I' }, { "udp", 1, 0, 'u' },
 		{ "output", 1, 0, 'O' }, { "quiet", 0, 0, 'q' }, { "no-iio", 0, 0, 'n' },
 		{ "dump-coefs", 0, 0, 1 }, { "constellation", 1, 0, 'C' }, { "constellation-raw", 0, 0, 2 },
-		{ "adc-rate", 1, 0, 'F' },
+		{ "adc-rate", 1, 0, 'F' }, { "detect", 0, 0, 3 }, { "detect-count", 1, 0, 4 },
+		{ "detect-timeout", 1, 0, 5 }, { "pls-grid", 1, 0, 6 },
 		{ 0, 0, 0, 0 },
 	};
 	for (int c; (c = getopt_long(argc, argv, "s:d:m:pr:g:f:o:G:S:I:u:O:qnC:F:", lo, NULL)) != -1;) {
@@ -553,6 +644,10 @@ int main(int argc, char **argv)
 		case 'C': constel = optarg; break;
 		case 2: constel_raw = 1; break;
 		case 'F': adc_rate = strcmp(optarg, "auto") ? atof(optarg) : 0; adc_set = 1; break;
+		case 3: det = 1; break;
+		case 4: det_count = atoi(optarg); break;
+		case 5: det_timeout = atof(optarg); break;
+		case 6: pls_h = atoi(optarg); break;
 		default: usage(argv[0]);
 		}
 	}
@@ -590,7 +685,8 @@ int main(int argc, char **argv)
 	}
 	struct ddc_cfg dc;
 	if (dec < 1 || dec > DEC_MAX || fs > 61.44e6 || ddc_gain < 0 || ddc_gain > 8 ||
-	    max_it < 1 || max_it > 63 || gold >= 262143 || ddc_config(dec, ddc_gain, &dc)) {
+	    max_it < 1 || max_it > 63 || gold >= 262143 || det_count < 1 || pls_h > 63 ||
+	    ddc_config(dec, ddc_gain, &dc)) {
 		fprintf(stderr, "bad parameters (decimation %d, ADC rate %.0f)\n", dec, fs);
 		return 2;
 	}
@@ -644,6 +740,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	has_pls = rd(regs, R_VERSION) >= VERSION_PLS;
+	if ((det || pls_h >= 0) && !has_pls) {
+		fprintf(stderr, "--detect / --pls-grid need the PLS decoder (core version %08x < %08x: old bitstream)\n",
+			rd(regs, R_VERSION), VERSION_PLS);
+		return 1;
+	}
+
 	if (!no_iio) {
 		int phy = find_by_name("/sys/bus/iio/devices", "iio:device", "ad9361-phy");
 		char v[64];
@@ -694,6 +797,8 @@ int main(int argc, char **argv)
 	wr(regs, R_PLL_KP, PLL_KP);
 	wr(regs, R_PLL_KI, PLL_KI);
 	wr(regs, R_LDPC_MAX_IT, max_it);
+	if (pls_h >= 0)
+		wr(regs, R_PLS_CFG, pls_h | (262u << 16));
 
 	wr(dmac, DMAC_CONTROL, 0);
 	wr(dmac, DMAC_IRQ_MASK, 0x3);
@@ -703,6 +808,14 @@ int main(int argc, char **argv)
 	wr(regs, R_CTRL, CTRL_RESET);
 	usleep(10);
 	wr(regs, R_CTRL, CTRL_ENABLE);
+
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
+	if (det) {
+		int r = detect(sr, offset, det_count, det_timeout);
+		wr(regs, R_CTRL, 0);
+		return r;
+	}
 
 	/* ---- output */
 	struct tsout out = { 0 };
@@ -731,8 +844,6 @@ int main(int argc, char **argv)
 		freeaddrinfo(ai);
 	}
 
-	signal(SIGINT, on_signal);
-	signal(SIGTERM, on_signal);
 	fprintf(stderr, "dvbs2-rx: %s%s, %.0f S/s, ADC %.0f S/s (decimation %d = CIC %d x FIR %d, %d taps), "
 		"roll-off %.2f, Gold %u, offset %.0f Hz\n", modcods[rate_idx], pilots ? " pilots" : "", sr, fs,
 		dec, dc.R, dc.D, ntaps, rolloff, gold, offset);
@@ -792,7 +903,7 @@ int main(int argc, char **argv)
 		usleep(2000);
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		if (!quiet && (now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000 >= 1000) {
-			status(rate_idx, sr, out.packets, &d, bad);
+			status(rate_idx, pilots, sr, out.packets, &d, bad);
 			last = now;
 		}
 		if (constel && (now.tv_sec != last_snap)) {

@@ -18,4 +18,8 @@ package dvbs2_rx_pkg;
   localparam logic signed [31:0] FA_STEP = 32'sd2909869;
   localparam logic signed [35:0] FA_AVG_CLAMP = 36'sd11639476;
   localparam logic [26:0] DUMMY_K = 27'd47721858;
+  localparam logic [5:0] PLS_H_DEFAULT = 6'd32;
+  localparam logic [9:0] PLS_STEP_DEFAULT = 10'd262;
+  // PLS decoder rotation table {-256 sin, 256 sin, 256 cos} (10 bit each)
+  localparam logic [29:0] PLS_TAB [64] = '{30'h00000100, 30'h3e7064ff, 30'h3ce0c8fb, 30'h3b6128f5, 30'h39e188ed, 30'h3871e4e2, 30'h372238d5, 30'h35e288c6, 30'h34b2d4b5, 30'h33a318a2, 30'h32b3548e, 30'h31e38879, 30'h3133b462, 30'h30b3d44a, 30'h3053ec32, 30'h3013fc19, 30'h30040000, 30'h3013ffe7, 30'h3053efce, 30'h30b3d7b6, 30'h3133b79e, 30'h31e38b87, 30'h32b35772, 30'h33a31b5e, 30'h34b2d74b, 30'h35e28b3a, 30'h37223b2b, 30'h3871e71e, 30'h39e18b13, 30'h3b612b0b, 30'h3ce0cb05, 30'h3e706701, 30'h00000300, 30'h019f9f01, 30'h032f3b05, 30'h04aedb0b, 30'h062e7b13, 30'h079e1f1e, 30'h08edcb2b, 30'h0a2d7b3a, 30'h0b5d2f4b, 30'h0c6ceb5e, 30'h0d5caf72, 30'h0e2c7b87, 30'h0edc4f9e, 30'h0f5c2fb6, 30'h0fbc17ce, 30'h0ffc07e7, 30'h100c0000, 30'h0ffc0419, 30'h0fbc1432, 30'h0f5c2c4a, 30'h0edc4c62, 30'h0e2c7879, 30'h0d5cac8e, 30'h0c6ce8a2, 30'h0b5d2cb5, 30'h0a2d78c6, 30'h08edc8d5, 30'h079e1ce2, 30'h062e78ed, 30'h04aed8f5, 30'h032f38fb, 30'h019f9cff};
 endpackage
