@@ -358,14 +358,27 @@ Branch `wt/rx2`; `dvbs2/README.md`, section "Two receive slots: the receiver
 
 Full fishball build (Vivado 2026.1, 100 MHz, no fallback needed: the
 carrier's seg/zbuf stay in BRAM, no recovery item, the full BCH, nbiq and
-FFT kept; with RX 1.4.2's LDPC channel clip): **WNS +0.088 ns** (TNS 0,
-WHS +0.013 ns), 41739 LUTs (78.5 %), 40150 FFs (37.7 %), slices 95.9 %,
-**135 of 140 BRAM tiles** (96.4 %), 155 DSPs (70.5 %). The worst path is
-the slot enable's synchronizer into the ADC clock (`en_a`, timed as a 2 ns
-inter-clock path, as 1.x's was; a false-path constraint would take it
-out); within the 100 MHz clock the worst is +0.345 ns, in the ADC clock
-+0.137 ns (earlier builds of the design: +0.154..0.199 ns at 100 MHz, in
-the LDPC decoder and the DDC reset fanout). `dvbs2_rx` in the routed design (first build):
+FFT kept; with RX 1.4.2's LDPC channel clip and the slot-reset flush):
+**WNS +0.164 ns** (TNS 0, WHS +0.036 ns), 41835 LUTs (78.6 %), 40134 FFs
+(37.7 %), slices 97.5 %, **135 of 140 BRAM tiles** (96.4 %), 155 DSPs
+(70.5 %). Worst: the ADC clock domain (+0.164 ns), within the 100 MHz clock
++0.402 ns; the slot enable's synchronizer into the ADC clock (`en_a`, timed
+as a 2 ns inter-clock path, as 1.x's was) +0.262 ns (earlier builds: +0.013
+.. +0.088 ns there; a false-path constraint would take it out).
+
+Board (pluto2, digital loopback, 2026-11-04, bitstream "rx20b"): slot 0 and
+slot 1 each alone: PER 0 at QPSK 1/4 without pilots off/0/-1/-2 dB and with
+pilots off/0/-1/-2 dB, QPSK 1/2 pilots 2/1.5 dB (1.0 dB fails, as on 1.4.1);
+both slots on the same 1 MBd signal (different DDC gains): PER 0 in each,
+per-slot counters and TS streams separate; slot 0 at 2 MBd QPSK 1/2 pilots
+with slot 1 at 250 kBd on an empty channel: PER 0, LLR queue at most 1
+frame waiting, 0 dropped, 0 AXI errors (S_AXI_HP1), no input overflow, no
+frames in slot 1; `--detect` on slot 1 (from QPSK 1/2 no pilots to 3/4
+pilots in 0.7 s); per-slot snapshots; 1.x `dvbs2-rx`/`dvbs2-selftest` on
+slot 0 after `LLRQ_BASE` was set: PER 0 at off/0/-1/-2 dB (the first 2.0
+bitstream got the previous run's held packets at each restart, which the
+flush fixed). 1.4.1 on the same points: the same PER.
+`dvbs2_rx` in the routed design (first build):
 25669 LUTs, 17715 FFs, 94 RAMB36 + 17 RAMB18 (102.5 tiles), 89 DSPs:
 
 | Block | LUT | FF | RAMB36 | RAMB18 | DSP |
