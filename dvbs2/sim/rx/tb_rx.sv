@@ -1,6 +1,6 @@
 // File-driven testbench for the receiver core dvbs2_rx.
 //   +coef= +in= (samples "iiii qqqq") +out= (carrier LLRs "ll qq first last")
-//   +bytes= (BBFRAME bytes "dd last ok iters") +maxit=
+//   +bytes= (BBFRAME bytes "dd last ok iters ldpc_ok nerr raw rate modcod pilots slot") +maxit=
 //   +period=<clocks per input sample> (no backpressure on the input)
 //   +modcod= +pilots= +thresh= +xa= +xb= +tkp= +tki= +tinteg0= +pkp= +pki= +stall=<output %>
 //   +pls=<file> PLS decodes "code conf car grid best second freq" +plsh= +plsstep=
@@ -26,6 +26,9 @@ module tb_rx;
   logic m_last, m_ok, m_ldpc_ok;
   logic [4:0] m_nerr;
   logic [15:0] m_raw_err;
+  logic [3:0] m_rate;
+  logic [4:0] m_modcod;
+  logic m_pilots, m_slot;
   logic snap_c_v, snap_t_v;
   logic signed [15:0] snap_c_i, snap_c_q, snap_t_i, snap_t_q;
   logic [15:0] st_bch_corrected, st_bch_failed;
@@ -147,7 +150,8 @@ module tb_rx;
   always @(posedge clk) begin
     m_ready <= ($urandom % 100) >= stall;
     if (m_valid && m_ready) begin
-      $fdisplay(fb, "%02h %0d %0d %02h %0d %02h %04h", m_data, m_last, m_ok, m_iters, m_ldpc_ok, m_nerr, m_raw_err);
+      $fdisplay(fb, "%02h %0d %0d %02h %0d %02h %04h %0h %02h %0d %0d", m_data, m_last, m_ok, m_iters, m_ldpc_ok,
+                m_nerr, m_raw_err, m_rate, m_modcod, m_pilots, m_slot);
       n_bytes++;
     end
     if (m_valid || dut.l_valid || dut.u_ldpc.dst != 0 || !eof) idle = 0;

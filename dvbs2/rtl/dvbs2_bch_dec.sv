@@ -2,7 +2,9 @@
 //
 // Input : the Kldpc hard decisions of a frame from dvbs2_ldpc_dec (BB-
 //         scrambled BBFRAME + BCH parity) as bytes, MSB first, s_last on the
-//         last; s_ok / s_iters: the LDPC result.
+//         last; s_ok / s_iters: the LDPC result; s_rate / s_tag: the frame's
+//         code rate and tag (sampled with each byte; constant in a frame),
+//         out again as m_rate / m_tag.
 // Output: the Kbch BBFRAME bits, corrected and BB-descrambled, as bytes;
 //         m_ok on the last byte: the frame is a BCH codeword now (no errors
 //         or <= t corrected), m_nerr: errors located (deg Lambda), m_raw_err:
@@ -21,11 +23,11 @@
 module dvbs2_bch_dec
   import dvbs2_bch_pkg::*;
   import dvbs2_ldpc_dec_pkg::*;
-(
+#(
+  parameter int TW = 8                     // tag width
+) (
   input  logic        clk,
   input  logic        rst,
-
-  input  logic [3:0]  rate_idx,      // static while running
 
   input  logic        s_valid,
   output logic        s_ready,
@@ -34,6 +36,8 @@ module dvbs2_bch_dec
   input  logic        s_ok,
   input  logic [5:0]  s_iters,
   input  logic [7:0]  s_chan,
+  input  logic [3:0]  s_rate,
+  input  logic [TW-1:0] s_tag,
 
   output logic        m_valid,
   input  logic        m_ready,
@@ -44,6 +48,8 @@ module dvbs2_bch_dec
   output logic [5:0]  m_iters,
   output logic [4:0]  m_nerr,
   output logic [15:0] m_raw_err,
+  output logic [3:0]  m_rate,
+  output logic [TW-1:0] m_tag,
 
   output logic [15:0] st_frames,
   output logic [15:0] st_corrected,  // frames with errors corrected
@@ -61,6 +67,10 @@ module dvbs2_bch_dec
   endfunction
 
   // ------------------------------------------------------------ rate
+  // the frame's rate, taken with its bytes; the syndromes do not depend on
+  // it, the first use (t in B_D) is 13 clocks after the last byte
+  logic [3:0]    rate_idx;
+  logic [TW-1:0] tag;
   logic [15:0] nb, kb;                       // bytes: Kldpc / 8, Kbch / 8
   logic [3:0]  t;
   logic [15:0] cinit [12];
@@ -138,6 +148,8 @@ module dvbs2_bch_dec
       case (st)
         // ---------------------------------------------------- bytes in, syndromes
         B_IN: if (s_valid) begin
+          rate_idx <= s_rate;
+          tag <= s_tag;
           for (int jj = 0; jj < 12; jj++) begin : syn
             logic [15:0] v;
             v = gmul(S[2 * jj + 1], BCH_SYN_MUL[jj][8]);
@@ -258,6 +270,8 @@ module dvbs2_bch_dec
           m_iters   <= iters;
           m_nerr    <= L;
           m_raw_err <= raw;
+          m_rate    <= rate_idx;
+          m_tag     <= tag;
           if (k + 16'd1 == kb) begin
             st_frames <= st_frames + 16'd1;
             if (!ok) st_failed <= st_failed + 16'd1;

@@ -349,9 +349,10 @@ def test_rx_end_to_end(rx_exe, name, kw):
     # RTL LDPC + BCH decoder output
     import bchdec
     dec_m = ld.Decoder(rate_idx)
-    got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16))
+    got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
     nb = kb // 8
     assert len(got_b) == nb * len(llr)
+    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), 0))       # the frames' own tags
     for k in range(len(llr)):
         hard, it, conv = dec_m.decode(llr[k])
         out, ok, L = bchdec.decode(hard[:dec_m.code.K], rate_idx)
@@ -393,8 +394,9 @@ def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22):
     bad = np.nonzero(np.any(got[:len(want), :2] != want, axis=1))[0]
     assert len(bad) == 0, f"{len(bad)} mismatches, first at word {bad[0]}"
     nb = m.LDPC[m.RATES[rate_idx]]["kbch"] // 8
-    got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16))
+    got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
     assert len(got_b) == nb * len(r["frames"])
+    assert np.all(got_b[:, 7:] == (rate_idx, rate_idx + 1, int(pilots), 0))
     dec = [np.unpackbits(got_b[k * nb:(k + 1) * nb, 0].astype(np.uint8))
            for k in range(len(r["frames"])) if got_b[(k + 1) * nb - 1, 2]]
     return r, dec
@@ -495,6 +497,32 @@ def ldpc_case(rate_idx, esn0, nframes, seed, max_it=30):
     return np.array(llrs), want
 
 
+def write_ldpc_in(path, frames):
+    """LLR words "ii qq first rate maxit tag" of frames [(llr, rate_idx, max_it, tag)]."""
+    with open(path, "w") as f:
+        for llr, rate_idx, max_it, tag in frames:
+            u = llr.astype(np.int64) & 0xFF
+            f.write("".join(f"{u[2 * k]:02x} {u[2 * k + 1]:02x} {int(k == 0)} {rate_idx} {max_it} {tag}\n"
+                            for k in range(32400)))
+
+
+def check_ldpc_out(got, want):
+    """Decoder output rows (bytes, last, ok, iters, chan, rate, tag) = the
+    model's frames [(data, conv, it, ok, chan, rate_idx, tag)], in order."""
+    pos = 0
+    for k, (data, conv, it, ok, chan, rate_idx, tag) in enumerate(want):
+        nb = len(data)
+        g = got[pos:pos + nb]
+        pos += nb
+        assert len(g) == nb, f"frame {k}: {len(g)} of {nb} bytes"
+        assert np.array_equal(g[:, 0], data), f"frame {k}: data differs"
+        assert np.array_equal(g[:, 4], chan), f"frame {k}: channel decisions differ"
+        assert g[-1, 1] == 1 and g[:-1, 1].sum() == 0
+        assert g[-1, 2] == int(conv) and g[-1, 3] == it, (k, g[-1], conv, it)
+        assert np.all(g[:, 5] == rate_idx) and np.all(g[:, 6] == tag), (k, g[-1], rate_idx, tag)
+    assert pos == len(got), (pos, len(got))
+
+
 @pytest.mark.parametrize("name,rate_idx,esn0,nframes,max_it,stall,gap", [
     ("r1_2", 3, 1.2, 3, 30, 10, 0),
     ("r1_4", 0, -2.2, 2, 30, 0, 0),
@@ -507,22 +535,47 @@ def test_ldpc(ldpc_exe, name, rate_idx, esn0, nframes, max_it, stall, gap):
     llrs, want = ldpc_case(rate_idx, esn0, nframes, seed=rate_idx + 7, max_it=max_it)
     fin = os.path.join(WORK, f"l_in_{name}.hex")
     fout = os.path.join(WORK, f"l_out_{name}.hex")
-    with open(fin, "w") as f:
-        for llr in llrs:
-            u = llr.astype(np.int64) & 0xFF
-            for k in range(32400):
-                f.write(f"{u[2 * k]:02x} {u[2 * k + 1]:02x} {int(k == 0)}\n")
-    log = rxsim.run(ldpc_exe, rate=rate_idx, maxit=max_it, stall=stall, gap=gap, **{"in": fin, "out": fout})
+    write_ldpc_in(fin, [(llr, rate_idx, max_it, 0x40 + k) for k, llr in enumerate(llrs)])
+    log = rxsim.run(ldpc_exe, stall=stall, gap=gap, **{"in": fin, "out": fout})
     print(log, [(w[1], w[2], w[3]) for w in want])
-    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8))
-    nb = len(want[0][0])
-    assert len(got) == nb * nframes, (len(got), nb * nframes)
-    for k, (data, conv, it, ok, chan) in enumerate(want):
-        g = got[k * nb:(k + 1) * nb]
-        assert np.array_equal(g[:, 0], data), f"frame {k}: data differs"
-        assert np.array_equal(g[:, 4], chan), f"frame {k}: channel decisions differ"
-        assert g[-1, 1] == 1 and g[:-1, 1].sum() == 0
-        assert g[-1, 2] == int(conv) and g[-1, 3] == it, (k, g[-1], conv, it)
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 4, 8))
+    check_ldpc_out(got, [w + (rate_idx, 0x40 + k) for k, w in enumerate(want)])
+
+
+def test_ldpc_mixed(ldpc_exe):
+    """Per-frame rate, iteration limit and tag (RX2 step 2): consecutive
+    frames of different rates and limits through the two APP buffers, each
+    equal to the model at its own rate, with its tag."""
+    os.makedirs(WORK, exist_ok=True)
+    cases = [(3, 2.0, 30), (10, 7.5, 30), (0, -1.5, 30), (6, 4.5, 3), (6, 5.0, 30), (1, -0.5, 30), (3, 1.2, 6)]
+    frames, want = [], []
+    for k, (rate_idx, esn0, max_it) in enumerate(cases):
+        llrs, w = ldpc_case(rate_idx, esn0, 1, seed=100 + k, max_it=max_it)
+        tag = (k * 37 + 5) & 0xFF
+        frames.append((llrs[0], rate_idx, max_it, tag))
+        want.append(w[0] + (rate_idx, tag))
+    fin = os.path.join(WORK, "l_in_mixed.hex")
+    fout = os.path.join(WORK, "l_out_mixed.hex")
+    write_ldpc_in(fin, frames)
+    log = rxsim.run(ldpc_exe, stall=10, gap=1, **{"in": fin, "out": fout})
+    print(log, [(w[1], w[2]) for w in want])
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 4, 8))
+    check_ldpc_out(got, want)
+
+
+def test_ldpc_itcap(ldpc_exe):
+    """it_cap (the LLR queue's shared-budget cap): a frame that would take
+    more iterations stops at it_cap, equal to the model with that limit."""
+    os.makedirs(WORK, exist_ok=True)
+    llrs, want = ldpc_case(0, -2.3, 2, seed=11, max_it=5)
+    fin = os.path.join(WORK, "l_in_itcap.hex")
+    fout = os.path.join(WORK, "l_out_itcap.hex")
+    write_ldpc_in(fin, [(llr, 0, 30, 1) for llr in llrs])
+    log = rxsim.run(ldpc_exe, itcap=5, **{"in": fin, "out": fout})
+    print(log, [(w[1], w[2]) for w in want])
+    assert any(not w[1] for w in want), "a frame must hit the cap"
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 4, 8))
+    check_ldpc_out(got, [w + (0, 1) for w in want])
 
 
 # ---------------------------------------------------------------------------
@@ -743,7 +796,7 @@ def test_rx_axi(rx_axi_exe):
         pkt = data[k * 1024:(k + 1) * 1024]
         h = int(pkt[0])
         assert h >> 56 == 0xB5 and h & 0xFFFF == kb // 8 and (h >> 16) & 0xFFFF == k
-        assert (h >> 32) & 0x1F == rate_idx + 1 and (h >> 37) & 1 == int(pilots)
+        assert (h >> 32) & 0x1F == rate_idx + 1 and (h >> 37) & 1 == int(pilots) and (h >> 55) & 1 == 0
         assert (h >> 40) & 0x3F == it and (h >> 48) & 1 == int(conv)
         assert (h >> 49) & 1 == int(ok) and (h >> 50) & 0x1F == L
         body = pkt[1:].view(np.uint8)[: kb // 8]                      # little endian: byte 0 first
@@ -948,10 +1001,10 @@ def test_bch(bch_exe, rate_idx, stall):
             want.append((np.packbits(out), ok, L, i % 2, 7 + i, ne <= t and np.array_equal(out, bb),
                          int(np.sum(chan != r))))
             for k, (v, c) in enumerate(zip(np.packbits(r), np.packbits(chan))):
-                f.write(f"{v:02x} {int(k == n // 8 - 1)} {i % 2} {7 + i} {c:02x}\n")
-    log = rxsim.run(bch_exe, rate=rate_idx, stall=stall, **{"in": fin, "out": fout})
+                f.write(f"{v:02x} {int(k == n // 8 - 1)} {i % 2} {7 + i} {c:02x} {rate_idx} {i + 3}\n")
+    log = rxsim.run(bch_exe, stall=stall, **{"in": fin, "out": fout})
     print(log, [(w[1], w[2], w[5]) for w in want])
-    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16))
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 4, 8))
     nb = kbch // 8
     assert len(got) == nb * len(want)
     for i, (data, ok, L, lok, it, right, raw) in enumerate(want):
@@ -961,6 +1014,42 @@ def test_bch(bch_exe, rate_idx, stall):
         assert (g[-1, 2], g[-1, 3], g[-1, 4], g[-1, 5]) == (int(ok), lok, it, L), (i, g[-1], ok, L)
         assert right == (nerrs[i] <= t)                    # the model corrects <= t
         assert g[-1, 6] == raw
+        assert np.all(g[:, 7] == rate_idx) and np.all(g[:, 8] == i + 3)
+
+
+def test_bch_mixed(bch_exe):
+    """Per-frame rate and tag (RX2 step 2): frames of different rates (and
+    t = 12, 10, 8) back to back, each equal to the model at its rate."""
+    import bchdec
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    rng = np.random.default_rng(21)
+    fin = os.path.join(WORK, "bch_in_mixed.hex")
+    fout = os.path.join(WORK, "bch_out_mixed.hex")
+    want = []
+    with open(fin, "w") as f:
+        for i, rate_idx in enumerate([10, 0, 5, 9, 3, 3, 7, 1]):
+            kbch, n, t = bchdec.params(rate_idx)
+            bb = rng.integers(0, 2, kbch).astype(np.uint8)
+            r = m.bch_encode(m.bb_scramble(bb), t)
+            ne = [0, t, t + 2, 1][i % 4]
+            r[rng.choice(n, ne, replace=False)] ^= 1
+            out, ok, L = bchdec.decode(r, rate_idx)
+            want.append((np.packbits(out), ok, L, rate_idx, 0x80 + i))
+            for k, v in enumerate(np.packbits(r)):
+                f.write(f"{v:02x} {int(k == n // 8 - 1)} 1 {i} {v:02x} {rate_idx} {0x80 + i}\n")
+    log = rxsim.run(bch_exe, stall=15, **{"in": fin, "out": fout})
+    print(log, [(w[1], w[2]) for w in want])
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 4, 8))
+    pos = 0
+    for i, (data, ok, L, rate_idx, tag) in enumerate(want):
+        g = got[pos:pos + len(data)]
+        pos += len(data)
+        assert np.array_equal(g[:, 0], data), f"frame {i}: data differs"
+        assert g[-1, 1] == 1 and g[:-1, 1].sum() == 0
+        assert (g[-1, 2], g[-1, 5]) == (int(ok), L), (i, g[-1], ok, L)
+        assert np.all(g[:, 7] == rate_idx) and np.all(g[:, 8] == tag)
+    assert pos == len(got)
 
 
 def test_rx_axi_hold(rx_axi_exe):

@@ -52,6 +52,11 @@ module dvbs2_rx #(
   output logic [5:0]         m_iters,
   output logic [4:0]         m_nerr,       // BCH errors located
   output logic [15:0]        m_raw_err,    // pre-FEC bit errors of the frame (if m_ok)
+  // the frame's own parameters (taken with its first LLR word), constant in a frame
+  output logic [3:0]         m_rate,       // code rate 0..10
+  output logic [4:0]         m_modcod,
+  output logic               m_pilots,
+  output logic               m_slot,       // receive slot (0 for now)
 
   // constellation snapshot sources: carrier output (data symbols, phase
   // corrected, before the LLR gain), timing loop output (all symbols)
@@ -162,20 +167,32 @@ module dvbs2_rx #(
   assign snap_t_i = t_i;
   assign snap_t_q = t_q;
 
+  // per-frame tag through the LDPC and BCH decoders: {0, slot, pilots, MODCOD}
   logic       c_valid, c_ready, c_last, c_ok;   // LDPC -> BCH
   logic [7:0] c_data, c_chan;
   logic [5:0] c_iters;
+  logic [3:0] c_rate;
+  logic [7:0] c_tag, m_tag;
 
   dvbs2_ldpc_dec #(.ROM_FILE(LDPC_ROM_FILE)) u_ldpc (
-    .clk, .rst, .rate_idx(4'(modcod - 5'd1)), .max_it(ldpc_max_it),
+    .clk, .rst,
     .s_valid(l_valid), .s_ready(l_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
+    .s_rate(4'(modcod - 5'd1)), .s_max_it(ldpc_max_it), .s_tag({2'b00, pilots, modcod}),
+    .it_cap_en(1'b0), .it_cap(6'd0),
     .m_valid(c_valid), .m_ready(c_ready), .m_data(c_data), .m_last(c_last), .m_ok(c_ok), .m_iters(c_iters), .m_chan(c_chan),
+    .m_rate(c_rate), .m_tag(c_tag),
     .st_frames(st_ldpc_frames), .st_failed(st_ldpc_failed));
 
   dvbs2_bch_dec u_bch (
-    .clk, .rst, .rate_idx(4'(modcod - 5'd1)),
+    .clk, .rst,
     .s_valid(c_valid), .s_ready(c_ready), .s_data(c_data), .s_last(c_last), .s_ok(c_ok), .s_iters(c_iters), .s_chan(c_chan),
+    .s_rate(c_rate), .s_tag(c_tag),
     .m_valid, .m_ready, .m_data, .m_last, .m_ok, .m_ldpc_ok, .m_iters, .m_nerr, .m_raw_err,
+    .m_rate, .m_tag,
     .st_frames(), .st_corrected(st_bch_corrected), .st_failed(st_bch_failed));
+
+  assign m_modcod = m_tag[4:0];
+  assign m_pilots = m_tag[5];
+  assign m_slot   = m_tag[6];
 
 endmodule

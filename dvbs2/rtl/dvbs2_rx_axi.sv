@@ -6,9 +6,10 @@
 //
 // Packet (PKT_WORDS 64-bit words, tlast on the last; byte 0 = tdata[7:0]):
 //   word 0  [15:0] BBFRAME length in bytes (Kbch/8), [31:16] frame counter,
-//           [36:32] MODCOD, [37] pilots, [45:40] LDPC iterations,
-//           [48] LDPC converged, [49] BCH ok (the BBFRAME is a codeword after
-//           <= t corrections: use it), [54:50] BCH errors located, [63:56] 0xB5
+//           [36:32] MODCOD, [37] pilots (both: the frame's, as decoded),
+//           [45:40] LDPC iterations, [48] LDPC converged, [49] BCH ok (the
+//           BBFRAME is a codeword after <= t corrections: use it), [54:50] BCH
+//           errors located, [55] receive slot (0), [63:56] 0xB5
 //   word 1+ BBFRAME bytes (BB-descrambled), then zeros
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
@@ -262,8 +263,9 @@ module dvbs2_rx_axi #(
     .m_valid(d_valid), .m_i(d_i), .m_q(d_q), .st_dropped(ddc_dropped));
 
   // ---------------------------------------------------------------- receiver core
-  logic        b_valid, b_last, b_ok, b_ldpc_ok;
-  logic [4:0]  b_nerr;
+  logic        b_valid, b_last, b_ok, b_ldpc_ok, b_pilots, b_slot;
+  logic [3:0]  b_rate;
+  logic [4:0]  b_nerr, b_modcod;
   logic [15:0] b_raw_err;
   logic        snap_c_v, snap_t_v;
   logic signed [15:0] snap_c_i, snap_c_q, snap_t_i, snap_t_q;
@@ -294,6 +296,7 @@ module dvbs2_rx_axi #(
     .pls_h, .pls_step, .pls_seen_clr,
     .m_valid(b_valid), .m_ready(1'b1), .m_data(b_data), .m_last(b_last), .m_ok(b_ok), .m_ldpc_ok(b_ldpc_ok),
     .m_iters(b_iters), .m_nerr(b_nerr), .m_raw_err(b_raw_err),
+    .m_rate(b_rate), .m_modcod(b_modcod), .m_pilots(b_pilots), .m_slot(b_slot),
     .snap_c_v, .snap_c_i, .snap_c_q, .snap_t_v, .snap_t_i, .snap_t_q,
     .st_agc_gain(agc_gain), .st_timing_integ(t_integ), .st_fs_state(fs_state),
     .st_fs_found(fs_found), .st_fs_flywheel(fs_fly), .st_fs_lost(fs_lost),
@@ -346,7 +349,7 @@ module dvbs2_rx_axi #(
       raw_err <= '0; raw_bits <= '0; bch_biterr <= '0;
     end else if (b_valid && b_last && b_ok) begin
       raw_err    <= raw_err + 32'(b_raw_err);
-      raw_bits   <= raw_bits + 32'(dvbs2_bch_pkg::BCH_N[4'(modcod - 5'd1)]);
+      raw_bits   <= raw_bits + 32'(dvbs2_bch_pkg::BCH_N[b_rate]);
       bch_biterr <= bch_biterr + 32'(b_nerr);
     end
   end
@@ -411,7 +414,7 @@ module dvbs2_rx_axi #(
           w_drop <= 1'b0;
           if (act) begin
             hdr_pending <= 1'b1;
-            hdr_word <= {8'hB5, 1'b0, b_nerr, b_ok, b_ldpc_ok, 2'd0, b_iters, 2'd0, pilots, modcod, pkt_cnt, len + 16'd1};
+            hdr_word <= {8'hB5, b_slot, b_nerr, b_ok, b_ldpc_ok, 2'd0, b_iters, 2'd0, b_pilots, b_modcod, pkt_cnt, len + 16'd1};
             slot_nw[wslot] <= (PW+1)'(wd) + (PW+1)'(1);
             pkt_cnt <= pkt_cnt + 16'd1;
           end
