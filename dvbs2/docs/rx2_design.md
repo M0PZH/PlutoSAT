@@ -355,13 +355,14 @@ Branch `wt/rx2`; `dvbs2/README.md`, section "Two receive slots: the receiver
 
 Full fishball build (Vivado 2026.1, 100 MHz, no fallback needed: the
 carrier's seg/zbuf stay in BRAM, no recovery item, the full BCH, nbiq and
-FFT kept): **WNS +0.013 ns** (TNS 0, WHS +0.019 ns), 42218 LUTs (79.4 %),
-40100 FFs (37.7 %), slices 95.9 %, **135 of 140 BRAM tiles** (96.4 %), 155
-DSPs (70.5 %). The worst path is the slot enable's synchronizer into the
-ADC clock (`en_a`, timed as a 2 ns inter-clock path as 1.x's was; a false
-path constraint would take it out); within the 100 MHz clock the worst is
-+0.199 ns (LDPC decoder; an earlier build of the same design: +0.154 ns,
-DDC reset fanout next). `dvbs2_rx` in the routed design (first build):
+FFT kept; with RX 1.4.2's LDPC channel clip): **WNS +0.088 ns** (TNS 0,
+WHS +0.013 ns), 41739 LUTs (78.5 %), 40150 FFs (37.7 %), slices 95.9 %,
+**135 of 140 BRAM tiles** (96.4 %), 155 DSPs (70.5 %). The worst path is
+the slot enable's synchronizer into the ADC clock (`en_a`, timed as a 2 ns
+inter-clock path, as 1.x's was; a false-path constraint would take it
+out); within the 100 MHz clock the worst is +0.345 ns, in the ADC clock
++0.137 ns (earlier builds of the design: +0.154..0.199 ns at 100 MHz, in
+the LDPC decoder and the DDC reset fanout). `dvbs2_rx` in the routed design (first build):
 25669 LUTs, 17715 FFs, 94 RAMB36 + 17 RAMB18 (102.5 tiles), 89 DSPs:
 
 | Block | LUT | FF | RAMB36 | RAMB18 | DSP |
