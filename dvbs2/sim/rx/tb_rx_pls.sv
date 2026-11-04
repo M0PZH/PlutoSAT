@@ -21,7 +21,7 @@ module tb_rx_pls;
   logic [17:0] res_best, res_second;
   logic [31:0] st_seen;
   logic [15:0] res_freq, st_count, st_data, st_diff_modcod, st_diff_pilots, st_skipped;
-  logic data_conf, data_car, data_grid, data_valid;
+  logic data_conf, data_car, data_grid, data_valid, dec_busy;
 
   dvbs2_rx_pls dut (.*);
 

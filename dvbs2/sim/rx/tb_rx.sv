@@ -135,6 +135,14 @@ module tb_rx;
       $fdisplay(fp, "%02h %0d %0d %0d %05h %05h %04h", st_pls_code, st_pls_flags[0], st_pls_flags[1],
                 st_pls_flags[2], st_pls_best, st_pls_second, st_pls_freq);
 
+  // clocks the frame sync waited for the PLS decoder, and the longest wait
+  int hold_n = 0, hold_run = 0, hold_max = 0;
+  always @(posedge clk)
+    if (dut.u_fs.pls_hold) begin
+      hold_n++; hold_run++;
+      if (hold_run > hold_max) hold_max = hold_run;
+    end else hold_run = 0;
+
   int idle = 0;
   always @(posedge clk) begin
     m_ready <= ($urandom % 100) >= stall;
@@ -145,9 +153,9 @@ module tb_rx;
     if (m_valid || dut.l_valid || dut.u_ldpc.dst != 0 || !eof) idle = 0;
     else idle++;
     if (eof && idle > 200000) begin
-      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, pls %0d skipped %0d, t %0t",
+      $display("tb_rx: %0d samples, overflows %0d, %0d LLR words, frames %0d, fs found %0d flywheel %0d lost %0d, agc %0d, freq %0d, amp %0d, energy %0d, gain %0d, %0d bytes, ldpc frames %0d failed %0d, pls %0d skipped %0d, pls hold %0d max %0d, t %0t",
                n_in, in_overflows, n_out, st_frames, st_fs_found, st_fs_flywheel, st_fs_lost,
-               st_agc_gain, $signed(st_freq), st_amp, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, st_pls_count, st_pls_skipped, $time);
+               st_agc_gain, $signed(st_freq), st_amp, st_energy, st_gain, n_bytes, st_ldpc_frames, st_ldpc_failed, st_pls_count, st_pls_skipped, hold_n, hold_max, $time);
       $fclose(fo);
       $fclose(fb);
       $fclose(fp);

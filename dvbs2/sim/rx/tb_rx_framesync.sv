@@ -1,6 +1,9 @@
 // File-driven testbench for dvbs2_rx_framesync.
 //   +in=<file> symbols "iiii qqqq"; +out=<file> "iiii qqqq sof dummy"
 //   +modcod= +pilots= +thresh= +stall=<percent>
+//   +plsbusy=<clocks> (0: no PLS decoder) +plscode= +plsconf=: a PLS decoder
+//   stand-in that is busy for that many clocks after the 90th symbol of each
+//   tagged header, then reports that code
 `timescale 1ns/1ps
 module tb_rx_framesync;
   logic clk = 0, rst = 1;
@@ -15,6 +18,9 @@ module tb_rx_framesync;
   logic signed [15:0] m_i, m_q;
   logic m_sof, m_dummy, m_found;
   logic ty_v = 0, ty_dummy = 0;
+  logic pls_v = 0, pls_conf = 0, pls_busy = 0;
+  logic [6:0] pls_code = '0;
+  int pls_clk = 0, pls_code_a = 0, pls_conf_a = 0, pls_k = -1, pls_left = 0;
   logic [1:0] fs_state;
   logic [15:0] cnt_found, cnt_flywheel, cnt_lost;
 
@@ -34,6 +40,9 @@ module tb_rx_framesync;
     pilots = tmp[0];
     if (!$value$plusargs("thresh=%d", thresh)) thresh = 0;
     if (!$value$plusargs("stall=%d", stall)) stall = 0;
+    if (!$value$plusargs("plsbusy=%d", pls_clk)) pls_clk = 0;
+    if (!$value$plusargs("plscode=%d", pls_code_a)) pls_code_a = 0;
+    if (!$value$plusargs("plsconf=%d", pls_conf_a)) pls_conf_a = 0;
     fi = $fopen(fin, "r");
     fo = $fopen(fout, "w");
     repeat (4) @(posedge clk);
@@ -49,6 +58,28 @@ module tb_rx_framesync;
           s_valid <= 1; s_i <= vi; s_q <= vq; n_in++;
         end else eof <= 1;
       end
+    end
+  end
+
+  // PLS decoder stand-in (busy falls in the clock res_v rises, as in dvbs2_rx_pls)
+  always @(posedge clk) begin
+    pls_v <= 0;
+    if (pls_clk != 0 && m_valid && m_ready) begin
+      if (m_sof) pls_k = 0;
+      else if (pls_k >= 0) pls_k++;
+      if (pls_k == 89) begin
+        pls_k = -1;
+        pls_busy <= 1;
+        pls_left = pls_clk;
+      end
+    end
+    if (pls_busy) begin
+      if (pls_left == 0) begin
+        pls_busy <= 0;
+        pls_v <= 1;
+        pls_code <= 7'(pls_code_a);
+        pls_conf <= pls_conf_a[0];
+      end else pls_left--;
     end
   end
 

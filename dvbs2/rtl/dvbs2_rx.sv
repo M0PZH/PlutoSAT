@@ -7,7 +7,8 @@
 //
 // Models: model/rxfixed.py (receive()), model/ldpcdec.py. The sample input
 // has no backpressure; samples arriving with the FIFO full are dropped and
-// counted. dvbs2_rx_pls decodes the PLS code of every PLHEADER (status only).
+// counted. dvbs2_rx_pls decodes the PLS code of every PLHEADER: status, and
+// the frame sync's header confirmation (frame type, loss of lock).
 
 module dvbs2_rx #(
   parameter string LUT_FILE = "nco_lut.mem",
@@ -121,6 +122,7 @@ module dvbs2_rx #(
 
   logic               y_valid, y_ready, y_sof, y_dummy, y_found;
   logic               ty_v, ty_dummy;               // carrier -> frame sync: frame type
+  logic               pls_busy;                     // PLS decoder -> frame sync: header confirmation
   logic signed [15:0] y_i, y_q;
 
   dvbs2_rx_framesync u_fs (
@@ -128,6 +130,7 @@ module dvbs2_rx #(
     .s_valid(t_valid), .s_ready(t_ready), .s_i(t_i), .s_q(t_q),
     .m_valid(y_valid), .m_ready(y_ready), .m_i(y_i), .m_q(y_q), .m_sof(y_sof), .m_dummy(y_dummy), .m_found(y_found),
     .ty_v, .ty_dummy,
+    .pls_v(st_pls_v), .pls_conf(st_pls_flags[0]), .pls_code(st_pls_code), .pls_busy,
     .fs_state(st_fs_state), .cnt_found(st_fs_found), .cnt_flywheel(st_fs_flywheel), .cnt_lost(st_fs_lost));
 
   logic       l_valid, l_ready, l_first, l_last;
@@ -153,7 +156,7 @@ module dvbs2_rx #(
     .data_code(st_pls_dcode), .data_conf(st_pls_dflags[0]), .data_car(st_pls_dflags[1]),
     .data_grid(st_pls_dflags[2]), .data_valid(st_pls_dflags[3]), .st_data(st_pls_dcount),
     .st_diff_modcod(st_pls_diff_modcod), .st_diff_pilots(st_pls_diff_pilots),
-    .st_seen(st_pls_seen), .st_skipped(st_pls_skipped));
+    .st_seen(st_pls_seen), .st_skipped(st_pls_skipped), .dec_busy(pls_busy));
 
   assign snap_t_v = t_valid && t_ready;
   assign snap_t_i = t_i;

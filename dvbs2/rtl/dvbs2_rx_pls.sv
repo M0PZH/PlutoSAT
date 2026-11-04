@@ -1,7 +1,8 @@
 // DVB-S2 RX PLS decoder: MODCOD, frame size and pilots of every PLHEADER
 // (model: model/rxfixed.py, pls_decode() / PlsDecoder; see there for the
-// algorithm). Detection only: it taps the carrier's input and changes
-// nothing in the receive path.
+// algorithm). It taps the carrier's input; the frame sync uses the results
+// to confirm its headers (dec_busy: it waits for a decode that is not done
+// when it needs it).
 //
 // The 90 header symbols (s_sof on the first) are stored as 6-bit values;
 // then, for each frequency hypothesis (the carrier's frequency if it has
@@ -67,7 +68,8 @@ module dvbs2_rx_pls
   output logic [15:0]        st_diff_modcod,
   output logic [15:0]        st_diff_pilots,
   output logic [31:0]        st_seen,
-  output logic [15:0]        st_skipped
+  output logic [15:0]        st_skipped,
+  output logic               dec_busy        // a decode runs (res_v pulses at its end)
 );
 
   // ---------------------------------------------------------------- constants
@@ -78,6 +80,7 @@ module dvbs2_rx_pls
   // ---------------------------------------------------------------- header capture
   (* ram_style = "distributed" *) logic [11:0] rbuf [128];    // {q, i}, 6 bit each
   logic        col, busy, go;
+  assign dec_busy = busy;
   logic [6:0]  ck;
   logic [15:0] f_car;
   logic        acq_l;

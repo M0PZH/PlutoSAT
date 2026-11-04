@@ -419,6 +419,21 @@ FS_NM_SH = 10
 # LOCKED: the header moves off the predicted position only if the metric
 # there is more than FS_OFF_K x the one at the prediction
 FS_OFF_K = 2
+# Header confirmation by the PLS decoder. The differential metric cannot tell
+# a header from data that repeats from frame to frame (a TS of null packets:
+# consecutive PLFRAMEs share most of their symbols, so a data window found
+# once is found again a frame length later, through CHECK and LOCKED). The
+# PLS decoder decodes every tagged header coherently (128 codes, the frequency
+# grid before the carrier has acquired); FS_PLS_AT symbols after a tag
+# decision (the decode is done by then, the RTL waits for it otherwise) its
+# result is used: "ok" = confident and the configured code or a dummy header
+# (see FrameSync.pls_ok). ok: the
+# next header is predicted from the decoded type (before the carrier has
+# acquired, the frame sync's own type is unreliable: QPSK 1/4 without pilots
+# differs from the dummy header in one differential); not ok in CHECK: back
+# to SEARCH; FS_PLS_NBAD tags in a row not ok in LOCKED: lost.
+FS_PLS_AT = 3072
+FS_PLS_NBAD = 3
 FS_CHK1 = 4
 FS_CHK2 = 10
 L_DUMMY = 90 + 36 * 90
@@ -475,6 +490,17 @@ class FrameSync:
         self.coefs = [diff_coefs(modcod, pilots), diff_coefs(0, False)]
         self.L = [frame_len(pilots), L_DUMMY]
         self.T = fs_threshold() if thresh is None else thresh
+        self.code = pls_code(modcod, 0, pilots)
+
+    def pls_ok(self, d):
+        """(ok, dummy) of a PLS decode: confident, and the configured code or
+        a dummy header. (Not any QPSK code of the configured length: data that
+        repeats from frame to frame can decode confidently as some code, the
+        same every frame; the board saw a false lock read as qpsk5/6 pilots for
+        9.6 s with qpsk9/10 pilots configured.)"""
+        dummy = d["modcod"] == 0
+        ok = d["conf"] and (dummy or d["code"] == self.code)
+        return ok, dummy
 
     def retype(self, typ):
         """The carrier's decision on the type of the frame tagged last
@@ -510,7 +536,35 @@ class FrameSync:
         if carrier is not None:
             carrier.fs = self
         self.nm = 0           # mean metric
+        pls = carrier.pls if carrier is not None else None
+        pls_at = None         # symbol at which the last tag's PLS decode is used
+        pls_n = 0             # decodes before that tag
+        nbad = 0              # LOCKED: tags in a row whose decode was not ok
+        self.n_pls_drop = 0
         for k in range(n):
+            if k == pls_at:
+                pls_at = None
+                if len(pls.results) > pls_n:
+                    ok, dummy = self.pls_ok(pls.results[-1])
+                    if ok and self.st != self.SEARCH and self.have_last:
+                        self.pred = self.last_n + self.L[int(dummy)]
+                    if self.st == self.CHECK and not ok:
+                        self.st = self.SEARCH
+                        best = None
+                        chk_alt = False
+                        self.have_last = False
+                        pk = 0
+                        self.n_pls_drop += 1
+                        self.events.append(("pls_drop", k))
+                    elif self.st == self.LOCKED:
+                        nbad = 0 if ok else nbad + 1
+                        if nbad == FS_PLS_NBAD:
+                            self.st = self.SEARCH
+                            best = None
+                            pk = 0
+                            self.have_last = False
+                            self.n_pls_drop += 1
+                            self.events.append(("lost", k))
             self.nm += (((int(mets[0][k]) + int(mets[1][k])) >> 1) - self.nm) >> FS_NM_SH
             if self.st == self.SEARCH:
                 for c in (0, 1):
@@ -524,12 +578,14 @@ class FrameSync:
                 if k == best[1] + L_DUMMY - FS_W:
                     self.st = self.CHECK
                     self.nchk = 0
+                    nbad = 0
                     chk_alt = True
                     self.pred = best[1] + L_DUMMY
                     win = None
                 elif k == best[1] + self.L[0] - FS_W:
                     self.st = self.CHECK
                     self.nchk = 0
+                    nbad = 0
                     chk_alt = False
                     self.pred = best[1] + self.L[0]
                     win = None
@@ -554,6 +610,8 @@ class FrameSync:
                         ok = win[0] > max(self.T, pk >> 2)
                     if ok:
                         tags[win[1] - 89] = 1 + win[2]
+                        if pls is not None:
+                            pls_at, pls_n = k + FS_PLS_AT, len(pls.results)
                         found[win[1] - 89] = 1
                         self.events.append(("found", win[1] - 89, win[2], win[0]))
                         if self.st == self.CHECK:
@@ -582,6 +640,8 @@ class FrameSync:
                             self.events.append(("lost", k))
                         else:
                             tags[self.pred - 89] = 1 + win[2]
+                            if pls is not None:
+                                pls_at, pls_n = k + FS_PLS_AT, len(pls.results)
                             self.events.append(("flywheel", self.pred - 89, win[2], win[0]))
                             self.last_n, self.have_last = self.pred, True
                             self.pred = self.pred + self.L[win[2]]
@@ -621,7 +681,12 @@ DUMMY_SH = 3
 DUMMY_K = (1 << 32) // 90
 # Right after acquisition, FLL_EARLY_N header estimates in a row beyond
 # FLL_CLAMP (the first FLL_EARLY_HDRS headers) mean a bad acquisition
-# (a header of the wrong type in it): acquire again.
+# (a header of the wrong type in it): acquire again. Pilots on only: without
+# pilots the header estimates are not used after the acquisition, and at -1
+# dB (rms ~1e-3 cycles/symbol, FLL_CLAMP ~1e-3) two in a row beyond the clamp
+# are common and threw good acquisitions away. (The confirmation of the
+# acquisition headers now takes the type from the frame length, so a header
+# of the wrong type no longer gets in.)
 FLL_EARLY_N = 2
 FLL_EARLY_HDRS = 4
 FA_THRESH = round(0.3 * 65536)
@@ -641,17 +706,21 @@ PLL_KI_SH = 16
 # (kp / 4, ki / 16, i.e. bandwidth / 4 at the design damping, is zeta ~ 0.18
 # there and slipped under phase noise).
 # Each header's frequency estimate (~5e-4
-# cycles/symbol rms at 0 dB) moves the NCO only while nhdr < PLL_KICK_NHDR:
-# afterwards the PLL integrator (much better, it averages a whole frame) is
-# the frequency estimate; kicking the NCO by f/8 at every header made the
-# loop pull in a new frequency error in every frame (slips).
+# cycles/symbol rms at 0 dB, ~1e-3 at -1 dB) moves the NCO only while nhdr <
+# PLL_KICK_NHDR, i.e. never after the acquisition (nhdr = 2): the PLL
+# integrator (much better, it averages a whole frame) is the frequency
+# estimate; kicking the NCO by f/8 at every header made the loop pull in a new
+# frequency error in every frame (slips), and the two kicks right after the
+# acquisition (f/4, f/8; VERSION <= 0x0001_0300) left the narrowed loop
+# ~1.5e-4 cycles/symbol to pull in over several frames at -1 dB (full chain,
+# QPSK 1/4, 8 dummy frames before the data: 159 instead of 181 of 192 frames).
 PLL_GEAR = ((4, 0, 2), (6, 0, 4))
 # The default kp is twice the bandwidth-0.002 design (zeta 0.707 at high
 # SNR): more damping at low SNR, which tracks phase noise better (QPSK 1/4,
 # Wiener 0.003 rad/symbol, -2.2 dB: FER 3 % instead of 10 %; 0.006 rad/symbol,
 # -1 dB: 5 % instead of 18 %) at the same FER without phase noise.
 PLL_KP_MUL = 2
-PLL_KICK_NHDR = 4
+PLL_KICK_NHDR = 2
 # Soft decisions for the decision-directed phase detector (pilots off):
 #   e = (sq * c(si) - si * c(sq)) >> PLL_SOFT_SH,  c(x) = clamp(x, +-(2^SH - 1))
 # (a limiter instead of sign(): tanh-like at low SNR, hard at high SNR;
@@ -701,6 +770,7 @@ class Carrier:
     def __init__(self, modcod, pilots, gold=0, pll=None):
         self.pilots = pilots
         self.hdr = [m.plheader_signs(modcod, pilots), m.plheader_signs(0, False)]
+        self.hdiff = [a != b for a, b in zip(*self.hdr)]
         self.L = [frame_len(pilots), L_DUMMY]
         xa, xb = m.gold_init(gold)
         self.scr = m.pl_scramble_seq(frame_len(pilots) - 90, xa, xb).astype(int).tolist()
@@ -711,9 +781,11 @@ class Carrier:
         self.fp = 0
         self.nhdr = 0
         self.A = self.E = self.nblk = self.G = 0
+        self.stat_rst = False       # acquisition: restart the amplitude/noise average
         self.in_frame = False
         self.typ = 1
         self.frames = []        # finished LLR frames (int8, 64800)
+        self.n_muted = 0        # frames not sent (begun before the acquisition)
         self.cur = None         # output frame of the data frame being received
         self.seg = []           # pilots on: data symbols waiting for the next block
         self.seg_owner = None
@@ -735,7 +807,7 @@ class Carrier:
         self.n_dummy = 0            # dummy body blocks used
         self.dth = 0
         self.log = []
-        self.pls = None             # PlsDecoder fed with the input symbols (detection only)
+        self.pls = None             # PlsDecoder fed with the input symbols (detection, header confirmation)
 
     # ---- output ------------------------------------------------------------
     def _llr(self, buf, y):
@@ -743,9 +815,19 @@ class Carrier:
         buf["llr"].append(sat(rnd(y[1] * self.G, G_LLR_FRAC), 8))
 
     def _finish(self, buf):
+        # pilots off, a data frame that began before the frequency acquisition
+        # is not sent (pilots on: the frame sync's type is reliable, and the
+        # frame at the acquisition header often decodes):
+        # its LLRs are noise, and before the acquisition the frame type is the
+        # frame sync's guess, so dummy frames taken for data frames cost the
+        # LDPC decoder its full iterations and the carrier the padding of a
+        # data frame (32400 words, one per clock: an input overflow at ~1 MS/s)
         llr = buf["llr"]
         llr.extend([0] * (64800 - len(llr)))
-        self.frames.append(np.array(llr[:64800], np.int8))
+        if not buf["mute"]:
+            self.frames.append(np.array(llr[:64800], np.int8))
+        else:
+            self.n_muted += 1
 
     def _frame_ended(self, buf):
         buf["ended"] = True
@@ -757,12 +839,21 @@ class Carrier:
         ra, re = stat_consts(n)
         a = (mag * ra) >> 24
         e = (e_sum * re) >> 16
-        if self.nblk == 0:
-            self.A, self.E = a, e
+        if self.stat_rst:
+            # the acquisition header (summed before the new frequency): the
+            # average restarts with the next known block. Before the
+            # acquisition the blocks are measured at a wrong frequency (A
+            # far too small); without pilots (one block per frame) the 1/8
+            # IIR took ~17 frames to forget them (Es/N0 from -21 dB up).
+            self.stat_rst = False
+            self.nblk = 0
         else:
-            self.A += (a - self.A) >> STAT_SH
-            self.E += (e - self.E) >> STAT_SH
-        self.nblk += 1
+            # gain 1, 1/2, 1/4, then 1/8 (from one block a 1/8 IIR start
+            # scales the first frames' LLRs by a single block's noise)
+            sh = min(self.nblk, STAT_SH)
+            self.A += (a - self.A) >> sh
+            self.E += (e - self.E) >> sh
+            self.nblk = min(self.nblk + 1, STAT_SH)
         sig2 = max(self.E - self.A * self.A, SIG2_MIN)
         self.G = min((self.A * CG) // sig2, G_LLR_MAX)
 
@@ -848,7 +939,16 @@ class Carrier:
             self.pls.step(si, sq, t, self.fhat, self.acquired)
         self.upd = 0
         if t:
-            self.prev_ok = self.ap is not None and self.since == self.L[self.ap[1]] and found == 1
+            # confirmed: the next header detected a frame length later; the
+            # length says the type (before the acquisition the tag's type is
+            # the frame sync's differential guess, a coin toss between QPSK
+            # 1/4 without pilots and the dummy header), and a header of the
+            # other type has z negated where the two headers differ
+            self.prev_ok = self.ap is not None and found == 1 and self.since in self.L
+            if self.prev_ok and self.since != self.L[self.ap[1]]:
+                z = [(neg16(zi), neg16(zq)) if self.hdiff[p] else (zi, zq)
+                     for p, (zi, zq) in enumerate(self.ap[0])]
+                self.ap = (z, 1 - self.ap[1])
             self.since = 0
             self._start(t - 1)
         self.since = min(self.since + 1, 65535)
@@ -874,7 +974,8 @@ class Carrier:
         self.zbuf = []
         self.P = [0, 0]
         self.Pe = 0
-        self.cur = {"llr": [], "ended": False} if typ == 0 else None
+        # mute: pilots off, the frame began before the frequency acquisition (not sent)
+        self.cur = {"llr": [], "ended": False, "mute": not (self.acquired or self.pilots)} if typ == 0 else None
 
     def pll_shifts(self):
         """(kp, ki) right shifts of the PLL gains in the current gear."""
@@ -983,7 +1084,7 @@ class Carrier:
         if self.acquired and self.Ha[0] ** 2 + self.Ha[1] ** 2 > self.H[0] ** 2 + self.H[1] ** 2:
             self.typ ^= 1
             self.H, self.Ha = self.Ha, self.H
-            self.cur = {"llr": [], "ended": False} if self.typ == 0 else None
+            self.cur = {"llr": [], "ended": False, "mute": False} if self.typ == 0 else None
             self.n_retype += 1
         if self.fs is not None:
             self.fs.retype(self.typ)
@@ -1006,6 +1107,7 @@ class Carrier:
             f = self.fll(self.conf)
             self.upd += f
             self.acquired = True
+            self.stat_rst = True
             self.ap = None
             self.conf = []
             self.nhdr = FLL_ACQ_NHDR
@@ -1016,7 +1118,7 @@ class Carrier:
             return f
         f = self.fll([self.zh])
         self.big = self.big + 1 if abs(f) > FLL_CLAMP else 0
-        if self.big == FLL_REACQ_N or (self.big == FLL_EARLY_N and self.nhdr <= FLL_EARLY_HDRS):
+        if self.big == FLL_REACQ_N or (self.pilots and self.big == FLL_EARLY_N and self.nhdr <= FLL_EARLY_HDRS):
             self.acquired = False               # estimates keep saying we are far off
             self.big = 0
             return 0
@@ -1042,11 +1144,12 @@ class Carrier:
 
 
 # ---------------------------------------------------------------------------
-# PLS decoder (detection only): MODCOD, frame size and pilots of every header
+# PLS decoder: MODCOD, frame size and pilots of every header
 # ---------------------------------------------------------------------------
 #
 # It taps the carrier's input (the frame sync output, tag on the first
-# header symbol) and changes nothing in the receive path. The 90 header
+# header symbol); the frame sync uses its results to confirm its headers
+# (FS_PLS_AT), nothing else in the receive path does. The 90 header
 # symbols are stored as r = sat6(s >> 9) (per axis RMS 8 at the AGC target)
 # and decoded after the 90th (the next header is >= 3330 symbols away):
 #

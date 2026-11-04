@@ -24,6 +24,18 @@
 // ty_v: the carrier's frame type of the last tagged frame (coherent once it
 // has acquired the frequency); the next header is predicted from it.
 //
+// Header confirmation by the PLS decoder (dvbs2_rx_pls decodes every tagged
+// header): the differential metric cannot tell a header from data that
+// repeats from frame to frame (a TS of null packets: a data window found once
+// is found again a frame length later, through CHECK and LOCKED). PLS_AT
+// symbols after each tag decision the decode of that header is used (if the
+// decoder is still busy, the input waits for it; with H <= 32 it is done
+// long before): ok = confident and the configured code or a dummy header (not
+// any code of that frame length: repeating data can decode confidently as
+// some code, the same every frame). ok: the next header is
+// predicted from the decoded type; not ok: CHECK -> SEARCH, LOCKED -> SEARCH
+// after PLS_NBAD tags in a row (counted in cnt_lost).
+//
 // Symbols leave DELAY symbols late, m_sof on the first header symbol of each
 // frame found (m_dummy: dummy frame). 6 correlator lanes: ~34 clocks/symbol.
 
@@ -33,7 +45,9 @@ module dvbs2_rx_framesync
   parameter int W       = 2,
   parameter int DELAY   = 96,
   parameter int MAXMISS = 3,
-  parameter int NCHECK  = 2
+  parameter int NCHECK  = 2,
+  parameter int PLS_AT  = 3072,              // model: FS_PLS_AT
+  parameter int PLS_NBAD = 3                 // model: FS_PLS_NBAD
 ) (
   input  logic               clk,
   input  logic               rst,
@@ -57,6 +71,12 @@ module dvbs2_rx_framesync
 
   input  logic               ty_v,
   input  logic               ty_dummy,
+
+  // PLS decoder: result (pulse, with the code), decoding
+  input  logic               pls_v,
+  input  logic               pls_conf,
+  input  logic [6:0]         pls_code,       // {MODCOD, short frame, pilots}
+  input  logic               pls_busy,
 
   output logic [1:0]         fs_state,      // 0 search, 1 check, 2 locked
   output logic [15:0]        cnt_found,
@@ -147,8 +167,14 @@ module dvbs2_rx_framesync
   logic        have_last;                    // last_n: end of the last tagged header
   logic [31:0] last_n;
   logic        ty_p, ty_pc;                  // carrier report pending
+  logic        pr_v, pr_ok, pr_dummy;        // PLS decode since the last tag decision
+  logic        pw_on;                        // PLS decode of the last tag to be used ...
+  logic [11:0] pw_cnt;                       // ... this many symbols later
+  logic [1:0]  nbad;                         // LOCKED: tags in a row not confirmed
 
-  assign s_ready  = (st == S_IN) && !rst;
+  wire pls_hold = pw_on && pw_cnt == '0 && pls_busy;
+
+  assign s_ready  = (st == S_IN) && !rst && !pls_hold;
   assign fs_state = fst;
 
   function automatic logic [31:0] flen(input logic c, input logic [31:0] ld);
@@ -169,6 +195,9 @@ module dvbs2_rx_framesync
       pend_v <= 1'b0;
       have_last <= 1'b0;
       ty_p <= 1'b0;
+      pr_v <= 1'b0;
+      pw_on <= 1'b0;
+      nbad <= '0;
       m_valid <= 1'b0;
       cnt_found <= '0; cnt_flywheel <= '0; cnt_lost <= '0;
     end else begin
@@ -177,6 +206,11 @@ module dvbs2_rx_framesync
       d_we <= 1'b0;
       if (ty_v) begin
         ty_p <= 1'b1; ty_pc <= ty_dummy;
+      end
+      if (pls_v) begin
+        pr_v     <= 1'b1;
+        pr_dummy <= pls_code[6:2] == 5'd0;
+        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, 1'b0, pilots});
       end
       // correlator read stage (rd[] is read in g_lane)
       rd_v <= iss;
@@ -188,13 +222,39 @@ module dvbs2_rx_framesync
       end
 
       case (st)
-        S_IN: if (s_valid) begin
+        S_IN: if (s_valid && !pls_hold) begin
           ci <= s_i; cq <= s_q;
           sbuf[n[6:0]] <= {s_q, s_i};
           st <= S_D0;
         end
 
         S_D0: begin
+          // the PLS decode of the last tagged header
+          if (pw_on && pw_cnt == '0) begin
+            pw_on <= 1'b0;
+            if (pr_v) begin
+              // the type goes the carrier's way (S_DEC1, before this symbol's window)
+              if (pr_ok) begin
+                ty_p <= 1'b1; ty_pc <= pr_dummy;
+              end
+              if (fst == CHECK && !pr_ok) begin
+                fst <= SEARCH;
+                best_v <= 1'b0;
+                chk_alt <= 1'b0;
+                have_last <= 1'b0;
+                pk <= '0;
+              end else if (fst == LOCKED) begin
+                if (pr_ok) nbad <= '0;
+                else if (nbad == 2'(PLS_NBAD - 1)) begin
+                  fst <= SEARCH;
+                  best_v <= 1'b0;
+                  pk <= '0;
+                  have_last <= 1'b0;
+                  cnt_lost <= cnt_lost + 16'd1;
+                end else nbad <= nbad + 2'd1;
+              end
+            end
+          end
           p1 <= 32'(ci) * 32'(pi_);
           p2 <= 32'(cq) * 32'(pq);
           p3 <= 32'(cq) * 32'(pi_);
@@ -290,12 +350,14 @@ module dvbs2_rx_framesync
           if (fst == SEARCH && n == best_n + LEN_Z - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
+            nbad <= '0;
             chk_alt <= 1'b1;
             pred <= best_n + LEN_Z;
             win_v <= 1'b0;
           end else if (fst == SEARCH && n == best_n + len_d - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
+            nbad <= '0;
             chk_alt <= 1'b0;
             pred <= best_n + len_d;
             win_v <= 1'b0;
@@ -346,6 +408,7 @@ module dvbs2_rx_framesync
             end else ok = win_m > thr;
             if (ok) begin
               pend_v <= 1'b1; pend_hs <= win_n - 32'd89; pend_c <= win_c; pend_f <= 1'b1;
+              pr_v <= 1'b0; pw_on <= 1'b1; pw_cnt <= 12'(PLS_AT);
               if (fst == LOCKED || nchk) fst <= LOCKED;
               nchk <= 1'b1;
               chk_alt <= 1'b0;
@@ -370,6 +433,7 @@ module dvbs2_rx_framesync
             end else begin
               miss <= miss + 4'd1;
               pend_v <= 1'b1; pend_hs <= pred - 32'd89; pend_c <= win_c; pend_f <= 1'b0;
+              pr_v <= 1'b0; pw_on <= 1'b1; pw_cnt <= 12'(PLS_AT);
               pred <= pred + flen(win_c, len_d);
               have_last <= 1'b1; last_n <= pred;
               cnt_flywheel <= cnt_flywheel + 16'd1;
@@ -382,6 +446,7 @@ module dvbs2_rx_framesync
         S_OUT: begin
           if (n < 32'(DELAY)) begin
             n <= n + 32'd1;
+            if (pw_on && pw_cnt != '0) pw_cnt <= pw_cnt - 12'd1;
             st <= S_IN;
           end else if (!m_valid || m_ready) begin : out
             logic [31:0] o, sv;
@@ -395,6 +460,7 @@ module dvbs2_rx_framesync
             m_found <= pend_f;
             if (pend_v && pend_hs == o) pend_v <= 1'b0;
             n <= n + 32'd1;
+            if (pw_on && pw_cnt != '0) pw_cnt <= pw_cnt - 12'd1;
             st <= S_IN;
           end
         end

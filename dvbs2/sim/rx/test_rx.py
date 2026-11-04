@@ -115,6 +115,65 @@ def test_framesync(framesync_exe, stall, pilots, esn0, drop, tx):
         assert "flywheel" in kinds and "lost" in kinds and kinds[-1] == "found"
 
 
+class PlsStandIn:
+    """Carrier stand-in for FrameSync.run(): a PLS decoder that reports the
+    same decode for every tagged header (at its 90th symbol), as the
+    testbench's stand-in does."""
+
+    def __init__(self, code, conf):
+        self.d = dict(code=code, modcod=code >> 2, short=(code >> 1) & 1, pilots=code & 1, conf=bool(conf))
+        self.pls = type("Pls", (), {})()
+        self.pls.results = []
+        self.k = -1
+
+    def step(self, si, sq, t, found):
+        if t:
+            self.k = 0
+        elif self.k >= 0:
+            self.k += 1
+        if self.k == 89:
+            self.k = -1
+            self.pls.results.append(self.d)
+
+
+@pytest.mark.parametrize("name,code,conf,stall", [("dummy_ok", 0, 1, 10), ("nack", fx.pls_code(4, 0, 1), 0, 0),
+                                                  ("other_pilots", fx.pls_code(4, 0, 0), 1, 5),
+                                                  ("other_modcod", fx.pls_code(7, 0, 1), 1, 0)])
+def test_framesync_pls(framesync_exe, name, code, conf, stall):
+    """Header confirmation by the PLS decoder, which is slower here than the
+    frame sync needs it (busy 150k clocks after each header; the real one
+    needs <= ~95k with H = 32): the frame sync waits for the decode, so the
+    tags equal the model's. dummy_ok: dummy frames only, confirmed: locked,
+    every header found. nack / other_pilots / other_modcod (not confident /
+    not the configured code, even of the same frame length: repeating data can
+    decode confidently as some code): each CHECK ends at the first decode,
+    never LOCKED."""
+    os.makedirs(WORK, exist_ok=True)
+    x, _ = signal(nframes=0 if name == "dummy_ok" else 3, lead=14 if name == "dummy_ok" else 3,
+                  pilots=True, esn0=8.0)
+    sym = model_symbols(x)
+    fs = fx.FrameSync(4, True)
+    tags, nout = fs.run(sym, PlsStandIn(code, conf))
+    fin = os.path.join(WORK, f"fp_in_{name}.hex")
+    fout = os.path.join(WORK, f"fp_out_{name}.hex")
+    rxsim.write_iq(fin, sym)
+    log = rxsim.run(framesync_exe, modcod=4, pilots=1, thresh=fs.T, stall=stall, plsbusy=150000,
+                    plscode=code, plsconf=conf, **{"in": fin, "out": fout})
+    print(log, fs.events)
+    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1))
+    assert len(got) == nout
+    assert np.array_equal(got[:, :2], sym[:nout])
+    got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
+    bad = np.nonzero(got_tag != tags[:nout])[0]
+    assert len(bad) == 0, f"tag mismatch at {bad[:5]}: {got_tag[bad[:5]]} vs {tags[:nout][bad[:5]]}"
+    kinds = [e[0] for e in fs.events]
+    if name == "dummy_ok":
+        assert "state 2" in log and kinds.count("found") >= 12 and "pls_drop" not in kinds
+    else:
+        assert kinds.count("pls_drop") >= 2 and "state 2" not in log
+        assert all(a != "found" or b != "found" for a, b in zip(kinds, kinds[1:]))
+
+
 @pytest.fixture(scope="module")
 def carrier_exe():
     return rxsim.build("tb_rx_carrier", ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv",
@@ -146,7 +205,9 @@ def test_carrier(carrier_exe, name, stall, kw, drop):
     pilots = kw["pilots"]
     modcod = kw.get("rate_idx", 3) + 1
     nfr = kw.pop("nframes", 2)
-    lead = kw.pop("lead", 3)
+    # (data frames that begin before the acquisition are not sent: enough
+    # dummy frames for SEARCH, 2 checks and 4 confirmed headers)
+    lead = kw.pop("lead", 8)
     x, _ = signal(nframes=nfr, lead=lead, **kw)
     sym = model_symbols(x)
     if drop and drop != "untag":
@@ -300,6 +361,110 @@ def test_rx_end_to_end(rx_exe, name, kw):
         K = dec_m.code.K
         assert g[-1, 6] == np.sum((llr[k][:K] < 0) != hard[:K])            # pre-FEC errors
         assert ok and np.array_equal(np.unpackbits(g[:, 0].astype(np.uint8)), bb[k]), f"frame {k} not decoded"
+
+
+def rx_rtl(rx_exe, name, x, rate_idx, pilots, period=22):
+    """Samples -> RTL receiver and model: the LLRs and the PLS decodes equal
+    the model's. Returns the model result and the BBFRAMEs the RTL decoded
+    (BCH ok), as bit arrays."""
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    r = fx.receive(x, rate_idx + 1, pilots)
+    cfile = os.path.join(WORK, "coef.hex")
+    write_coefs(cfile, fx.timing_coefs(0.35))
+    fin, fout, fbytes, fpls = (os.path.join(WORK, f"rx_{k}_{name}.hex") for k in ("in", "out", "bytes", "pls"))
+    rxsim.write_iq(fin, x)
+    kp, ki = fx.timing_gains()
+    xa, xb = m.gold_init(0)
+    log = rxsim.run(rx_exe, coef=cfile, period=period, stall=5, modcod=rate_idx + 1, pilots=int(pilots),
+                    thresh=fx.fs_threshold(), xa=xa, xb=xb, tkp=kp, tki=ki,
+                    pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p, maxit=30, bytes=fbytes, pls=fpls,
+                    **{"in": fin, "out": fout})
+    print(log)
+    assert "overflows 0," in log and "skipped 0," in log
+    cr = r["carrier"]
+    assert f"amp {cr.A}, energy {cr.E}, gain {cr.G}," in log
+    got_p = [tuple(int(v, 16) for v in ln.split()) for ln in open(fpls)]
+    assert got_p == [pls_line(d) for d in r["pls"].results]
+    want = np.concatenate(r["frames"]).reshape(-1, 2) if r["frames"] else np.zeros((0, 2), np.int64)
+    got = rxsim.read_hex_cols(fout, (-8, -8, 1, 1))
+    # (the RTL also sends the start of a frame the input ends in)
+    assert len(want) <= len(got) < len(want) + 32400, (len(got), len(want))
+    bad = np.nonzero(np.any(got[:len(want), :2] != want, axis=1))[0]
+    assert len(bad) == 0, f"{len(bad)} mismatches, first at word {bad[0]}"
+    nb = m.LDPC[m.RATES[rate_idx]]["kbch"] // 8
+    got_b = rxsim.read_hex_cols(fbytes, (8, 1, 1, 8, 1, 8, 16))
+    assert len(got_b) == nb * len(r["frames"])
+    dec = [np.unpackbits(got_b[k * nb:(k + 1) * nb, 0].astype(np.uint8))
+           for k in range(len(r["frames"])) if got_b[(k + 1) * nb - 1, 2]]
+    return r, dec
+
+
+def test_rx_falselock(rx_exe):
+    """Board finding (RX 1.3): a TS of null packets (consecutive PLFRAMEs
+    nearly identical) and an RX started mid-frame with the AGC settling from
+    above (early metrics up to 50x a header's): the stale search peak is
+    checked a frame length later, where the same data correlates the same,
+    and the frame sync locked there for good (every tag off the headers, no
+    confident PLS decode). Now the PLS decode of the first CHECK tag sends it
+    back to SEARCH; every later tag is a header, and the frames decode."""
+    import falselock_experiment as fe
+    L = fx.frame_len(True)
+    tx, bb = fe.tx_signal(10, True, 10, "null")
+    start = 28310
+    x = fe.rx_input(tx, start, 20.0, 0.002, 20.0, 3, rms=8000)
+    r, dec = rx_rtl(rx_exe, "falselock", x, 10, True)
+    cl = fe.classify(r, L, start)
+    print(cl, r["fs"].events)
+    assert not cl[0][2] and all(ok for _, _, ok in cl[1:]) and len(cl) >= 7
+    assert [e[0] for e in r["fs"].events].count("pls_drop") == 1
+    got = [any(np.array_equal(d, b) for d in dec) for b in bb]
+    print("RTL decoded", got)
+    assert all(any(np.array_equal(d, b) for b in bb) for d in dec)
+    # the carrier acquires at the header of frame 7 (the 4th confirmed one;
+    # data frames only), which is not sent (it began before the acquisition):
+    # frame 8 decodes (frame 9 is cut short by the end of the input)
+    assert got[-2]
+
+
+def test_rx_start_np14(rx_exe):
+    """Model finding (RX 1.3): QPSK 1/4 without pilots at -1 dB, 8 dummy
+    frames before the data. QPSK 1/4's header is a differential away from the
+    dummy header, so the frame sync's frame type is a coin toss: a dummy
+    frame tagged as data sent the prediction a data frame ahead (flywheel on
+    noise), and the carrier confirmed only headers whose tag type was right.
+    Now the PLS decodes give the frame sync the type, the carrier takes it
+    from the frame length, and no header estimate kicks the NCO after the
+    acquisition: all frames decode (before: none)."""
+    x, bb = signal(nframes=4, lead=8, rate_idx=0, pilots=False, esn0=-1.0, seed=0)
+    # 80 clocks per symbol: before the acquisition dummy frames tagged as data
+    # go to the LDPC decoder too (30 iterations of QPSK 1/4: ~1.65M clocks)
+    r, dec = rx_rtl(rx_exe, "start_np14", x, 0, False, period=40)
+    got = [any(np.array_equal(d, b) for d in dec) for b in bb]
+    print("RTL decoded", got, r["fs"].events)
+    assert all(got)
+
+
+def esn0_est(A, E):
+    """The software's Es/N0 estimate (dB) from the AMP and ENERGY registers."""
+    import math
+    return 10 * math.log10(A * A / (E - A * A))
+
+
+def test_rx_esn0_restart(rx_exe):
+    """Board finding (RX 1.3, pilots off): the amplitude/noise average (1/8
+    per known block, one block per frame without pilots) started from a
+    header measured before the frequency acquisition and took ~17 frames to
+    forget it (Es/N0 from -21 dB up). Now it restarts after the acquisition:
+    QPSK 2/3 without pilots, 0.02 cycles/symbol, 20 dB Es/N0: right from the
+    first header after the acquisition (1.3: -20 dB there)."""
+    x, bb = signal(nframes=2, lead=8, rate_idx=5, pilots=False, esn0=20.0, cfo=0.02, seed=1)
+    r, dec = rx_rtl(rx_exe, "esn0", x, 5, False)
+    cr = r["carrier"]
+    est = [esn0_est(A, E) for (nhdr, f, fh, th, A, E, G) in cr.log if nhdr >= 3]
+    print("Es/N0 after the acquisition", [round(e, 1) for e in est])
+    assert len(est) >= 3 and all(18.5 < e < 22 for e in est)
+    assert all(any(np.array_equal(d, b) for d in dec) for b in bb)
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +767,7 @@ def check_pls_regs(regs, lines, pls, modcod, pilots):
     st = pls.status()
     last = st["last"]
     print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
-    assert regs[0x00] == 0x00010300
+    assert regs[0x00] == 0x00010400
     assert regs[0xB8] == pls_word(last, st["count"])
     assert regs[0xBC] == pls_word(st["data"], st["data_count"])
     assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
