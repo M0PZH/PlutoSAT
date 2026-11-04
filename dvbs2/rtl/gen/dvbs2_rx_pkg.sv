@@ -19,7 +19,7 @@ package dvbs2_rx_pkg;
   localparam logic [3:0] PLL_GEAR_N [PLL_NGEAR] = '{4'd4, 4'd6};
   localparam logic [2:0] PLL_GEAR_KP_SH [PLL_NGEAR] = '{3'd0, 3'd0};
   localparam logic [2:0] PLL_GEAR_KI_SH [PLL_NGEAR] = '{3'd2, 3'd4};
-  localparam logic [3:0] PLL_KICK_NHDR = 4'd4;
+  localparam logic [3:0] PLL_KICK_NHDR = 4'd2;
   localparam int PLL_SOFT_SH = 11;
   localparam logic [31:0] FS_THRESH_DEFAULT = 32'd324444;
   localparam logic signed [15:0] FA_THRESH = 16'sd19661;

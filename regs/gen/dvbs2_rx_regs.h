@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00010300u
+#define DVBS2_RX_VERSION_VALUE 0x00010401u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -30,7 +30,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0300 = 1.3: pilots-off carrier tracking and the PLS fix (frame sync checks every search peak at the data length) (1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
+/* VERSION (ro): Core version, 0x0001_0401 = 1.4.1: 1.4 with a whole-frame search after a PLS drop (repeating data was found again a frame length apart and confirmed by the carrier); 0x0001_0400 = 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition (1.3: pilots-off carrier tracking and the PLS fix, frame sync checks every search peak at the data length; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
 #define DVBS2_RX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -181,7 +181,7 @@
 #define DVBS2_RX_FS_FOUND 0x064
 /* FS_FLYWHEEL (ro): Frame sync: flywheel frames */
 #define DVBS2_RX_FS_FLYWHEEL 0x068
-/* FS_LOST (ro): Frame sync: locks lost */
+/* FS_LOST (ro): Frame sync: locks lost (MAXMISS misses in a row, or from 1.4 three tagged headers in a row without a confident PLS decode of the configured code or a dummy header) */
 #define DVBS2_RX_FS_LOST 0x06C
 /* FREQ (ro): Carrier frequency, turns * 2^32 per symbol (signed) */
 #define DVBS2_RX_FREQ 0x070

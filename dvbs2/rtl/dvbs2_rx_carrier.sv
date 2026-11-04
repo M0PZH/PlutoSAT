@@ -76,6 +76,7 @@ module dvbs2_rx_carrier
     hdr_d <= plheader(modcod, pilots);
     hdr_z <= plheader(5'd0, 1'b0);
   end
+  assign hdiff = hdr_d ^ hdr_z;
 
   // ---------------------------------------------------------------- units
   logic               rot_v, rot_ov;
@@ -176,6 +177,11 @@ module dvbs2_rx_carrier
   logic [17:0]        lp_g;
   logic               l1_v, l1_zero;
   logic signed [35:0] l1_pi, l1_pq;
+  // pilots off, a data frame that began before the frequency acquisition is not sent
+  // (model: _finish): its words go through the pipeline but are not pushed,
+  // and its padding is skipped
+  logic               lp_mute, l1_mute;
+  logic               acquired;
 
   assign snap_v = lp_v && !lp_zero;
   assign snap_i = lp_i;
@@ -186,11 +192,12 @@ module dvbs2_rx_carrier
       l1_v    <= 1'b0;
       of_push <= 1'b0;
     end else begin
+      l1_mute <= lp_mute;
       l1_v    <= lp_v;
       l1_zero <= lp_zero;
       l1_pi   <= 36'(lp_i) * 36'($signed({1'b0, lp_g}));
       l1_pq   <= 36'(lp_q) * 36'($signed({1'b0, lp_g}));
-      of_push <= l1_v;
+      of_push <= l1_v && !l1_mute;
       of_din  <= l1_zero ? 16'd0 : {llr8(l1_pq), llr8(l1_pi)};
     end
   end
@@ -233,7 +240,8 @@ module dvbs2_rx_carrier
   // estimators
   logic [31:0]        A;
   logic [35:0]        E;
-  logic               nblk0;                 // no known block measured yet
+  logic [1:0]         nblk;                  // known blocks averaged (saturates at 3): IIR gain 2^-nblk
+  logic               stat_rst;              // acquisition: restart the A/E average (model: stat_rst)
   logic [17:0]        G;
   logic signed [15:0] theta;
   logic [31:0]        mag;
@@ -254,6 +262,9 @@ module dvbs2_rx_carrier
   logic               seg_rv;
   logic [31:0]        seg_rph;
   logic [14:0]        oc_push;               // words pushed for the current output frame
+  logic               fmute;                 // the current output frame is not sent
+  logic               smute;                 // the data frame being received began before the acquisition
+  wire                w_mute = (oc_push == '0) ? smute : fmute;
 
   // FLL
   logic [1:0]         fst;
@@ -309,7 +320,6 @@ module dvbs2_rx_carrier
     kp_g <= pll_kp >> skp;
     ki_g <= pll_ki >> ski;
   end
-  logic               acquired;
   logic [1:0]         nconf;                 // confirmed headers (banks 0 .. nconf-1)
   logic [3:0]         big;
   logic signed [31:0] favg;
@@ -323,6 +333,11 @@ module dvbs2_rx_carrier
   logic [2:0]         fh, fh_last;           // FLL: bank being correlated, last one
   logic               ap_v, ap_typ, prev_ok;
   logic [15:0]        since;
+  // a confirmed header whose next one came at the other type's frame length
+  // was of that type: its stored z is negated where the two headers differ
+  // (read into the FLL); one bit per confirmed bank
+  logic [3:0]         cflip;
+  logic [89:0]        hdiff;
   // coherent frame type decision
   logic [47:0]        sq1 [4], sq2 [4];
   logic [48:0]        hh, hha;
@@ -422,10 +437,12 @@ module dvbs2_rx_carrier
       in_frame <= 1'b0;
       typ <= 1'b1;
       idle <= '0;
-      A <= '0; E <= '0; nblk0 <= 1'b1; G <= '0;
+      A <= '0; E <= '0; nblk <= '0; G <= '0; stat_rst <= 1'b0;
       seg_pend <= 1'b0; owner_ended <= 1'b0;
       th0 <= '0; len0 <= '0;
       oc_push <= '0;
+      fmute <= 1'b0;
+      smute <= 1'b1;
       acquired <= 1'b0;
       nconf <= '0;
       big <= '0;
@@ -437,6 +454,7 @@ module dvbs2_rx_carrier
       wb <= '0;
       ap_v <= 1'b0;
       prev_ok <= 1'b0;
+      cflip <= '0;
       since <= '0;
       dth <= '0;
     end else begin
@@ -450,9 +468,14 @@ module dvbs2_rx_carrier
         M_START: begin
           // acquisition: the last header is confirmed by this one
           if (ssof) begin : conf
-            logic ok;
-            ok = ap_v && sfnd && since == (ap_typ ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N));
+            logic ok, other;
+            // either frame length confirms it; the length says the type
+            // (before the acquisition the tag's type is the frame sync's
+            // differential guess)
+            other = since == (ap_typ ? (pilots ? FLEN_DATA_P : FLEN_DATA_N) : FLEN_DUMMY);
+            ok = ap_v && sfnd && (other || since == (ap_typ ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N)));
             prev_ok <= ok;
+            if (ok) cflip[nconf] <= other;
             // bank of this header: after the confirmed ones (acquired: 0)
             wb <= acquired ? 3'd0 : 3'(nconf) + 3'(ok);
             since <= 16'd1;
@@ -473,6 +496,7 @@ module dvbs2_rx_carrier
 
         M_INIT: begin
           in_frame <= 1'b1;
+          smute <= !acquired && !pilots;
           typ  <= sdum;
           flen <= sdum ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N);
           p <= '0;
@@ -568,6 +592,8 @@ module dvbs2_rx_carrier
             lp_q    <= s1q;
             lp_g    <= G;
             oc_push <= oc_push + 15'd1;
+            lp_mute <= w_mute;
+            if (oc_push == '0) fmute <= smute;
             zi <= 18'(s1q);
             zq <= 18'(s1i);
             ci <= s1i > SOFT_C ? 12'(SOFT_C) : s1i < -SOFT_C ? 12'(-SOFT_C) : 12'(s1i);
@@ -838,6 +864,7 @@ module dvbs2_rx_carrier
           if (!acquired) begin
             // acquisition done: full update
             acquired <= 1'b1;
+            stat_rst <= 1'b1;
             ap_v <= 1'b0;
             nhdr <= ACQ_NHDR;
             nconf <= '0;
@@ -850,7 +877,7 @@ module dvbs2_rx_carrier
             fkick <= 1'b1;
             st <= M_FLL_END2;
           end else if ((f > 36'sd4194304 || f < -36'sd4194304) &&
-                       (big == REACQ_N - 4'd1 || (big == EARLY_N - 4'd1 && nhdr <= EARLY_HDRS))) begin
+                       (big == REACQ_N - 4'd1 || (pilots && big == EARLY_N - 4'd1 && nhdr <= EARLY_HDRS))) begin
             // the estimates keep saying we are far off (or right after the
             // acquisition: it was bad): acquire again
             acquired <= 1'b0;
@@ -871,8 +898,8 @@ module dvbs2_rx_carrier
             end
             f_c <= f;
             fsh <= nhdr > 4'd3 ? 2'd3 : nhdr[1:0];
-            // pilots off: only the first headers after the acquisition
-            // (model: PLL_KICK_NHDR), then the PLL integrator is the estimate
+            // pilots off: none after the acquisition (model: PLL_KICK_NHDR,
+            // nhdr >= 2 here), the PLL integrator is the estimate
             fkick <= pilots || nhdr < PLL_KICK_NHDR;
             if (nhdr != 4'hF) nhdr <= nhdr + 4'd1;
             st <= M_FLL_END2;
@@ -922,14 +949,17 @@ module dvbs2_rx_carrier
         end
 
         M_BLK_ST2: begin
-          if (nblk0) begin
-            A <= a_new;
-            E <= e_new;
+          if (stat_rst) begin
+            // the acquisition header (summed before the new frequency) is
+            // skipped, the next known block starts the average again
+            stat_rst <= 1'b0;
+            nblk <= '0;
           end else begin
-            A <= 32'($signed({1'b0, A}) + (($signed({1'b0, a_new}) - $signed({1'b0, A})) >>> 3));
-            E <= 36'($signed({1'b0, E}) + (($signed({1'b0, e_new}) - $signed({1'b0, E})) >>> 3));
+            // gain 1, 1/2, 1/4, then 1/8 (model: _stats)
+            A <= 32'($signed({1'b0, A}) + (($signed({1'b0, a_new}) - $signed({1'b0, A})) >>> nblk));
+            E <= 36'($signed({1'b0, E}) + (($signed({1'b0, e_new}) - $signed({1'b0, E})) >>> nblk));
+            if (nblk != 2'd3) nblk <= nblk + 2'd1;
           end
-          nblk0 <= 1'b0;
           st <= M_BLK_ST3;
         end
 
@@ -1061,6 +1091,8 @@ module dvbs2_rx_carrier
             lp_q    <= rot_oq;
             lp_g    <= G;
             oc_push <= oc_push + 15'd1;
+            lp_mute <= w_mute;
+            if (oc_push == '0) fmute <= smute;
             sk_done <= sk_done + 11'd1;
           end
           inflight <= inflight + 6'(issue) - 6'(push);
@@ -1077,13 +1109,16 @@ module dvbs2_rx_carrier
 
         // ------------------------------------------------------------ finish an output frame
         M_PAD: begin
-          if (oc_push == 15'd32400) begin
+          if (oc_push == 15'd32400 || w_mute) begin
+            // (a frame that is not sent needs no padding)
             oc_push <= '0;
             st <= ret_pad;
           end else if (room1) begin
             lp_v    <= 1'b1;
             lp_zero <= 1'b1;
             oc_push <= oc_push + 15'd1;
+            lp_mute <= w_mute;
+            if (oc_push == '0) fmute <= smute;
           end
         end
 
@@ -1094,10 +1129,12 @@ module dvbs2_rx_carrier
     zr2_v   <= zr_v;
     zr2_ph  <= zr_ph;
     zr2_tag <= zr_tag;
-    if (zr2_v) begin
+    if (zr2_v) begin : zr2
+      logic neg;
+      neg = !acquired && cflip[fh[1:0]] && hdiff[7'd89 - zr2_tag];
       rot_v   <= 1'b1;
-      rot_i   <= $signed(zb_q[15:0]);
-      rot_q   <= $signed(zb_q[31:16]);
+      rot_i   <= neg ? neg16(zb_q[15:0])  : $signed(zb_q[15:0]);
+      rot_q   <= neg ? neg16(zb_q[31:16]) : $signed(zb_q[31:16]);
       rot_ph  <= zr2_ph;
       rot_tag <= {1'b0, zr2_tag};
     end

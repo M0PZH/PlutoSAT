@@ -13,9 +13,13 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0300: pilots-off carrier tracking and the PLS fix
-//                         (frame sync checks every search peak at the data length)
-//                         (0x0001_0200: PLS decoder and TIMING_INTEG preset;
+//   0x00 VERSION      RO  0x0001_0401: (0x0001_0400 + a whole-frame search after a PLS drop)
+//                         0x0001_0400: frame sync confirms headers by their PLS decode
+//                         (no false lock on repeating frames), acquisition headers
+//                         typed by the frame length, pilots off: no header kicks after
+//                         the acquisition (0x0001_0300: pilots-off carrier tracking and
+//                         the PLS fix: frame sync checks every search peak at the data
+//                         length; 0x0001_0200: PLS decoder and TIMING_INTEG preset;
 //                         0x0001_0100: neither, 0xB8.. read 0, a TIMING_INTEG write is
 //                         ignored; 0x0001_0000: no CIC, DDC_CIC reads 0)
 //   0x04 ID           RO  "DVR2" (0x44565232)
@@ -65,7 +69,8 @@
 //   0xB4 BCH_BITERR   RO  bit errors corrected by BCH (post-LDPC errors), wraps
 //   PLS decoder (dvbs2_rx_pls.sv, model/rxfixed.py pls_decode()): the PLS code of
 //   every PLHEADER the frame sync tags, whatever MODCOD/pilots are configured
-//   (detection only). Confident: best > 2 x second and best > 2^8.
+//   (detection; from 1.4 also the frame sync's header confirmation). Confident:
+//   best > 2 x second and best > 2^8.
 //   0xB8 PLS_LAST     RO  the last decode: [4:0] MODCOD, [8] pilots, [9] short frame,
 //                         [12] confident, [13] from the carrier's frequency, [14] the
 //                         frequency grid was searched, [15] valid (a decode since reset),
@@ -496,7 +501,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0300;
+          6'h00: s_axi_rdata <= 32'h0001_0401;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};
