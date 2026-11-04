@@ -154,9 +154,10 @@ been sent. At high rates nothing changes (the DMA queue limits first).
 ## Fishball bitstream integration
 
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_tx` (module reference) at
-0x7C500000 and its own `axi_dmac` (memory -> stream, HP3) at 0x7C480000,
-IRQ ps-10. The ADI FIR interpolator output passes through the core's DAC
-selector into `axi_ad9361` channel 0; CTRL[2] switches channel 0 to DVB-S2.
+0x7C500000 and its own `axi_dmac` (memory -> stream, 32-bit on S_AXI_GP1)
+at 0x7C480000, IRQ ps-10. The core's DAC selector feeds `axi_ad9361`
+channel 0; CTRL[2] switches it between DVB-S2 and `dac_in_i/q` (zero for now:
+the input for a future IQ transmitter, see `boards/fishball/README.md`).
 The core runs on `sys_cpu_clk` (100 MHz) and crosses to `l_clk` with a Gray
 FIFO pulled by `dac_valid`.
 
@@ -305,9 +306,9 @@ FREQ register gives the LNB offset to a few Hz) or from the spectrum.
 ### Fishball bitstream integration
 
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_rx` (module reference
-`ip/dvbs2_rx_bd.v`) at 0x7C510000, fed from `axi_ad9361` channel 0 (before
-the ADI FIR decimator), and `axi_dvbs2_rx_dma` (stream -> memory, HP0) at
-0x7C490000, IRQ ps-9. Everything after the ADC sample FIFO runs on
+`ip/dvbs2_rx_bd.v`) at 0x7C510000, fed from `axi_ad9361` channel 0 (through
+`rx_awgn`), and `axi_dvbs2_rx_dma` (stream -> memory, 32-bit on S_AXI_GP0)
+at 0x7C490000, IRQ ps-9. Everything after the ADC sample FIFO runs on
 `sys_cpu_clk`. Register map and packet format: header of
 `rtl/dvbs2_rx_axi.sv`. Each decoded BBFRAME becomes one 8 KB DMA packet
 (status word + BBFRAME); with both packet slots full a frame is dropped and
