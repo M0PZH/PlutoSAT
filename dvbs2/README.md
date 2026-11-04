@@ -475,19 +475,27 @@ With a core >= VERSION 0x0001_0200 the status line ends with the last
 confident PLS decode of a data header (`, PLS qpsk3/4 pilots`, `!` when it
 is not the configured MODCOD/pilots, `, PLS -` before the first).
 
-`--detect` detects the MODCOD and pilots instead of receiving: it
-configures the core as usual (any `-m`/`-p`), waits for `--detect-count`
-(3) equal confident PLS decodes of data headers in a row, prints them
-(stdout: `MODCOD name pilots short offset_Hz`, the offset being the
-signal's frequency from the LO: `-o` plus the carrier's or the PLS
-decoder's estimate) and exits 0, or exits 1 after `--detect-timeout` (30
-s). The frame sync needs the right pilots (or dummy frames): without
-dummy frames, try `-p` and no `-p`. `--pls-grid H` sets the grid (default
-32; 2H + 2 hypotheses must fit in a dummy frame).
+`--detect` detects the MODCOD and pilots instead of receiving. The frame
+sync needs the right pilots (they set the frame length, and its correlation
+with the headers of the other pilots is weak) but finds the headers of any
+QPSK MODCOD with them, and with the wrong ones it tags symbols that are not
+headers, whose decodes can look confident. So `--detect` starts with the
+configured `-m`/`-p` and reconfigures the core (soft reset) to what the
+decodes say: to a confidently decoded QPSK normal-frame data header that is
+not the configured one (the first such decode since the last
+reconfiguration, or the same one twice in a row), and to the other pilots
+after 10 frames (at least 0.5 s) without a decode of the configured one. It
+prints the MODCOD and pilots after `--detect-count` (3) equal confident
+decodes of the configured one in a row (stdout: `MODCOD name pilots short
+offset_Hz`, the offset being the signal's frequency from the LO: `-o` plus
+the carrier's or the PLS decoder's estimate) and exits 0, or exits 1 after
+`--detect-timeout` (30 s). Codes the receiver cannot demodulate (8PSK..,
+short frames) are reported after 2 x `--detect-count` equal decodes in a
+row. `--pls-grid H` sets the grid (default 32; 2H + 2 hypotheses must fit
+in a dummy frame).
 
 ```
 dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
-dvbs2-rx -s 333333 -f 739.75e6 -p --detect   # if the first one times out
 ```
 
 ## Loopback self-test on the board

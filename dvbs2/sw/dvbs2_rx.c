@@ -486,10 +486,11 @@ static void usage(const char *p)
 		"  -C, --constellation FILE  write 1024 symbols (\"I Q\" lines) to FILE every second\n"
 		"      --constellation-raw   ... the timing loop output instead of the carrier output\n"
 		"      --dump-coefs     print the filter coefficients and exit\n"
-		"      --detect         detect the MODCOD and pilots from the PLHEADERs (any -m/-p\n"
-		"                       will do; the frame sync needs the right pilots or dummy\n"
-		"                       frames): print them and exit 0 after --detect-count equal\n"
-		"                       decodes of data headers, exit 1 after --detect-timeout\n"
+		"      --detect         detect the MODCOD and pilots from the PLHEADERs: start with\n"
+		"                       -m/-p, reconfigure to what the decodes say (or the other\n"
+		"                       pilots after 10 frames without), print them and exit 0\n"
+		"                       after --detect-count equal decodes of the configured one,\n"
+		"                       exit 1 after --detect-timeout\n"
 		"      --detect-count N equal decodes in a row (default 3)\n"
 		"      --detect-timeout S  seconds (default 30)\n"
 		"      --pls-grid H     PLS decoder frequency hypotheses -H..H x 0.004 cycles/symbol\n"
@@ -534,45 +535,115 @@ static void status(int rate_idx, int pilots, double sr, unsigned long ts_pkts, s
 		rd(regs, R_CARRIER_RETYPE), rd(regs, R_IN_OVF) + rd(regs, R_DDC_DROPPED), pls);
 }
 
-/* --detect: wait for `count` equal confident decodes of data headers in a
- * row; print them (stdout: "MODCOD name pilots short offset_hz") */
-static int detect(double sr, double offset, int count, double timeout)
+/* --detect. The PLS decoder decodes every header the frame sync tags, but
+ * the frame sync needs the right pilots (they set the frame length, and its
+ * correlation with the headers of the other pilots is weak); with the right
+ * pilots it finds the headers of any QPSK MODCOD. So the core is configured
+ * to a hypothesis and then to what the decodes say:
+ *  - a confident decode of a QPSK normal-frame data header other than the
+ *    configured MODCOD/pilots (the first one since the core was configured,
+ *    or the same one twice in a row): configure the core to it;
+ *  - `count` equal confident decodes of the configured one in a row: detected
+ *    (with the right configuration the frame sync tracks the real headers,
+ *    so decodes of symbols that are not a header, which can look confident,
+ *    do not get that far);
+ *  - no decode of the configured one for `dwell` (10 frames, >= 0.5 s): the
+ *    other pilots;
+ *  - codes the receiver cannot demodulate (8PSK.., short frames) are reported
+ *    after 2 x count equal decodes in a row.
+ * stdout: "MODCOD name pilots short offset_hz". */
+static void configure(int modcod, int pilots)
 {
-	uint32_t n0 = rd(regs, R_PLS_DATA) >> 16, code = 0;
-	int n = 0;
-	struct timespec t0, now;
+	wr(regs, R_CTRL, CTRL_RESET);
+	usleep(10);
+	wr(regs, R_MODCOD, (uint32_t)modcod | ((uint32_t)pilots << 8));
+	wr(regs, R_CTRL, CTRL_RESET);
+	usleep(10);
+	wr(regs, R_CTRL, CTRL_ENABLE);
+}
+
+static double since(const struct timespec *t)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (now.tv_sec - t->tv_sec) + (now.tv_nsec - t->tv_nsec) * 1e-9;
+}
+
+static int detect(double sr, double offset, int modcod, int pilots, int count, double timeout)
+{
+	double dwell = fmax(0.5, 10 * 33282 / sr);
+	uint32_t n0 = rd(regs, R_PLS_DATA) >> 16, last = 0xFFFF;
+	int n = 0, rep = 0, matched = 0, nconf = 0;
+	struct timespec t0, tc;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
-	fprintf(stderr, "dvbs2-rx: detecting (%d equal PLS decodes, %.0f s)\n", count, timeout);
+	tc = t0;
+	fprintf(stderr, "dvbs2-rx: detecting (%d equal PLS decodes, %.0f s), %s%s\n", count, timeout,
+		pls_names[modcod], pilots ? " pilots" : "");
 	while (!stop) {
 		uint32_t p = rd(regs, R_PLS_DATA), nd = p >> 16;
 		if (nd != n0) {
 			n0 = nd;
 			uint32_t c = p & 0x31F;          /* MODCOD, pilots, short */
-			n = (n && c == code) ? n + 1 : 1;
-			code = c;
-			fprintf(stderr, "PLS %s%s%s (%d)\n", pls_names[c & 31], (c >> 8) & 1 ? " pilots" : "",
-				(c >> 9) & 1 ? " short" : "", n);
-			if (n >= count)
+			unsigned mc = c & 31, pc = (c >> 8) & 1, sh = (c >> 9) & 1;
+			rep = c == last ? rep + 1 : 1;
+			last = c;
+			int cfg = mc == (unsigned)modcod && pc == (unsigned)pilots && !sh;
+			n = cfg ? n + 1 : 0;
+			fprintf(stderr, "PLS %s%s%s (%d)\n", pls_names[mc], pc ? " pilots" : "", sh ? " short" : "",
+				cfg ? n : rep);
+			if (cfg) {
+				matched = 1;
+				clock_gettime(CLOCK_MONOTONIC, &tc);
+				if (n >= count)
+					break;
+			} else if (mc >= 1 && mc <= 11 && !sh) {
+				if (!matched || rep >= 2) {
+					modcod = mc;
+					pilots = pc;
+					fprintf(stderr, "dvbs2-rx: trying %s%s\n", pls_names[modcod], pilots ? " pilots" : "");
+					configure(modcod, pilots);
+					n0 = rd(regs, R_PLS_DATA) >> 16;
+					n = rep = matched = 0;
+					last = 0xFFFF;
+					clock_gettime(CLOCK_MONOTONIC, &tc);
+					nconf++;
+				}
+			} else if (mc < 29 && rep >= 2 * count) {
+				n = rep;
 				break;
+			}
 		}
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if ((now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) * 1e-9 > timeout)
+		double t = since(&t0);
+		if (t > timeout)
 			break;
+		if (since(&tc) > dwell) {
+			pilots ^= 1;
+			fprintf(stderr, "dvbs2-rx: trying %s%s\n", pls_names[modcod], pilots ? " pilots" : "");
+			configure(modcod, pilots);
+			n0 = rd(regs, R_PLS_DATA) >> 16;
+			n = rep = matched = 0;
+			last = 0xFFFF;
+			clock_gettime(CLOCK_MONOTONIC, &tc);
+			nconf++;
+		}
 		usleep(2000);
 	}
 	if (n < count) {
-		fprintf(stderr, "dvbs2-rx: no MODCOD detected (fs %s, %u PLS decodes, %u confident data decodes)\n",
+		fprintf(stderr, "dvbs2-rx: no MODCOD detected (%d configurations, now %s%s: fs %s, %u PLS decodes, "
+			"%u confident data decodes)\n", nconf + 1, pls_names[modcod], pilots ? " pilots" : "",
 			(const char *[]){ "search", "check", "locked", "?" }[rd(regs, R_FS_STATE) & 3],
 			rd(regs, R_PLS_LAST) >> 16, rd(regs, R_PLS_DATA) >> 16);
 		return 1;
 	}
+	uint32_t code = last;
 	/* signal frequency from the last decode (if confident): the carrier's
 	 * estimate if it used it, else its frequency hypothesis (+-0.002 cycles/symbol) */
 	uint32_t l = rd(regs, R_PLS_LAST);
 	int32_t fr = (l & PLS_CARRIER) ? (int32_t)rd(regs, R_FREQ) : (int32_t)rd(regs, R_PLS_FREQ);
 	double off = (l & PLS_CONF) ? offset + fr / 4294967296.0 * sr : offset;
-	fprintf(stderr, "dvbs2-rx: detected %s%s%s, signal at %+.0f Hz from the LO\n", pls_names[code & 31],
-		(code >> 8) & 1 ? " pilots" : "", (code >> 9) & 1 ? " short frames (not supported)" : "", off);
+	fprintf(stderr, "dvbs2-rx: detected %s%s%s, signal at %+.0f Hz from the LO (%.1f s)\n", pls_names[code & 31],
+		(code >> 8) & 1 ? " pilots" : "", (code >> 9) & 1 ? " short frames (not supported)" : "", off,
+		since(&t0));
 	printf("%u %s %u %u %.0f\n", code & 31, pls_names[code & 31], (code >> 8) & 1, (code >> 9) & 1, off);
 	return 0;
 }
@@ -812,7 +883,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 	if (det) {
-		int r = detect(sr, offset, det_count, det_timeout);
+		int r = detect(sr, offset, rate_idx + 1, pilots, det_count, det_timeout);
 		wr(regs, R_CTRL, 0);
 		return r;
 	}
