@@ -6,11 +6,16 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00010402u
+#define DVBS2_RX_VERSION_VALUE 0x00020000u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
+#define DVBS2_RX_MAP_LLRQ 3
 
+/* Receive slots (register banks SLOT[0..1], packet header bit SLOT) */
+#define DVBS2_RX_SLOTS 2
+/* LLR queue ring region (LLRQ_BASE, 2 MB aligned): slot s frame f at LLRQ_BASE + s x 1 MB + f x 64 KB */
+#define DVBS2_RX_LLRQ_BYTES 2097152
 /* 64-bit words per DMA packet (tlast on the last) */
 #define DVBS2_RX_PKT_WORDS 1024
 /* Bytes per DMA packet */
@@ -30,8 +35,8 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0001_0402 = 1.4.2: 1.4.1 with the LDPC decoder clipping channel LLRs to +-61 (a full-scale wrong parity bit, e.g. from an interference burst at high SNR, can be corrected); 0x0001_0401 = 1.4.1: 1.4 with a whole-frame search after a PLS drop (repeating data was found again a frame length apart and confirmed by the carrier); 0x0001_0400 = 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition (1.3: pilots-off carrier tracking and the PLS fix, frame sync checks every search peak at the data length; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0) */
-#define DVBS2_RX_VERSION 0x000
+/* VERSION (ro): Core version, 0x0002_0000 = 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC) */
+#define DVBS2_RX_VERSION 0x200
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
 #define DVBS2_RX_VERSION_MINOR_WIDTH 16
@@ -41,195 +46,22 @@
 #define DVBS2_RX_VERSION_MAJOR_WIDTH 16
 #define DVBS2_RX_VERSION_MAJOR_MASK 0xFFFF0000u
 /* ID (ro): Core identification "DVR2" (0x44565232) */
-#define DVBS2_RX_ID 0x004
-/* SCRATCH (rw): Scratch register, no function */
-#define DVBS2_RX_SCRATCH 0x008
-/* CTRL (rw): Control */
-#define DVBS2_RX_CTRL 0x010
-/*   [0] ENABLE: Enable (take ADC samples) */
-#define DVBS2_RX_CTRL_ENABLE_SHIFT 0
-#define DVBS2_RX_CTRL_ENABLE_WIDTH 1
-#define DVBS2_RX_CTRL_ENABLE_MASK 0x00000001u
-/*   [1] RESET: Soft reset (self-clearing) */
+#define DVBS2_RX_ID 0x204
+/* SCRATCH (rw): Scratch register, no function (also at SLOT[s].SCRATCH) */
+#define DVBS2_RX_SCRATCH 0x208
+/* CTRL (rw): Receiver control */
+#define DVBS2_RX_CTRL 0x210
+/*   [1] RESET: Soft reset of the whole receiver: both slots, the decoders, the LLR queue, the packet buffer (self-clearing; reads 1 while in progress) */
 #define DVBS2_RX_CTRL_RESET_SHIFT 1
 #define DVBS2_RX_CTRL_RESET_WIDTH 1
 #define DVBS2_RX_CTRL_RESET_MASK 0x00000002u
-/* MODCOD (rw): Expected MODCOD */
-#define DVBS2_RX_MODCOD 0x014
-/*   [4:0] MODCOD: MODCOD (QPSK: 1..11) */
-#define DVBS2_RX_MODCOD_MODCOD_SHIFT 0
-#define DVBS2_RX_MODCOD_MODCOD_WIDTH 5
-#define DVBS2_RX_MODCOD_MODCOD_MASK 0x0000001Fu
-/*   [8] PILOTS: Frames have pilots */
-#define DVBS2_RX_MODCOD_PILOTS_SHIFT 8
-#define DVBS2_RX_MODCOD_PILOTS_WIDTH 1
-#define DVBS2_RX_MODCOD_PILOTS_MASK 0x00000100u
-/* GOLD_XA (rw): PL descrambler x sequence start (x LFSR advanced by the Gold code n) */
-#define DVBS2_RX_GOLD_XA 0x018
-/*   [17:0] X: LFSR state */
-#define DVBS2_RX_GOLD_XA_X_SHIFT 0
-#define DVBS2_RX_GOLD_XA_X_WIDTH 18
-#define DVBS2_RX_GOLD_XA_X_MASK 0x0003FFFFu
-/* GOLD_XB (rw): PL descrambler second x sequence start (x LFSR advanced by n + 131072) */
-#define DVBS2_RX_GOLD_XB 0x01C
-/*   [17:0] X: LFSR state */
-#define DVBS2_RX_GOLD_XB_X_SHIFT 0
-#define DVBS2_RX_GOLD_XB_X_WIDTH 18
-#define DVBS2_RX_GOLD_XB_X_MASK 0x0003FFFFu
-/* DDC_FINC (rw): DDC NCO phase increment per ADC sample, 2^32 = ADC rate (signed) */
-#define DVBS2_RX_DDC_FINC 0x020
-/* DDC_CFG (rw): DDC configuration */
-#define DVBS2_RX_DDC_CFG 0x024
-/*   [5:0] DECIM: FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC) */
-#define DVBS2_RX_DDC_CFG_DECIM_SHIFT 0
-#define DVBS2_RX_DDC_CFG_DECIM_WIDTH 6
-#define DVBS2_RX_DDC_CFG_DECIM_MASK 0x0000003Fu
-/*   [17:8] TAPS: Lowpass taps (even, <= 512) */
-#define DVBS2_RX_DDC_CFG_TAPS_SHIFT 8
-#define DVBS2_RX_DDC_CFG_TAPS_WIDTH 10
-#define DVBS2_RX_DDC_CFG_TAPS_MASK 0x0003FF00u
-/*   [28:24] SHIFT: Output shift (16 - DDC gain exponent) */
-#define DVBS2_RX_DDC_CFG_SHIFT_SHIFT 24
-#define DVBS2_RX_DDC_CFG_SHIFT_WIDTH 5
-#define DVBS2_RX_DDC_CFG_SHIFT_MASK 0x1F000000u
-/* DDC_COEF_ADDR (rw): DDC coefficient address */
-#define DVBS2_RX_DDC_COEF_ADDR 0x028
-/*   [8:0] ADDR: Tap index */
-#define DVBS2_RX_DDC_COEF_ADDR_ADDR_SHIFT 0
-#define DVBS2_RX_DDC_COEF_ADDR_ADDR_WIDTH 9
-#define DVBS2_RX_DDC_COEF_ADDR_ADDR_MASK 0x000001FFu
-/* DDC_COEF_DATA (wo): Write the DDC coefficient at DDC_COEF_ADDR, then DDC_COEF_ADDR++ */
-#define DVBS2_RX_DDC_COEF_DATA 0x02C
-/*   [17:0] DATA, signed: Coefficient */
-#define DVBS2_RX_DDC_COEF_DATA_DATA_SHIFT 0
-#define DVBS2_RX_DDC_COEF_DATA_DATA_WIDTH 18
-#define DVBS2_RX_DDC_COEF_DATA_DATA_MASK 0x0003FFFFu
-/* RRC_COEF_ADDR (rw): RRC matched filter coefficient address */
-#define DVBS2_RX_RRC_COEF_ADDR 0x030
-/*   [4:0] TAP: Tap */
-#define DVBS2_RX_RRC_COEF_ADDR_TAP_SHIFT 0
-#define DVBS2_RX_RRC_COEF_ADDR_TAP_WIDTH 5
-#define DVBS2_RX_RRC_COEF_ADDR_TAP_MASK 0x0000001Fu
-/*   [9:5] PHASE: Fractional-delay phase */
-#define DVBS2_RX_RRC_COEF_ADDR_PHASE_SHIFT 5
-#define DVBS2_RX_RRC_COEF_ADDR_PHASE_WIDTH 5
-#define DVBS2_RX_RRC_COEF_ADDR_PHASE_MASK 0x000003E0u
-/* RRC_COEF_DATA (wo): Write the RRC coefficient at RRC_COEF_ADDR, then RRC_COEF_ADDR++ */
-#define DVBS2_RX_RRC_COEF_DATA 0x034
-/*   [17:0] DATA, signed: Coefficient */
-#define DVBS2_RX_RRC_COEF_DATA_DATA_SHIFT 0
-#define DVBS2_RX_RRC_COEF_DATA_DATA_WIDTH 18
-#define DVBS2_RX_RRC_COEF_DATA_DATA_MASK 0x0003FFFFu
-/* TIMING_GAINS (rw): Timing loop gains */
-#define DVBS2_RX_TIMING_GAINS 0x038
-/*   [15:0] KP: Proportional gain */
-#define DVBS2_RX_TIMING_GAINS_KP_SHIFT 0
-#define DVBS2_RX_TIMING_GAINS_KP_WIDTH 16
-#define DVBS2_RX_TIMING_GAINS_KP_MASK 0x0000FFFFu
-/*   [31:16] KI: Integral gain */
-#define DVBS2_RX_TIMING_GAINS_KI_SHIFT 16
-#define DVBS2_RX_TIMING_GAINS_KI_WIDTH 16
-#define DVBS2_RX_TIMING_GAINS_KI_MASK 0xFFFF0000u
-/* FS_THRESH (rw): Frame sync header metric threshold */
-#define DVBS2_RX_FS_THRESH 0x03C
-/* PLL_KP (rw): Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition) */
-#define DVBS2_RX_PLL_KP 0x040
-/*   [17:0] KP: Gain */
-#define DVBS2_RX_PLL_KP_KP_SHIFT 0
-#define DVBS2_RX_PLL_KP_KP_WIDTH 18
-#define DVBS2_RX_PLL_KP_KP_MASK 0x0003FFFFu
-/* PLL_KI (rw): Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th) */
-#define DVBS2_RX_PLL_KI 0x044
-/*   [17:0] KI: Gain */
-#define DVBS2_RX_PLL_KI_KI_SHIFT 0
-#define DVBS2_RX_PLL_KI_KI_WIDTH 18
-#define DVBS2_RX_PLL_KI_KI_MASK 0x0003FFFFu
-/* LDPC_MAX_IT (rw): LDPC iteration limit */
-#define DVBS2_RX_LDPC_MAX_IT 0x048
-/*   [5:0] MAX_IT: Iterations, 1..63 */
-#define DVBS2_RX_LDPC_MAX_IT_MAX_IT_SHIFT 0
-#define DVBS2_RX_LDPC_MAX_IT_MAX_IT_WIDTH 6
-#define DVBS2_RX_LDPC_MAX_IT_MAX_IT_MASK 0x0000003Fu
-/* DDC_CIC (rw): DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D */
-#define DVBS2_RX_DDC_CIC 0x04C
-/*   [5:0] R: CIC decimation R: 0 or 1 = no CIC, 2..32 */
-#define DVBS2_RX_DDC_CIC_R_SHIFT 0
-#define DVBS2_RX_DDC_CIC_R_WIDTH 6
-#define DVBS2_RX_DDC_CIC_R_MASK 0x0000003Fu
-/*   [11:8] SHIFT: CIC output shift */
-#define DVBS2_RX_DDC_CIC_SHIFT_SHIFT 8
-#define DVBS2_RX_DDC_CIC_SHIFT_WIDTH 4
-#define DVBS2_RX_DDC_CIC_SHIFT_MASK 0x00000F00u
-/* IN_OVERFLOWS (ro): 2-sps samples lost at the core input FIFO */
-#define DVBS2_RX_IN_OVERFLOWS 0x050
-/* DDC_DROPPED (ro): DDC outputs lost (input too fast for the taps) */
-#define DVBS2_RX_DDC_DROPPED 0x054
-/* AGC_GAIN (ro): Digital AGC gain, Q5.12 */
-#define DVBS2_RX_AGC_GAIN 0x058
-/* TIMING_INTEG (rw): Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the core reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200) */
-#define DVBS2_RX_TIMING_INTEG 0x05C
-/* FS_STATE (ro): Frame sync state */
-#define DVBS2_RX_FS_STATE 0x060
-/*   [1:0] STATE: State */
-#define DVBS2_RX_FS_STATE_STATE_SHIFT 0
-#define DVBS2_RX_FS_STATE_STATE_WIDTH 2
-#define DVBS2_RX_FS_STATE_STATE_MASK 0x00000003u
-#define DVBS2_RX_FS_STATE_STATE_SEARCH 0
-#define DVBS2_RX_FS_STATE_STATE_CHECK 1
-#define DVBS2_RX_FS_STATE_STATE_LOCKED 2
-/* FS_FOUND (ro): Frame sync: headers found */
-#define DVBS2_RX_FS_FOUND 0x064
-/* FS_FLYWHEEL (ro): Frame sync: flywheel frames */
-#define DVBS2_RX_FS_FLYWHEEL 0x068
-/* FS_LOST (ro): Frame sync: locks lost (MAXMISS misses in a row, or from 1.4 three tagged headers in a row without a confident PLS decode of the configured code or a dummy header) */
-#define DVBS2_RX_FS_LOST 0x06C
-/* FREQ (ro): Carrier frequency, turns * 2^32 per symbol (signed) */
-#define DVBS2_RX_FREQ 0x070
-/* AMP (ro): Mean symbol amplitude */
-#define DVBS2_RX_AMP 0x074
-/* ENERGY (ro): Mean symbol energy, bits [35:4] (multiply by 16) */
-#define DVBS2_RX_ENERGY 0x078
-/* LLR_GAIN (ro): LLR scaling gain */
-#define DVBS2_RX_LLR_GAIN 0x07C
-/* FRAMES (ro): Data frames demodulated */
-#define DVBS2_RX_FRAMES 0x080
-/* LDPC_FRAMES (ro): Frames LDPC decoded */
-#define DVBS2_RX_LDPC_FRAMES 0x084
-/* LDPC_FAILED (ro): Frames where LDPC did not converge */
-#define DVBS2_RX_LDPC_FAILED 0x088
-/* PKT_DROPPED (ro): Frames that found both packet slots full */
-#define DVBS2_RX_PKT_DROPPED 0x08C
-/* PKT_SENT (ro): Packets sent to the DMA */
-#define DVBS2_RX_PKT_SENT 0x090
-/* CARRIER_ACQ (ro): Carrier acquisition counters */
-#define DVBS2_RX_CARRIER_ACQ 0x094
-/*   [15:0] ACQ: Frequency acquisitions */
-#define DVBS2_RX_CARRIER_ACQ_ACQ_SHIFT 0
-#define DVBS2_RX_CARRIER_ACQ_ACQ_WIDTH 16
-#define DVBS2_RX_CARRIER_ACQ_ACQ_MASK 0x0000FFFFu
-/*   [31:16] FALSE_LOCK: 1/1476 false-lock corrections */
-#define DVBS2_RX_CARRIER_ACQ_FALSE_LOCK_SHIFT 16
-#define DVBS2_RX_CARRIER_ACQ_FALSE_LOCK_WIDTH 16
-#define DVBS2_RX_CARRIER_ACQ_FALSE_LOCK_MASK 0xFFFF0000u
-/* CARRIER_RETYPE (ro): Coherent frame-type decision counter */
-#define DVBS2_RX_CARRIER_RETYPE 0x098
-/*   [15:0] RETYPE: Frame types changed by the coherent decision */
-#define DVBS2_RX_CARRIER_RETYPE_RETYPE_SHIFT 0
-#define DVBS2_RX_CARRIER_RETYPE_RETYPE_WIDTH 16
-#define DVBS2_RX_CARRIER_RETYPE_RETYPE_MASK 0x0000FFFFu
-/* BCH (ro): BCH decoder counters */
-#define DVBS2_RX_BCH 0x09C
-/*   [15:0] CORRECTED: Frames corrected */
-#define DVBS2_RX_BCH_CORRECTED_SHIFT 0
-#define DVBS2_RX_BCH_CORRECTED_WIDTH 16
-#define DVBS2_RX_BCH_CORRECTED_MASK 0x0000FFFFu
-/*   [31:16] FAILED: Frames not decodable */
-#define DVBS2_RX_BCH_FAILED_SHIFT 16
-#define DVBS2_RX_BCH_FAILED_WIDTH 16
-#define DVBS2_RX_BCH_FAILED_MASK 0xFFFF0000u
-/* SNAP_CTRL (rw): Constellation snapshot control (write and read differ) */
-#define DVBS2_RX_SNAP_CTRL 0x0A0
-/*   [0] ARM (wo): Arm: capture the next 1024 symbols */
+/*   [9:8] SLOT_EN: Enable of slot 0 (bit 8), slot 1 (bit 9): the slots' SLOT[s].CTRL.ENABLE */
+#define DVBS2_RX_CTRL_SLOT_EN_SHIFT 8
+#define DVBS2_RX_CTRL_SLOT_EN_WIDTH 2
+#define DVBS2_RX_CTRL_SLOT_EN_MASK 0x00000300u
+/* SNAP_CTRL (rw): Constellation snapshot control, one buffer for both slots (write and read differ) */
+#define DVBS2_RX_SNAP_CTRL 0x2A0
+/*   [0] ARM (wo): Arm: capture the next 1024 symbols of slot SLOT */
 #define DVBS2_RX_SNAP_CTRL_ARM_SHIFT 0
 #define DVBS2_RX_SNAP_CTRL_ARM_WIDTH 1
 #define DVBS2_RX_SNAP_CTRL_ARM_MASK 0x00000001u
@@ -239,6 +71,10 @@
 #define DVBS2_RX_SNAP_CTRL_SOURCE_MASK 0x00000002u
 #define DVBS2_RX_SNAP_CTRL_SOURCE_CARRIER 0
 #define DVBS2_RX_SNAP_CTRL_SOURCE_TIMING 1
+/*   [3] SLOT: Slot captured (written with ARM; a write to SLOT[s].SNAP_CTRL sets it to s) */
+#define DVBS2_RX_SNAP_CTRL_SLOT_SHIFT 3
+#define DVBS2_RX_SNAP_CTRL_SLOT_WIDTH 1
+#define DVBS2_RX_SNAP_CTRL_SLOT_MASK 0x00000008u
 /*   [0] BUSY (ro): Capture running */
 #define DVBS2_RX_SNAP_CTRL_BUSY_SHIFT 0
 #define DVBS2_RX_SNAP_CTRL_BUSY_WIDTH 1
@@ -252,13 +88,13 @@
 #define DVBS2_RX_SNAP_CTRL_SOURCE_RD_WIDTH 1
 #define DVBS2_RX_SNAP_CTRL_SOURCE_RD_MASK 0x00000004u
 /* SNAP_ADDR (rw): Snapshot read address */
-#define DVBS2_RX_SNAP_ADDR 0x0A4
+#define DVBS2_RX_SNAP_ADDR 0x2A4
 /*   [9:0] ADDR: Symbol index */
 #define DVBS2_RX_SNAP_ADDR_ADDR_SHIFT 0
 #define DVBS2_RX_SNAP_ADDR_ADDR_WIDTH 10
 #define DVBS2_RX_SNAP_ADDR_ADDR_MASK 0x000003FFu
 /* SNAP_DATA (ro): Snapshot symbol at SNAP_ADDR, then SNAP_ADDR++ */
-#define DVBS2_RX_SNAP_DATA 0x0A8
+#define DVBS2_RX_SNAP_DATA 0x2A8
 /*   [15:0] I, signed: In-phase */
 #define DVBS2_RX_SNAP_DATA_I_SHIFT 0
 #define DVBS2_RX_SNAP_DATA_I_WIDTH 16
@@ -267,129 +103,474 @@
 #define DVBS2_RX_SNAP_DATA_Q_SHIFT 16
 #define DVBS2_RX_SNAP_DATA_Q_WIDTH 16
 #define DVBS2_RX_SNAP_DATA_Q_MASK 0xFFFF0000u
-/* RAW_ERR (ro): Pre-FEC bit errors (channel hard decisions vs. the decoded frame, Kldpc bits of each BCH-good frame), wraps */
-#define DVBS2_RX_RAW_ERR 0x0AC
-/* RAW_BITS (ro): Bits counted in RAW_ERR, wraps */
-#define DVBS2_RX_RAW_BITS 0x0B0
-/* BCH_BITERR (ro): Bit errors corrected by BCH (post-LDPC errors), wraps */
-#define DVBS2_RX_BCH_BITERR 0x0B4
-/* PLS_LAST (ro): PLS decoder: the last decoded PLHEADER (data or dummy) */
-#define DVBS2_RX_PLS_LAST 0x0B8
+/* LLRQ_BASE (rw): LLR queue ring region, 2 MB aligned (the device tree's dvbs2-llr-buffer, map 3; 0x3E800000 on the fishball): slot s frame f at base + s x 1 MB + f x 64 KB; takes effect at the next CTRL.RESET (while the queue is off also at a slot's reset). 0 (reset): the queue is off and no frame is decoded, so the PL never writes into memory the device tree does not reserve */
+#define DVBS2_RX_LLRQ_BASE 0x2E0
+/*   [31:21] BASE: Address bits 31:21 */
+#define DVBS2_RX_LLRQ_BASE_BASE_SHIFT 21
+#define DVBS2_RX_LLRQ_BASE_BASE_WIDTH 11
+#define DVBS2_RX_LLRQ_BASE_BASE_MASK 0xFFE00000u
+/* LLRQ_CFG (rw): LLR queue configuration (docs/rx2_design.md 6.2) */
+#define DVBS2_RX_LLRQ_CFG 0x2E4
+/*   [4:0] NFR: Frames per slot ring, 1..16 (reset 16; takes effect at the next CTRL.RESET) */
+#define DVBS2_RX_LLRQ_CFG_NFR_SHIFT 0
+#define DVBS2_RX_LLRQ_CFG_NFR_WIDTH 5
+#define DVBS2_RX_LLRQ_CFG_NFR_MASK 0x0000001Fu
+/*   [13:8] QHI: While more than QHI frames wait, frames stop at MAX_IT_LO iterations (reset 63: no cap) */
+#define DVBS2_RX_LLRQ_CFG_QHI_SHIFT 8
+#define DVBS2_RX_LLRQ_CFG_QHI_WIDTH 6
+#define DVBS2_RX_LLRQ_CFG_QHI_MASK 0x00003F00u
+/*   [21:16] MAX_IT_LO: Iteration cap (reset 10) */
+#define DVBS2_RX_LLRQ_CFG_MAX_IT_LO_SHIFT 16
+#define DVBS2_RX_LLRQ_CFG_MAX_IT_LO_WIDTH 6
+#define DVBS2_RX_LLRQ_CFG_MAX_IT_LO_MASK 0x003F0000u
+/* LLRQ_STAT (ro): LLR queue status */
+#define DVBS2_RX_LLRQ_STAT 0x2E8
+/*   [5:0] DEPTH: Frames waiting (complete in DDR + the one being read) */
+#define DVBS2_RX_LLRQ_STAT_DEPTH_SHIFT 0
+#define DVBS2_RX_LLRQ_STAT_DEPTH_WIDTH 6
+#define DVBS2_RX_LLRQ_STAT_DEPTH_MASK 0x0000003Fu
+/*   [13:8] DEPTH_MAX: The most since reset */
+#define DVBS2_RX_LLRQ_STAT_DEPTH_MAX_SHIFT 8
+#define DVBS2_RX_LLRQ_STAT_DEPTH_MAX_WIDTH 6
+#define DVBS2_RX_LLRQ_STAT_DEPTH_MAX_MASK 0x00003F00u
+/*   [31:16] FRAMES: Frames through the ring (wraps) */
+#define DVBS2_RX_LLRQ_STAT_FRAMES_SHIFT 16
+#define DVBS2_RX_LLRQ_STAT_FRAMES_WIDTH 16
+#define DVBS2_RX_LLRQ_STAT_FRAMES_MASK 0xFFFF0000u
+/* LLRQ_DROPPED (ro): Frames dropped because the slot's ring was full */
+#define DVBS2_RX_LLRQ_DROPPED 0x2EC
+/*   [15:0] SLOT0: Slot 0 (cleared by its reset) */
+#define DVBS2_RX_LLRQ_DROPPED_SLOT0_SHIFT 0
+#define DVBS2_RX_LLRQ_DROPPED_SLOT0_WIDTH 16
+#define DVBS2_RX_LLRQ_DROPPED_SLOT0_MASK 0x0000FFFFu
+/*   [31:16] SLOT1: Slot 1 (cleared by its reset) */
+#define DVBS2_RX_LLRQ_DROPPED_SLOT1_SHIFT 16
+#define DVBS2_RX_LLRQ_DROPPED_SLOT1_WIDTH 16
+#define DVBS2_RX_LLRQ_DROPPED_SLOT1_MASK 0xFFFF0000u
+/* LLRQ_AXI_ERR (ro): LLR queue AXI error responses (SLVERR/DECERR) */
+#define DVBS2_RX_LLRQ_AXI_ERR 0x2F0
+/*   [15:0] COUNT: Responses */
+#define DVBS2_RX_LLRQ_AXI_ERR_COUNT_SHIFT 0
+#define DVBS2_RX_LLRQ_AXI_ERR_COUNT_WIDTH 16
+#define DVBS2_RX_LLRQ_AXI_ERR_COUNT_MASK 0x0000FFFFu
+
+/* SLOT[0..1]: Receive slot s: the 1.x single-slot map for slot s (1.x software adds 0x100 s to its offsets). Settings are static while the slot runs: change them with the slot disabled or in its reset */
+#define DVBS2_RX_SLOT_BASE 0x000
+#define DVBS2_RX_SLOT_STRIDE 0x100
+#define DVBS2_RX_SLOT_COUNT 2
+/* +0x00 VERSION (ro): As VERSION (0x200) */
+#define DVBS2_RX_SLOT_VERSION_OFF 0x00
+#define DVBS2_RX_SLOT_VERSION(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_VERSION_OFF)
+/* +0x04 ID (ro): As ID (0x204) */
+#define DVBS2_RX_SLOT_ID_OFF 0x04
+#define DVBS2_RX_SLOT_ID(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_ID_OFF)
+/* +0x08 SCRATCH (rw): As SCRATCH (0x208) */
+#define DVBS2_RX_SLOT_SCRATCH_OFF 0x08
+#define DVBS2_RX_SLOT_SCRATCH(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_SCRATCH_OFF)
+/* +0x10 CTRL (rw): Slot control */
+#define DVBS2_RX_SLOT_CTRL_OFF 0x10
+#define DVBS2_RX_SLOT_CTRL(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_CTRL_OFF)
+/*   [0] ENABLE: Enable: the slot takes ADC samples */
+#define DVBS2_RX_SLOT_CTRL_ENABLE_SHIFT 0
+#define DVBS2_RX_SLOT_CTRL_ENABLE_WIDTH 1
+#define DVBS2_RX_SLOT_CTRL_ENABLE_MASK 0x00000001u
+/*   [1] RESET: Soft reset of the slot (self-clearing; reads 1 while in progress): its DDC, input FIFO, state in the shared engines, PLS decoder and counters; the other slot runs on */
+#define DVBS2_RX_SLOT_CTRL_RESET_SHIFT 1
+#define DVBS2_RX_SLOT_CTRL_RESET_WIDTH 1
+#define DVBS2_RX_SLOT_CTRL_RESET_MASK 0x00000002u
+/* +0x14 MODCOD (rw): Expected MODCOD */
+#define DVBS2_RX_SLOT_MODCOD_OFF 0x14
+#define DVBS2_RX_SLOT_MODCOD(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_MODCOD_OFF)
+/*   [4:0] MODCOD: MODCOD (QPSK: 1..11) */
+#define DVBS2_RX_SLOT_MODCOD_MODCOD_SHIFT 0
+#define DVBS2_RX_SLOT_MODCOD_MODCOD_WIDTH 5
+#define DVBS2_RX_SLOT_MODCOD_MODCOD_MASK 0x0000001Fu
+/*   [8] PILOTS: Frames have pilots */
+#define DVBS2_RX_SLOT_MODCOD_PILOTS_SHIFT 8
+#define DVBS2_RX_SLOT_MODCOD_PILOTS_WIDTH 1
+#define DVBS2_RX_SLOT_MODCOD_PILOTS_MASK 0x00000100u
+/* +0x18 GOLD_XA (rw): PL descrambler x sequence start (x LFSR advanced by the Gold code n) */
+#define DVBS2_RX_SLOT_GOLD_XA_OFF 0x18
+#define DVBS2_RX_SLOT_GOLD_XA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_GOLD_XA_OFF)
+/*   [17:0] X: LFSR state */
+#define DVBS2_RX_SLOT_GOLD_XA_X_SHIFT 0
+#define DVBS2_RX_SLOT_GOLD_XA_X_WIDTH 18
+#define DVBS2_RX_SLOT_GOLD_XA_X_MASK 0x0003FFFFu
+/* +0x1C GOLD_XB (rw): PL descrambler second x sequence start (x LFSR advanced by n + 131072) */
+#define DVBS2_RX_SLOT_GOLD_XB_OFF 0x1C
+#define DVBS2_RX_SLOT_GOLD_XB(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_GOLD_XB_OFF)
+/*   [17:0] X: LFSR state */
+#define DVBS2_RX_SLOT_GOLD_XB_X_SHIFT 0
+#define DVBS2_RX_SLOT_GOLD_XB_X_WIDTH 18
+#define DVBS2_RX_SLOT_GOLD_XB_X_MASK 0x0003FFFFu
+/* +0x20 DDC_FINC (rw): DDC NCO phase increment per ADC sample, 2^32 = ADC rate (signed) */
+#define DVBS2_RX_SLOT_DDC_FINC_OFF 0x20
+#define DVBS2_RX_SLOT_DDC_FINC(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_FINC_OFF)
+/* +0x24 DDC_CFG (rw): DDC configuration */
+#define DVBS2_RX_SLOT_DDC_CFG_OFF 0x24
+#define DVBS2_RX_SLOT_DDC_CFG(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_CFG_OFF)
+/*   [5:0] DECIM: FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC) */
+#define DVBS2_RX_SLOT_DDC_CFG_DECIM_SHIFT 0
+#define DVBS2_RX_SLOT_DDC_CFG_DECIM_WIDTH 6
+#define DVBS2_RX_SLOT_DDC_CFG_DECIM_MASK 0x0000003Fu
+/*   [17:8] TAPS: Lowpass taps (even, <= 512) */
+#define DVBS2_RX_SLOT_DDC_CFG_TAPS_SHIFT 8
+#define DVBS2_RX_SLOT_DDC_CFG_TAPS_WIDTH 10
+#define DVBS2_RX_SLOT_DDC_CFG_TAPS_MASK 0x0003FF00u
+/*   [28:24] SHIFT: Output shift (16 - DDC gain exponent) */
+#define DVBS2_RX_SLOT_DDC_CFG_SHIFT_SHIFT 24
+#define DVBS2_RX_SLOT_DDC_CFG_SHIFT_WIDTH 5
+#define DVBS2_RX_SLOT_DDC_CFG_SHIFT_MASK 0x1F000000u
+/* +0x28 DDC_COEF_ADDR (rw): DDC coefficient address */
+#define DVBS2_RX_SLOT_DDC_COEF_ADDR_OFF 0x28
+#define DVBS2_RX_SLOT_DDC_COEF_ADDR(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_COEF_ADDR_OFF)
+/*   [8:0] ADDR: Tap index */
+#define DVBS2_RX_SLOT_DDC_COEF_ADDR_ADDR_SHIFT 0
+#define DVBS2_RX_SLOT_DDC_COEF_ADDR_ADDR_WIDTH 9
+#define DVBS2_RX_SLOT_DDC_COEF_ADDR_ADDR_MASK 0x000001FFu
+/* +0x2C DDC_COEF_DATA (wo): Write the DDC coefficient at DDC_COEF_ADDR, then DDC_COEF_ADDR++ */
+#define DVBS2_RX_SLOT_DDC_COEF_DATA_OFF 0x2C
+#define DVBS2_RX_SLOT_DDC_COEF_DATA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_COEF_DATA_OFF)
+/*   [17:0] DATA, signed: Coefficient */
+#define DVBS2_RX_SLOT_DDC_COEF_DATA_DATA_SHIFT 0
+#define DVBS2_RX_SLOT_DDC_COEF_DATA_DATA_WIDTH 18
+#define DVBS2_RX_SLOT_DDC_COEF_DATA_DATA_MASK 0x0003FFFFu
+/* +0x30 RRC_COEF_ADDR (rw): RRC matched filter coefficient address */
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_OFF 0x30
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_RRC_COEF_ADDR_OFF)
+/*   [4:0] TAP: Tap */
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_TAP_SHIFT 0
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_TAP_WIDTH 5
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_TAP_MASK 0x0000001Fu
+/*   [9:5] PHASE: Fractional-delay phase */
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_PHASE_SHIFT 5
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_PHASE_WIDTH 5
+#define DVBS2_RX_SLOT_RRC_COEF_ADDR_PHASE_MASK 0x000003E0u
+/* +0x34 RRC_COEF_DATA (wo): Write the RRC coefficient at RRC_COEF_ADDR, then RRC_COEF_ADDR++ */
+#define DVBS2_RX_SLOT_RRC_COEF_DATA_OFF 0x34
+#define DVBS2_RX_SLOT_RRC_COEF_DATA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_RRC_COEF_DATA_OFF)
+/*   [17:0] DATA, signed: Coefficient */
+#define DVBS2_RX_SLOT_RRC_COEF_DATA_DATA_SHIFT 0
+#define DVBS2_RX_SLOT_RRC_COEF_DATA_DATA_WIDTH 18
+#define DVBS2_RX_SLOT_RRC_COEF_DATA_DATA_MASK 0x0003FFFFu
+/* +0x38 TIMING_GAINS (rw): Timing loop gains */
+#define DVBS2_RX_SLOT_TIMING_GAINS_OFF 0x38
+#define DVBS2_RX_SLOT_TIMING_GAINS(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_TIMING_GAINS_OFF)
+/*   [15:0] KP: Proportional gain */
+#define DVBS2_RX_SLOT_TIMING_GAINS_KP_SHIFT 0
+#define DVBS2_RX_SLOT_TIMING_GAINS_KP_WIDTH 16
+#define DVBS2_RX_SLOT_TIMING_GAINS_KP_MASK 0x0000FFFFu
+/*   [31:16] KI: Integral gain */
+#define DVBS2_RX_SLOT_TIMING_GAINS_KI_SHIFT 16
+#define DVBS2_RX_SLOT_TIMING_GAINS_KI_WIDTH 16
+#define DVBS2_RX_SLOT_TIMING_GAINS_KI_MASK 0xFFFF0000u
+/* +0x3C FS_THRESH (rw): Frame sync header metric threshold */
+#define DVBS2_RX_SLOT_FS_THRESH_OFF 0x3C
+#define DVBS2_RX_SLOT_FS_THRESH(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FS_THRESH_OFF)
+/* +0x40 PLL_KP (rw): Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition) */
+#define DVBS2_RX_SLOT_PLL_KP_OFF 0x40
+#define DVBS2_RX_SLOT_PLL_KP(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLL_KP_OFF)
+/*   [17:0] KP: Gain */
+#define DVBS2_RX_SLOT_PLL_KP_KP_SHIFT 0
+#define DVBS2_RX_SLOT_PLL_KP_KP_WIDTH 18
+#define DVBS2_RX_SLOT_PLL_KP_KP_MASK 0x0003FFFFu
+/* +0x44 PLL_KI (rw): Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th) */
+#define DVBS2_RX_SLOT_PLL_KI_OFF 0x44
+#define DVBS2_RX_SLOT_PLL_KI(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLL_KI_OFF)
+/*   [17:0] KI: Gain */
+#define DVBS2_RX_SLOT_PLL_KI_KI_SHIFT 0
+#define DVBS2_RX_SLOT_PLL_KI_KI_WIDTH 18
+#define DVBS2_RX_SLOT_PLL_KI_KI_MASK 0x0003FFFFu
+/* +0x48 LDPC_MAX_IT (rw): LDPC iteration limit */
+#define DVBS2_RX_SLOT_LDPC_MAX_IT_OFF 0x48
+#define DVBS2_RX_SLOT_LDPC_MAX_IT(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_LDPC_MAX_IT_OFF)
+/*   [5:0] MAX_IT: Iterations, 1..63 */
+#define DVBS2_RX_SLOT_LDPC_MAX_IT_MAX_IT_SHIFT 0
+#define DVBS2_RX_SLOT_LDPC_MAX_IT_MAX_IT_WIDTH 6
+#define DVBS2_RX_SLOT_LDPC_MAX_IT_MAX_IT_MASK 0x0000003Fu
+/* +0x4C DDC_CIC (rw): DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D */
+#define DVBS2_RX_SLOT_DDC_CIC_OFF 0x4C
+#define DVBS2_RX_SLOT_DDC_CIC(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_CIC_OFF)
+/*   [5:0] R: CIC decimation R: 0 or 1 = no CIC, 2..32 */
+#define DVBS2_RX_SLOT_DDC_CIC_R_SHIFT 0
+#define DVBS2_RX_SLOT_DDC_CIC_R_WIDTH 6
+#define DVBS2_RX_SLOT_DDC_CIC_R_MASK 0x0000003Fu
+/*   [11:8] SHIFT: CIC output shift */
+#define DVBS2_RX_SLOT_DDC_CIC_SHIFT_SHIFT 8
+#define DVBS2_RX_SLOT_DDC_CIC_SHIFT_WIDTH 4
+#define DVBS2_RX_SLOT_DDC_CIC_SHIFT_MASK 0x00000F00u
+/* +0x50 IN_OVERFLOWS (ro): 2-sps samples lost at the slot's input FIFO */
+#define DVBS2_RX_SLOT_IN_OVERFLOWS_OFF 0x50
+#define DVBS2_RX_SLOT_IN_OVERFLOWS(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_IN_OVERFLOWS_OFF)
+/* +0x54 DDC_DROPPED (ro): DDC outputs lost (input too fast for the taps) */
+#define DVBS2_RX_SLOT_DDC_DROPPED_OFF 0x54
+#define DVBS2_RX_SLOT_DDC_DROPPED(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_DDC_DROPPED_OFF)
+/* +0x58 AGC_GAIN (ro): Digital AGC gain, Q5.12 */
+#define DVBS2_RX_SLOT_AGC_GAIN_OFF 0x58
+#define DVBS2_RX_SLOT_AGC_GAIN(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_AGC_GAIN_OFF)
+/* +0x5C TIMING_INTEG (rw): Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the slot's reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200) */
+#define DVBS2_RX_SLOT_TIMING_INTEG_OFF 0x5C
+#define DVBS2_RX_SLOT_TIMING_INTEG(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_TIMING_INTEG_OFF)
+/* +0x60 FS_STATE (ro): Frame sync state */
+#define DVBS2_RX_SLOT_FS_STATE_OFF 0x60
+#define DVBS2_RX_SLOT_FS_STATE(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FS_STATE_OFF)
+/*   [1:0] STATE: State */
+#define DVBS2_RX_SLOT_FS_STATE_STATE_SHIFT 0
+#define DVBS2_RX_SLOT_FS_STATE_STATE_WIDTH 2
+#define DVBS2_RX_SLOT_FS_STATE_STATE_MASK 0x00000003u
+#define DVBS2_RX_SLOT_FS_STATE_STATE_SEARCH 0
+#define DVBS2_RX_SLOT_FS_STATE_STATE_CHECK 1
+#define DVBS2_RX_SLOT_FS_STATE_STATE_LOCKED 2
+/* +0x64 FS_FOUND (ro): Frame sync: headers found */
+#define DVBS2_RX_SLOT_FS_FOUND_OFF 0x64
+#define DVBS2_RX_SLOT_FS_FOUND(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FS_FOUND_OFF)
+/* +0x68 FS_FLYWHEEL (ro): Frame sync: flywheel frames */
+#define DVBS2_RX_SLOT_FS_FLYWHEEL_OFF 0x68
+#define DVBS2_RX_SLOT_FS_FLYWHEEL(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FS_FLYWHEEL_OFF)
+/* +0x6C FS_LOST (ro): Frame sync: locks lost (MAXMISS misses in a row, or from 1.4 three tagged headers in a row without a confident PLS decode of the configured code or a dummy header) */
+#define DVBS2_RX_SLOT_FS_LOST_OFF 0x6C
+#define DVBS2_RX_SLOT_FS_LOST(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FS_LOST_OFF)
+/* +0x70 FREQ (ro): Carrier frequency, turns * 2^32 per symbol (signed) */
+#define DVBS2_RX_SLOT_FREQ_OFF 0x70
+#define DVBS2_RX_SLOT_FREQ(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FREQ_OFF)
+/* +0x74 AMP (ro): Mean symbol amplitude */
+#define DVBS2_RX_SLOT_AMP_OFF 0x74
+#define DVBS2_RX_SLOT_AMP(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_AMP_OFF)
+/* +0x78 ENERGY (ro): Mean symbol energy, bits [35:4] (multiply by 16) */
+#define DVBS2_RX_SLOT_ENERGY_OFF 0x78
+#define DVBS2_RX_SLOT_ENERGY(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_ENERGY_OFF)
+/* +0x7C LLR_GAIN (ro): LLR scaling gain */
+#define DVBS2_RX_SLOT_LLR_GAIN_OFF 0x7C
+#define DVBS2_RX_SLOT_LLR_GAIN(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_LLR_GAIN_OFF)
+/* +0x80 FRAMES (ro): Data frames demodulated */
+#define DVBS2_RX_SLOT_FRAMES_OFF 0x80
+#define DVBS2_RX_SLOT_FRAMES(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_FRAMES_OFF)
+/* +0x84 LDPC_FRAMES (ro): Frames of the slot LDPC decoded */
+#define DVBS2_RX_SLOT_LDPC_FRAMES_OFF 0x84
+#define DVBS2_RX_SLOT_LDPC_FRAMES(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_LDPC_FRAMES_OFF)
+/* +0x88 LDPC_FAILED (ro): Frames where LDPC did not converge */
+#define DVBS2_RX_SLOT_LDPC_FAILED_OFF 0x88
+#define DVBS2_RX_SLOT_LDPC_FAILED(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_LDPC_FAILED_OFF)
+/* +0x8C PKT_DROPPED (ro): Frames of the slot that found both packet slots full */
+#define DVBS2_RX_SLOT_PKT_DROPPED_OFF 0x8C
+#define DVBS2_RX_SLOT_PKT_DROPPED(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PKT_DROPPED_OFF)
+/* +0x90 PKT_SENT (ro): Packets of the slot sent to the DMA */
+#define DVBS2_RX_SLOT_PKT_SENT_OFF 0x90
+#define DVBS2_RX_SLOT_PKT_SENT(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PKT_SENT_OFF)
+/* +0x94 CARRIER_ACQ (ro): Carrier acquisition counters */
+#define DVBS2_RX_SLOT_CARRIER_ACQ_OFF 0x94
+#define DVBS2_RX_SLOT_CARRIER_ACQ(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_CARRIER_ACQ_OFF)
+/*   [15:0] ACQ: Frequency acquisitions */
+#define DVBS2_RX_SLOT_CARRIER_ACQ_ACQ_SHIFT 0
+#define DVBS2_RX_SLOT_CARRIER_ACQ_ACQ_WIDTH 16
+#define DVBS2_RX_SLOT_CARRIER_ACQ_ACQ_MASK 0x0000FFFFu
+/*   [31:16] FALSE_LOCK: 1/1476 false-lock corrections */
+#define DVBS2_RX_SLOT_CARRIER_ACQ_FALSE_LOCK_SHIFT 16
+#define DVBS2_RX_SLOT_CARRIER_ACQ_FALSE_LOCK_WIDTH 16
+#define DVBS2_RX_SLOT_CARRIER_ACQ_FALSE_LOCK_MASK 0xFFFF0000u
+/* +0x98 CARRIER_RETYPE (ro): Coherent frame-type decision counter */
+#define DVBS2_RX_SLOT_CARRIER_RETYPE_OFF 0x98
+#define DVBS2_RX_SLOT_CARRIER_RETYPE(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_CARRIER_RETYPE_OFF)
+/*   [15:0] RETYPE: Frame types changed by the coherent decision */
+#define DVBS2_RX_SLOT_CARRIER_RETYPE_RETYPE_SHIFT 0
+#define DVBS2_RX_SLOT_CARRIER_RETYPE_RETYPE_WIDTH 16
+#define DVBS2_RX_SLOT_CARRIER_RETYPE_RETYPE_MASK 0x0000FFFFu
+/* +0x9C BCH (ro): BCH decoder counters */
+#define DVBS2_RX_SLOT_BCH_OFF 0x9C
+#define DVBS2_RX_SLOT_BCH(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_BCH_OFF)
+/*   [15:0] CORRECTED: Frames corrected */
+#define DVBS2_RX_SLOT_BCH_CORRECTED_SHIFT 0
+#define DVBS2_RX_SLOT_BCH_CORRECTED_WIDTH 16
+#define DVBS2_RX_SLOT_BCH_CORRECTED_MASK 0x0000FFFFu
+/*   [31:16] FAILED: Frames not decodable */
+#define DVBS2_RX_SLOT_BCH_FAILED_SHIFT 16
+#define DVBS2_RX_SLOT_BCH_FAILED_WIDTH 16
+#define DVBS2_RX_SLOT_BCH_FAILED_MASK 0xFFFF0000u
+/* +0xA0 SNAP_CTRL (rw): As SNAP_CTRL (0x2A0), the slot being s: a write sets SNAP_CTRL.SLOT = s */
+#define DVBS2_RX_SLOT_SNAP_CTRL_OFF 0xA0
+#define DVBS2_RX_SLOT_SNAP_CTRL(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_SNAP_CTRL_OFF)
+/*   [0] ARM (wo): Arm: capture the next 1024 symbols */
+#define DVBS2_RX_SLOT_SNAP_CTRL_ARM_SHIFT 0
+#define DVBS2_RX_SLOT_SNAP_CTRL_ARM_WIDTH 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_ARM_MASK 0x00000001u
+/*   [1] SOURCE (wo): Source of the capture */
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_SHIFT 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_WIDTH 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_MASK 0x00000002u
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_CARRIER 0
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_TIMING 1
+/*   [0] BUSY (ro): Capture running */
+#define DVBS2_RX_SLOT_SNAP_CTRL_BUSY_SHIFT 0
+#define DVBS2_RX_SLOT_SNAP_CTRL_BUSY_WIDTH 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_BUSY_MASK 0x00000001u
+/*   [1] DONE (ro): Capture complete */
+#define DVBS2_RX_SLOT_SNAP_CTRL_DONE_SHIFT 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_DONE_WIDTH 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_DONE_MASK 0x00000002u
+/*   [2] SOURCE_RD (ro): Source of the capture (as written to SOURCE) */
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_RD_SHIFT 2
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_RD_WIDTH 1
+#define DVBS2_RX_SLOT_SNAP_CTRL_SOURCE_RD_MASK 0x00000004u
+/* +0xA4 SNAP_ADDR (rw): As SNAP_ADDR (0x2A4) */
+#define DVBS2_RX_SLOT_SNAP_ADDR_OFF 0xA4
+#define DVBS2_RX_SLOT_SNAP_ADDR(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_SNAP_ADDR_OFF)
+/*   [9:0] ADDR: Symbol index */
+#define DVBS2_RX_SLOT_SNAP_ADDR_ADDR_SHIFT 0
+#define DVBS2_RX_SLOT_SNAP_ADDR_ADDR_WIDTH 10
+#define DVBS2_RX_SLOT_SNAP_ADDR_ADDR_MASK 0x000003FFu
+/* +0xA8 SNAP_DATA (ro): As SNAP_DATA (0x2A8) */
+#define DVBS2_RX_SLOT_SNAP_DATA_OFF 0xA8
+#define DVBS2_RX_SLOT_SNAP_DATA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_SNAP_DATA_OFF)
+/*   [15:0] I, signed: In-phase */
+#define DVBS2_RX_SLOT_SNAP_DATA_I_SHIFT 0
+#define DVBS2_RX_SLOT_SNAP_DATA_I_WIDTH 16
+#define DVBS2_RX_SLOT_SNAP_DATA_I_MASK 0x0000FFFFu
+/*   [31:16] Q, signed: Quadrature */
+#define DVBS2_RX_SLOT_SNAP_DATA_Q_SHIFT 16
+#define DVBS2_RX_SLOT_SNAP_DATA_Q_WIDTH 16
+#define DVBS2_RX_SLOT_SNAP_DATA_Q_MASK 0xFFFF0000u
+/* +0xAC RAW_ERR (ro): Pre-FEC bit errors (channel hard decisions vs. the decoded frame, Kldpc bits of each BCH-good frame), wraps */
+#define DVBS2_RX_SLOT_RAW_ERR_OFF 0xAC
+#define DVBS2_RX_SLOT_RAW_ERR(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_RAW_ERR_OFF)
+/* +0xB0 RAW_BITS (ro): Bits counted in RAW_ERR, wraps */
+#define DVBS2_RX_SLOT_RAW_BITS_OFF 0xB0
+#define DVBS2_RX_SLOT_RAW_BITS(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_RAW_BITS_OFF)
+/* +0xB4 BCH_BITERR (ro): Bit errors corrected by BCH (post-LDPC errors), wraps */
+#define DVBS2_RX_SLOT_BCH_BITERR_OFF 0xB4
+#define DVBS2_RX_SLOT_BCH_BITERR(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_BCH_BITERR_OFF)
+/* +0xB8 PLS_LAST (ro): PLS decoder: the last decoded PLHEADER (data or dummy) */
+#define DVBS2_RX_SLOT_PLS_LAST_OFF 0xB8
+#define DVBS2_RX_SLOT_PLS_LAST(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_LAST_OFF)
 /*   [4:0] MODCOD: MODCOD (0 = dummy frame) */
-#define DVBS2_RX_PLS_LAST_MODCOD_SHIFT 0
-#define DVBS2_RX_PLS_LAST_MODCOD_WIDTH 5
-#define DVBS2_RX_PLS_LAST_MODCOD_MASK 0x0000001Fu
+#define DVBS2_RX_SLOT_PLS_LAST_MODCOD_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_LAST_MODCOD_WIDTH 5
+#define DVBS2_RX_SLOT_PLS_LAST_MODCOD_MASK 0x0000001Fu
 /*   [8] PILOTS: Pilots on */
-#define DVBS2_RX_PLS_LAST_PILOTS_SHIFT 8
-#define DVBS2_RX_PLS_LAST_PILOTS_WIDTH 1
-#define DVBS2_RX_PLS_LAST_PILOTS_MASK 0x00000100u
+#define DVBS2_RX_SLOT_PLS_LAST_PILOTS_SHIFT 8
+#define DVBS2_RX_SLOT_PLS_LAST_PILOTS_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_PILOTS_MASK 0x00000100u
 /*   [9] SHORT: Short frame */
-#define DVBS2_RX_PLS_LAST_SHORT_SHIFT 9
-#define DVBS2_RX_PLS_LAST_SHORT_WIDTH 1
-#define DVBS2_RX_PLS_LAST_SHORT_MASK 0x00000200u
+#define DVBS2_RX_SLOT_PLS_LAST_SHORT_SHIFT 9
+#define DVBS2_RX_SLOT_PLS_LAST_SHORT_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_SHORT_MASK 0x00000200u
 /*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
-#define DVBS2_RX_PLS_LAST_CONF_SHIFT 12
-#define DVBS2_RX_PLS_LAST_CONF_WIDTH 1
-#define DVBS2_RX_PLS_LAST_CONF_MASK 0x00001000u
+#define DVBS2_RX_SLOT_PLS_LAST_CONF_SHIFT 12
+#define DVBS2_RX_SLOT_PLS_LAST_CONF_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_CONF_MASK 0x00001000u
 /*   [13] CARRIER: Decided at the carrier's frequency */
-#define DVBS2_RX_PLS_LAST_CARRIER_SHIFT 13
-#define DVBS2_RX_PLS_LAST_CARRIER_WIDTH 1
-#define DVBS2_RX_PLS_LAST_CARRIER_MASK 0x00002000u
+#define DVBS2_RX_SLOT_PLS_LAST_CARRIER_SHIFT 13
+#define DVBS2_RX_SLOT_PLS_LAST_CARRIER_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_CARRIER_MASK 0x00002000u
 /*   [14] GRID: The frequency grid was searched */
-#define DVBS2_RX_PLS_LAST_GRID_SHIFT 14
-#define DVBS2_RX_PLS_LAST_GRID_WIDTH 1
-#define DVBS2_RX_PLS_LAST_GRID_MASK 0x00004000u
+#define DVBS2_RX_SLOT_PLS_LAST_GRID_SHIFT 14
+#define DVBS2_RX_SLOT_PLS_LAST_GRID_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_GRID_MASK 0x00004000u
 /*   [15] VALID: A decode since reset */
-#define DVBS2_RX_PLS_LAST_VALID_SHIFT 15
-#define DVBS2_RX_PLS_LAST_VALID_WIDTH 1
-#define DVBS2_RX_PLS_LAST_VALID_MASK 0x00008000u
+#define DVBS2_RX_SLOT_PLS_LAST_VALID_SHIFT 15
+#define DVBS2_RX_SLOT_PLS_LAST_VALID_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_VALID_MASK 0x00008000u
 /*   [31:16] COUNT: Decodes (wraps) */
-#define DVBS2_RX_PLS_LAST_COUNT_SHIFT 16
-#define DVBS2_RX_PLS_LAST_COUNT_WIDTH 16
-#define DVBS2_RX_PLS_LAST_COUNT_MASK 0xFFFF0000u
-/* PLS_DATA (ro): PLS decoder: the last confident decode of a data header (MODCOD != 0) */
-#define DVBS2_RX_PLS_DATA 0x0BC
+#define DVBS2_RX_SLOT_PLS_LAST_COUNT_SHIFT 16
+#define DVBS2_RX_SLOT_PLS_LAST_COUNT_WIDTH 16
+#define DVBS2_RX_SLOT_PLS_LAST_COUNT_MASK 0xFFFF0000u
+/* +0xBC PLS_DATA (ro): PLS decoder: the last confident decode of a data header (MODCOD != 0) */
+#define DVBS2_RX_SLOT_PLS_DATA_OFF 0xBC
+#define DVBS2_RX_SLOT_PLS_DATA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_DATA_OFF)
 /*   [4:0] MODCOD: MODCOD (0 = dummy frame) */
-#define DVBS2_RX_PLS_DATA_MODCOD_SHIFT 0
-#define DVBS2_RX_PLS_DATA_MODCOD_WIDTH 5
-#define DVBS2_RX_PLS_DATA_MODCOD_MASK 0x0000001Fu
+#define DVBS2_RX_SLOT_PLS_DATA_MODCOD_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_DATA_MODCOD_WIDTH 5
+#define DVBS2_RX_SLOT_PLS_DATA_MODCOD_MASK 0x0000001Fu
 /*   [8] PILOTS: Pilots on */
-#define DVBS2_RX_PLS_DATA_PILOTS_SHIFT 8
-#define DVBS2_RX_PLS_DATA_PILOTS_WIDTH 1
-#define DVBS2_RX_PLS_DATA_PILOTS_MASK 0x00000100u
+#define DVBS2_RX_SLOT_PLS_DATA_PILOTS_SHIFT 8
+#define DVBS2_RX_SLOT_PLS_DATA_PILOTS_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_PILOTS_MASK 0x00000100u
 /*   [9] SHORT: Short frame */
-#define DVBS2_RX_PLS_DATA_SHORT_SHIFT 9
-#define DVBS2_RX_PLS_DATA_SHORT_WIDTH 1
-#define DVBS2_RX_PLS_DATA_SHORT_MASK 0x00000200u
+#define DVBS2_RX_SLOT_PLS_DATA_SHORT_SHIFT 9
+#define DVBS2_RX_SLOT_PLS_DATA_SHORT_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_SHORT_MASK 0x00000200u
 /*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
-#define DVBS2_RX_PLS_DATA_CONF_SHIFT 12
-#define DVBS2_RX_PLS_DATA_CONF_WIDTH 1
-#define DVBS2_RX_PLS_DATA_CONF_MASK 0x00001000u
+#define DVBS2_RX_SLOT_PLS_DATA_CONF_SHIFT 12
+#define DVBS2_RX_SLOT_PLS_DATA_CONF_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_CONF_MASK 0x00001000u
 /*   [13] CARRIER: Decided at the carrier's frequency */
-#define DVBS2_RX_PLS_DATA_CARRIER_SHIFT 13
-#define DVBS2_RX_PLS_DATA_CARRIER_WIDTH 1
-#define DVBS2_RX_PLS_DATA_CARRIER_MASK 0x00002000u
+#define DVBS2_RX_SLOT_PLS_DATA_CARRIER_SHIFT 13
+#define DVBS2_RX_SLOT_PLS_DATA_CARRIER_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_CARRIER_MASK 0x00002000u
 /*   [14] GRID: The frequency grid was searched */
-#define DVBS2_RX_PLS_DATA_GRID_SHIFT 14
-#define DVBS2_RX_PLS_DATA_GRID_WIDTH 1
-#define DVBS2_RX_PLS_DATA_GRID_MASK 0x00004000u
+#define DVBS2_RX_SLOT_PLS_DATA_GRID_SHIFT 14
+#define DVBS2_RX_SLOT_PLS_DATA_GRID_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_GRID_MASK 0x00004000u
 /*   [15] VALID: A decode since reset */
-#define DVBS2_RX_PLS_DATA_VALID_SHIFT 15
-#define DVBS2_RX_PLS_DATA_VALID_WIDTH 1
-#define DVBS2_RX_PLS_DATA_VALID_MASK 0x00008000u
+#define DVBS2_RX_SLOT_PLS_DATA_VALID_SHIFT 15
+#define DVBS2_RX_SLOT_PLS_DATA_VALID_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_VALID_MASK 0x00008000u
 /*   [31:16] COUNT: Confident data decodes (wraps) */
-#define DVBS2_RX_PLS_DATA_COUNT_SHIFT 16
-#define DVBS2_RX_PLS_DATA_COUNT_WIDTH 16
-#define DVBS2_RX_PLS_DATA_COUNT_MASK 0xFFFF0000u
-/* PLS_FREQ (ro): Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ */
-#define DVBS2_RX_PLS_FREQ 0x0C0
-/* PLS_BEST (ro): Metric of the best code of the last decode */
-#define DVBS2_RX_PLS_BEST 0x0C4
+#define DVBS2_RX_SLOT_PLS_DATA_COUNT_SHIFT 16
+#define DVBS2_RX_SLOT_PLS_DATA_COUNT_WIDTH 16
+#define DVBS2_RX_SLOT_PLS_DATA_COUNT_MASK 0xFFFF0000u
+/* +0xC0 PLS_FREQ (ro): Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ */
+#define DVBS2_RX_SLOT_PLS_FREQ_OFF 0xC0
+#define DVBS2_RX_SLOT_PLS_FREQ(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_FREQ_OFF)
+/* +0xC4 PLS_BEST (ro): Metric of the best code of the last decode */
+#define DVBS2_RX_SLOT_PLS_BEST_OFF 0xC4
+#define DVBS2_RX_SLOT_PLS_BEST(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_BEST_OFF)
 /*   [17:0] METRIC: A header at -3 dB gives >= ~300, noise alone <= ~220 */
-#define DVBS2_RX_PLS_BEST_METRIC_SHIFT 0
-#define DVBS2_RX_PLS_BEST_METRIC_WIDTH 18
-#define DVBS2_RX_PLS_BEST_METRIC_MASK 0x0003FFFFu
-/* PLS_SECOND (ro): Metric of the best other code at the same frequency */
-#define DVBS2_RX_PLS_SECOND 0x0C8
+#define DVBS2_RX_SLOT_PLS_BEST_METRIC_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_BEST_METRIC_WIDTH 18
+#define DVBS2_RX_SLOT_PLS_BEST_METRIC_MASK 0x0003FFFFu
+/* +0xC8 PLS_SECOND (ro): Metric of the best other code at the same frequency */
+#define DVBS2_RX_SLOT_PLS_SECOND_OFF 0xC8
+#define DVBS2_RX_SLOT_PLS_SECOND(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_SECOND_OFF)
 /*   [17:0] METRIC: Metric */
-#define DVBS2_RX_PLS_SECOND_METRIC_SHIFT 0
-#define DVBS2_RX_PLS_SECOND_METRIC_WIDTH 18
-#define DVBS2_RX_PLS_SECOND_METRIC_MASK 0x0003FFFFu
-/* PLS_DIFF (ro): Confident data decodes that differ from the configuration (wrap) */
-#define DVBS2_RX_PLS_DIFF 0x0CC
+#define DVBS2_RX_SLOT_PLS_SECOND_METRIC_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_SECOND_METRIC_WIDTH 18
+#define DVBS2_RX_SLOT_PLS_SECOND_METRIC_MASK 0x0003FFFFu
+/* +0xCC PLS_DIFF (ro): Confident data decodes that differ from the configuration (wrap) */
+#define DVBS2_RX_SLOT_PLS_DIFF_OFF 0xCC
+#define DVBS2_RX_SLOT_PLS_DIFF(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_DIFF_OFF)
 /*   [15:0] MODCOD: MODCOD or frame size differs from the configured one */
-#define DVBS2_RX_PLS_DIFF_MODCOD_SHIFT 0
-#define DVBS2_RX_PLS_DIFF_MODCOD_WIDTH 16
-#define DVBS2_RX_PLS_DIFF_MODCOD_MASK 0x0000FFFFu
+#define DVBS2_RX_SLOT_PLS_DIFF_MODCOD_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_DIFF_MODCOD_WIDTH 16
+#define DVBS2_RX_SLOT_PLS_DIFF_MODCOD_MASK 0x0000FFFFu
 /*   [31:16] PILOTS: Pilots differ from the configured setting */
-#define DVBS2_RX_PLS_DIFF_PILOTS_SHIFT 16
-#define DVBS2_RX_PLS_DIFF_PILOTS_WIDTH 16
-#define DVBS2_RX_PLS_DIFF_PILOTS_MASK 0xFFFF0000u
-/* PLS_SEEN (w1c): Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins */
-#define DVBS2_RX_PLS_SEEN 0x0D0
-/* PLS_CFG (rw): PLS frequency grid searched when the carrier's frequency gives no confident decode */
-#define DVBS2_RX_PLS_CFG 0x0D4
+#define DVBS2_RX_SLOT_PLS_DIFF_PILOTS_SHIFT 16
+#define DVBS2_RX_SLOT_PLS_DIFF_PILOTS_WIDTH 16
+#define DVBS2_RX_SLOT_PLS_DIFF_PILOTS_MASK 0xFFFF0000u
+/* +0xD0 PLS_SEEN (w1c): Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins */
+#define DVBS2_RX_SLOT_PLS_SEEN_OFF 0xD0
+#define DVBS2_RX_SLOT_PLS_SEEN(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_SEEN_OFF)
+/* +0xD4 PLS_CFG (rw): PLS frequency grid searched when the carrier's frequency gives no confident decode */
+#define DVBS2_RX_SLOT_PLS_CFG_OFF 0xD4
+#define DVBS2_RX_SLOT_PLS_CFG(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_CFG_OFF)
 /*   [5:0] H: Grid half width: hypotheses h x STEP, h = -H..H (reset 32) */
-#define DVBS2_RX_PLS_CFG_H_SHIFT 0
-#define DVBS2_RX_PLS_CFG_H_WIDTH 6
-#define DVBS2_RX_PLS_CFG_H_MASK 0x0000003Fu
+#define DVBS2_RX_SLOT_PLS_CFG_H_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_CFG_H_WIDTH 6
+#define DVBS2_RX_SLOT_PLS_CFG_H_MASK 0x0000003Fu
 /*   [25:16] STEP: Grid step, turns x 2^16 per symbol (reset 262, ~0.004) */
-#define DVBS2_RX_PLS_CFG_STEP_SHIFT 16
-#define DVBS2_RX_PLS_CFG_STEP_WIDTH 10
-#define DVBS2_RX_PLS_CFG_STEP_MASK 0x03FF0000u
-/* PLS_SKIPPED (ro): Headers not decoded because the decoder was still busy */
-#define DVBS2_RX_PLS_SKIPPED 0x0D8
+#define DVBS2_RX_SLOT_PLS_CFG_STEP_SHIFT 16
+#define DVBS2_RX_SLOT_PLS_CFG_STEP_WIDTH 10
+#define DVBS2_RX_SLOT_PLS_CFG_STEP_MASK 0x03FF0000u
+/* +0xD8 PLS_SKIPPED (ro): Headers not decoded because the decoder was still busy */
+#define DVBS2_RX_SLOT_PLS_SKIPPED_OFF 0xD8
+#define DVBS2_RX_SLOT_PLS_SKIPPED(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_PLS_SKIPPED_OFF)
 /*   [15:0] COUNT: Headers (wraps) */
-#define DVBS2_RX_PLS_SKIPPED_COUNT_SHIFT 0
-#define DVBS2_RX_PLS_SKIPPED_COUNT_WIDTH 16
-#define DVBS2_RX_PLS_SKIPPED_COUNT_MASK 0x0000FFFFu
+#define DVBS2_RX_SLOT_PLS_SKIPPED_COUNT_SHIFT 0
+#define DVBS2_RX_SLOT_PLS_SKIPPED_COUNT_WIDTH 16
+#define DVBS2_RX_SLOT_PLS_SKIPPED_COUNT_MASK 0x0000FFFFu
+/* +0xEC LLRQ_DROPPED (ro): Frames of the slot dropped because its ring was full (cleared by the slot's reset) */
+#define DVBS2_RX_SLOT_LLRQ_DROPPED_OFF 0xEC
+#define DVBS2_RX_SLOT_LLRQ_DROPPED(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_LLRQ_DROPPED_OFF)
+/*   [15:0] COUNT: Frames */
+#define DVBS2_RX_SLOT_LLRQ_DROPPED_COUNT_SHIFT 0
+#define DVBS2_RX_SLOT_LLRQ_DROPPED_COUNT_WIDTH 16
+#define DVBS2_RX_SLOT_LLRQ_DROPPED_COUNT_MASK 0x0000FFFFu
 
 /* DMA packet word HDR (64 bits): Word 0 of a DMA packet (64-bit words, byte 0 = [7:0]); BBFRAME bytes (BB-descrambled) from byte 8, then zeros */
 /*   [15:0] LEN: BBFRAME length in bytes (Kbch/8) */
 #define DVBS2_RX_PKT_HDR_LEN_SHIFT 0
 #define DVBS2_RX_PKT_HDR_LEN_WIDTH 16
 #define DVBS2_RX_PKT_HDR_LEN_MASK 0x000000000000FFFFULL
-/*   [31:16] COUNT: Frame counter */
+/*   [31:16] COUNT: Frame counter of the slot */
 #define DVBS2_RX_PKT_HDR_COUNT_SHIFT 16
 #define DVBS2_RX_PKT_HDR_COUNT_WIDTH 16
 #define DVBS2_RX_PKT_HDR_COUNT_MASK 0x00000000FFFF0000ULL
@@ -417,6 +598,10 @@
 #define DVBS2_RX_PKT_HDR_BCH_ERRORS_SHIFT 50
 #define DVBS2_RX_PKT_HDR_BCH_ERRORS_WIDTH 5
 #define DVBS2_RX_PKT_HDR_BCH_ERRORS_MASK 0x007C000000000000ULL
+/*   [55] SLOT: Receive slot */
+#define DVBS2_RX_PKT_HDR_SLOT_SHIFT 55
+#define DVBS2_RX_PKT_HDR_SLOT_WIDTH 1
+#define DVBS2_RX_PKT_HDR_SLOT_MASK 0x0080000000000000ULL
 /*   [63:56] MAGIC: 0xB5 (HDR_MAGIC) */
 #define DVBS2_RX_PKT_HDR_MAGIC_SHIFT 56
 #define DVBS2_RX_PKT_HDR_MAGIC_WIDTH 8

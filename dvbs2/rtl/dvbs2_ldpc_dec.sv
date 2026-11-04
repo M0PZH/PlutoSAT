@@ -9,6 +9,13 @@
 //
 // Input: 32400 words of two LLRs (bit 2i from I, 2i+1 from Q) per frame, as
 // produced by dvbs2_rx_carrier, clipped to +-LD_LCH; s_first restarts a frame.
+// Per frame (sampled on its first word, i.e. with s_first or the word after
+// the previous frame's last): the code rate s_rate, the iteration limit s_max_it and an
+// opaque tag s_tag ({slot, MODCOD, pilots} in dvbs2_rx), which come out
+// again with the frame's bytes (m_rate, m_tag). Each of the two APP buffers
+// keeps its frame's values, so consecutive frames may have different rates.
+// it_cap_en / it_cap (live, from the LLR queue): stop at it_cap iterations
+// as well, checked at the end of each iteration.
 //
 // Clocks per iteration: sum over the q*S sub-steps of 2*deg + ~14, about
 // 50k for every rate (e.g. 1/2: 1800 sub-steps x 28).
@@ -16,19 +23,23 @@
 module dvbs2_ldpc_dec
   import dvbs2_ldpc_dec_pkg::*;
 #(
-  parameter string ROM_FILE = "ldpc_dec_rom.mem"
+  parameter string ROM_FILE = "ldpc_dec_rom.mem",
+  parameter int    TW       = 8      // tag width
 ) (
   input  logic        clk,
   input  logic        rst,
-
-  input  logic [3:0]  rate_idx,      // static while running
-  input  logic [5:0]  max_it,
 
   input  logic        s_valid,
   output logic        s_ready,
   input  logic [7:0]  s_llr_i,
   input  logic [7:0]  s_llr_q,
   input  logic        s_first,
+  input  logic [3:0]  s_rate,        // per frame: code rate 0..10 (MODCOD 1..11)
+  input  logic [5:0]  s_max_it,      // per frame: iteration limit
+  input  logic [TW-1:0] s_tag,       // per frame: carried to m_tag
+
+  input  logic        it_cap_en,     // live: also stop after it_cap iterations
+  input  logic [5:0]  it_cap,
 
   output logic        m_valid,
   input  logic        m_ready,
@@ -37,6 +48,8 @@ module dvbs2_ldpc_dec
   output logic        m_ok,
   output logic [5:0]  m_iters,
   output logic [7:0]  m_chan,
+  output logic [3:0]  m_rate,
+  output logic [TW-1:0] m_tag,
 
   output logic [15:0] st_frames,
   output logic [15:0] st_failed
@@ -48,18 +61,31 @@ module dvbs2_ldpc_dec
   localparam int AW = 12;
   localparam int SD = 15840;         // sign memory depth: max q * S * deg
 
-  // ------------------------------------------------------------ rate parameters
+  // ------------------------------------------------------------ per-frame parameters
+  // one set per APP buffer, written with the frame's first word
+  logic [3:0]    f_rate  [2];
+  logic [5:0]    f_maxit [2];
+  logic [TW-1:0] f_tag   [2];
+  logic          ib, db;                   // input buffer, decoder buffer
+
+  // the decoder's rate (buffer db) and the input writer's (buffer ib)
   logic [7:0]  q, ng;
   logic [4:0]  deg;
   logic [12:0] rbase;
-  logic [15:0] kbch, kldpc;
+  logic [15:0] kldpc;
+  logic [5:0]  max_it;
+  logic [7:0]  iw_rq, iw_rng;
+  logic [15:0] iw_rkldpc;
   always_ff @(posedge clk) begin
-    q     <= 8'(LD_Q[rate_idx]);
-    ng    <= 8'(LD_NG[rate_idx]);
-    deg   <= 5'(LD_DEG[rate_idx]);
-    rbase <= 13'(LD_BASE[rate_idx]);
-    kbch  <= LD_KBCH[rate_idx];
-    kldpc <= LD_KLDPC[rate_idx];
+    q      <= 8'(LD_Q[f_rate[db]]);
+    ng     <= 8'(LD_NG[f_rate[db]]);
+    deg    <= 5'(LD_DEG[f_rate[db]]);
+    rbase  <= 13'(LD_BASE[f_rate[db]]);
+    kldpc  <= LD_KLDPC[f_rate[db]];
+    max_it <= f_maxit[db];
+    iw_rq     <= 8'(LD_Q[f_rate[ib]]);
+    iw_rng    <= 8'(LD_NG[f_rate[ib]]);
+    iw_rkldpc <= LD_KLDPC[f_rate[ib]];
   end
 
   function automatic logic [AW-1:0] gs(input logic [7:0] g);   // g * S
@@ -105,7 +131,6 @@ module dvbs2_ldpc_dec
 
   typedef enum logic [1:0] {B_FREE, B_FULL, B_DEC} bst_t;
   bst_t bst [2];
-  logic ib, db;
   logic in_done, dec_done;
 
   typedef enum logic [3:0] {D_IDLE, D_ITER, D_LOAD, D_SUB, D_SUB2, D_A, D_AEND, D_B, D_NEXT,
@@ -289,6 +314,14 @@ module dvbs2_ldpc_dec
         iw_q <= s_llr_q;
         iw_phase <= 1'b1;
         restart = s_first;
+        // a frame's first word: its parameters. The writer's rate registers
+        // (iw_r*) follow two clocks later; the first use is at bit Kldpc - 1.
+        // ib's buffer is free, so the decoder does not use these now.
+        if (s_first || iw_n == 0) begin
+          f_rate[ib]  <= s_rate;
+          f_maxit[ib] <= s_max_it;
+          f_tag[ib]   <= s_tag;
+        end
       end else if (iw_phase) begin
         take = 1'b1;
         iw_phase <= 1'b0;
@@ -320,17 +353,17 @@ module dvbs2_ldpc_dec
           in_done <= 1'b1;
         end else begin
           iw_n <= n + 17'd1;
-          if (!par && n + 17'd1 == 17'(kldpc)) begin
+          if (!par && n + 17'd1 == 17'(iw_rkldpc)) begin
             // first parity bit: parity group 0, m = 0
-            iw_par <= 1'b1; iw_g <= '0; iw_m <= '0; iw_w <= '0; iw_lane <= '0; iw_base <= gs(ng);
+            iw_par <= 1'b1; iw_g <= '0; iw_m <= '0; iw_w <= '0; iw_lane <= '0; iw_base <= gs(iw_rng);
           end else if (!par && mm == 9'd359) begin
             iw_par <= 1'b0; iw_g <= g + 8'd1; iw_m <= '0; iw_w <= '0; iw_lane <= '0; iw_base <= base + AW'(S);
-          end else if (!par || g == q - 8'd1) begin
+          end else if (!par || g == iw_rq - 8'd1) begin
             // next m (info: same group; parity: back to parity group 0)
             iw_par <= par;
             iw_g <= par ? 8'd0 : g;
             iw_m <= mm + 9'd1;
-            iw_base <= par ? gs(ng) : base;
+            iw_base <= par ? gs(iw_rng) : base;
             if (w == 5'(S - 1)) begin iw_w <= '0; iw_lane <= ln + 5'd1; end
             else begin iw_w <= w + 5'd1; iw_lane <= ln; end
           end else begin
@@ -554,7 +587,7 @@ module dvbs2_ldpc_dec
           if (!unsat && !flips) begin
             conv <= 1'b1;
             dst <= D_OUT;
-          end else if (it == max_it) begin
+          end else if (it == max_it || (it_cap_en && it >= it_cap)) begin
             conv <= 1'b0;
             dst <= D_OUT;
           end else dst <= D_ITER;
@@ -604,6 +637,8 @@ module dvbs2_ldpc_dec
             m_last  <= last;
             m_ok    <= conv;
             m_iters <= it;
+            m_rate  <= f_rate[db];
+            m_tag   <= f_tag[db];
             obits <= obits + 16'd8;
             if (last) begin
               st_frames <= st_frames + 16'd1;

@@ -3,7 +3,8 @@
 
   - reserved-memory (no-map) for the DMA buffers at the top of RAM:
       dvbs2-tx 16 MB @ 0x3F000000, dvbs2-rx 1 MB @ 0x3EF00000,
-      nbiq 4 MB @ 0x3EB00000, fft 1 MB @ 0x3EA00000
+      nbiq 4 MB @ 0x3EB00000, fft 1 MB @ 0x3EA00000, and the DVB-S2
+      receiver's LDPC LLR frame queue 2 MB @ 0x3E800000 (PL only, S_AXI_HP1)
   - generic-uio nodes under fpga-axi@0 for dvbs2-tx, dvbs2-rx, nbiq,
     rx-awgn and fft (the same as boards/fishball/linux/zynq-fishball-sdr-7020.dts)
   - no IIO streaming: the PlutoSAT PL has no axi_ad9361 ADC/DAC DMAs and no
@@ -13,7 +14,8 @@
     probe without an IIO buffer)
 
 Everything else stays as it is. A blob patched by an earlier version gets
-what it lacks (e.g. the fft buffer, the DMA removal). Needs dtc.
+what it lacks (e.g. the fft buffer, the DMA removal, the LLR queue buffer).
+Needs dtc.
 
   dtb-add-plutosat.py IN.dtb OUT.dtb
 """
@@ -26,6 +28,7 @@ BUFFERS = [   # name, reg; in this order below the reserved-memory properties
     ("dvbs2-rx-buffer@3ef00000", "0x3ef00000 0x100000"),
     ("nbiq-buffer@3eb00000", "0x3eb00000 0x400000"),
     ("fft-buffer@3ea00000", "0x3ea00000 0x100000"),
+    ("dvbs2-llr-buffer@3e800000", "0x3e800000 0x200000"),
 ]
 
 UIO = """
@@ -38,7 +41,7 @@ UIO = """
 
 		dvbs2-rx@7c510000 {{
 			compatible = "generic-uio";
-			reg = <0x7c510000 0x10000 0x7c490000 0x10000 0x3ef00000 0x100000>;
+			reg = <0x7c510000 0x10000 0x7c490000 0x10000 0x3ef00000 0x100000 0x3e800000 0x200000>;
 			interrupt-parent = <{gic}>;
 			interrupts = <0x00 0x35 0x04>;
 		}};
@@ -67,6 +70,9 @@ UIO = """
 # (axi_fft_dma, S_AXI_HP3) and buffer as map1 / map2
 FFT_REG_OLD = "reg = <0x7c540000 0x10000>;"
 FFT_REG_NEW = "reg = <0x7c540000 0x10000 0x7c4a0000 0x10000 0x3ea00000 0x100000>;"
+# the dvbs2-rx node of earlier versions; now + the LLR queue rings as map3
+RX_REG_OLD = "reg = <0x7c510000 0x10000 0x7c490000 0x10000 0x3ef00000 0x100000>;"
+RX_REG_NEW = "reg = <0x7c510000 0x10000 0x7c490000 0x10000 0x3ef00000 0x100000 0x3e800000 0x200000>;"
 
 # IIO streaming nodes / properties that go
 DMA_NODES = ["dma@7c400000", "dma@7c420000"]
@@ -142,6 +148,10 @@ def main(src, dst):
     if span and FFT_REG_OLD in dts[span[0]:span[1]]:
         dts = dts[:span[0]] + dts[span[0]:span[1]].replace(FFT_REG_OLD, FFT_REG_NEW) + dts[span[1]:]
         done.append("fft@7c540000:dma+buffer")
+    span = node_span(dts, "dvbs2-rx@7c510000", 2)
+    if span and RX_REG_OLD in dts[span[0]:span[1]]:
+        dts = dts[:span[0]] + dts[span[0]:span[1]].replace(RX_REG_OLD, RX_REG_NEW) + dts[span[1]:]
+        done.append("dvbs2-rx@7c510000:llr-buffer")
 
     # no IIO streaming
     for name in DMA_NODES:

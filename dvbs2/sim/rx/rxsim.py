@@ -6,15 +6,15 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RTL = os.path.join(HERE, "..", "..", "rtl")
-BUILD = os.path.join(HERE, "build")
+BUILD = os.environ.get("RXSIM_BUILD", os.path.join(HERE, "build"))   # (one per parallel run)
 
 
-def build(top, sources, params=()):
+def build(top, sources, params=(), defines=()):
     obj = os.path.join(BUILD, top)
     os.makedirs(obj, exist_ok=True)
     cmd = ["verilator", "--binary", "--timing", "-j", "16", "-O3", "-Wno-fatal",
            "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "--top-module", top, "-Mdir", obj,
-           "-I" + RTL] + [f"-G{p}" for p in params] + \
+           "-I" + RTL] + [f"-G{p}" for p in params] + [f"-D{d}" for d in defines] + \
           [os.path.join(RTL, s) if not os.path.isabs(s) else s for s in sources]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
     return os.path.join(obj, "V" + top)

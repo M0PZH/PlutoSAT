@@ -26,6 +26,11 @@ if [ $IIO_DMA = 0 ] && { [ -e $DT/dma@7c400000 ] || [ -e $DT/dma@7c420000 ] || [
   echo "Update it (deploy.sh --boot) and reboot, or use --iio-dma for a bitstream that has them." >&2
   exit 1
 fi
+# the DVB-S2 receiver's LLR queue (LLRQ_CTRL, off by default) writes 2 MB at
+# 0x3E800000 through S_AXI_HP1: that memory must be reserved
+if [ ! -e /proc/device-tree/reserved-memory/dvbs2-llr-buffer@3e800000 ]; then
+  echo "warning: no dvbs2-llr-buffer@3e800000 in the device tree (deploy.sh --boot): keep the RX LLR queue off" >&2
+fi
 
 unb() { if [ -e $D/$1/$2 ]; then echo $2 > $D/$1/unbind; echo "unbound $2"; fi; }
 bnd() { echo $2 > $D/$1/bind; echo "bound $2"; }

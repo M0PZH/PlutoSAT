@@ -1,16 +1,29 @@
-# DVB-S2 receiver: AXI-Lite registers of dvbs2/rtl/dvbs2_rx_axi.sv.
-# One fixed-size DMA packet (PKT_BYTES, see [[packet]] HDR) per decoded
-# BBFRAME goes to an axi_dmac (map 1, stream -> memory).
+# DVB-S2 receiver, two receive slots: AXI-Lite registers of
+# dvbs2/rtl/dvbs2_rx_axi.sv (map v2: a bank per slot, SLOT[s] at 0x100 s,
+# holding the 1.x single-slot map for its slot; shared registers at 0x200).
+# One fixed-size DMA packet (PKT_BYTES, see [[packet]] HDR, SLOT bit) per
+# decoded BBFRAME of either slot goes to one axi_dmac (map 1, stream -> memory).
+# Map 3 (llrq): the LLR queue's 2 MB ring in DDR, used by the PL only.
 
 [core]
 name = "dvbs2_rx"
 title = "DVB-S2 receiver"
 uio = "dvbs2-rx"
 size = 0x10000
-id = { offset = 0x04, value = 0x44565232 }        # "DVR2"
-version = { offset = 0x00, value = 0x00010402 }
+id = { offset = 0x204, value = 0x44565232 }       # "DVR2"
+version = { offset = 0x200, value = 0x00020000 }
 rtl = "dvbs2/rtl/dvbs2_rx_axi.sv"
-maps = ["regs", "dmac", "buffer"]
+maps = ["regs", "dmac", "buffer", "llrq"]
+
+[[const]]
+name = "SLOTS"
+value = 2
+doc = "Receive slots (register banks SLOT[0..1], packet header bit SLOT)"
+
+[[const]]
+name = "LLRQ_BYTES"
+value = 0x200000
+doc = "LLR queue ring region (LLRQ_BASE, 2 MB aligned): slot s frame f at LLRQ_BASE + s x 1 MB + f x 64 KB"
 
 [[const]]
 name = "PKT_WORDS"
@@ -59,9 +72,9 @@ doc = "Symbols per constellation snapshot"
 
 [[reg]]
 name = "VERSION"
-offset = 0x00
+offset = 0x200
 access = "ro"
-doc = "Core version, 0x0001_0402 = 1.4.2: 1.4.1 with the LDPC decoder clipping channel LLRs to +-61 (a full-scale wrong parity bit, e.g. from an interference burst at high SNR, can be corrected); 0x0001_0401 = 1.4.1: 1.4 with a whole-frame search after a PLS drop (repeating data was found again a frame length apart and confirmed by the carrier); 0x0001_0400 = 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition (1.3: pilots-off carrier tracking and the PLS fix, frame sync checks every search peak at the data length; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither, 0xB8..0xD8 read 0, a TIMING_INTEG write is ignored; 1.0: no CIC, DDC_CIC reads 0)"
+doc = "Core version, 0x0002_0000 = 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -73,362 +86,52 @@ doc = "Core version, 0x0001_0402 = 1.4.2: 1.4.1 with the LDPC decoder clipping c
 
 [[reg]]
 name = "ID"
-offset = 0x04
+offset = 0x204
 access = "ro"
 doc = "Core identification \"DVR2\" (0x44565232)"
 
 [[reg]]
 name = "SCRATCH"
-offset = 0x08
+offset = 0x208
 access = "rw"
 reset = 0
-doc = "Scratch register, no function"
+doc = "Scratch register, no function (also at SLOT[s].SCRATCH)"
 
 [[reg]]
 name = "CTRL"
-offset = 0x10
+offset = 0x210
 access = "rw"
 reset = 0
-doc = "Control"
-  [[reg.field]]
-  name = "ENABLE"
-  bits = [0, 0]
-  doc = "Enable (take ADC samples)"
+doc = "Receiver control"
   [[reg.field]]
   name = "RESET"
   bits = [1, 1]
-  doc = "Soft reset (self-clearing)"
-
-[[reg]]
-name = "MODCOD"
-offset = 0x14
-access = "rw"
-doc = "Expected MODCOD"
+  doc = "Soft reset of the whole receiver: both slots, the decoders, the LLR queue, the packet buffer (self-clearing; reads 1 while in progress)"
   [[reg.field]]
-  name = "MODCOD"
-  bits = [0, 4]
-  doc = "MODCOD (QPSK: 1..11)"
-  [[reg.field]]
-  name = "PILOTS"
-  bits = [8, 8]
-  doc = "Frames have pilots"
-
-[[reg]]
-name = "GOLD_XA"
-offset = 0x18
-access = "rw"
-doc = "PL descrambler x sequence start (x LFSR advanced by the Gold code n)"
-  [[reg.field]]
-  name = "X"
-  bits = [0, 17]
-  doc = "LFSR state"
-
-[[reg]]
-name = "GOLD_XB"
-offset = 0x1C
-access = "rw"
-doc = "PL descrambler second x sequence start (x LFSR advanced by n + 131072)"
-  [[reg.field]]
-  name = "X"
-  bits = [0, 17]
-  doc = "LFSR state"
-
-[[reg]]
-name = "DDC_FINC"
-offset = 0x20
-access = "rw"
-doc = "DDC NCO phase increment per ADC sample, 2^32 = ADC rate (signed)"
-
-[[reg]]
-name = "DDC_CFG"
-offset = 0x24
-access = "rw"
-doc = "DDC configuration"
-  [[reg.field]]
-  name = "DECIM"
-  bits = [0, 5]
-  doc = "FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC)"
-  [[reg.field]]
-  name = "TAPS"
-  bits = [8, 17]
-  doc = "Lowpass taps (even, <= 512)"
-  [[reg.field]]
-  name = "SHIFT"
-  bits = [24, 28]
-  doc = "Output shift (16 - DDC gain exponent)"
-
-[[reg]]
-name = "DDC_COEF_ADDR"
-offset = 0x28
-access = "rw"
-doc = "DDC coefficient address"
-  [[reg.field]]
-  name = "ADDR"
-  bits = [0, 8]
-  doc = "Tap index"
-
-[[reg]]
-name = "DDC_COEF_DATA"
-offset = 0x2C
-access = "wo"
-doc = "Write the DDC coefficient at DDC_COEF_ADDR, then DDC_COEF_ADDR++"
-  [[reg.field]]
-  name = "DATA"
-  bits = [0, 17]
-  signed = true
-  doc = "Coefficient"
-
-[[reg]]
-name = "RRC_COEF_ADDR"
-offset = 0x30
-access = "rw"
-doc = "RRC matched filter coefficient address"
-  [[reg.field]]
-  name = "TAP"
-  bits = [0, 4]
-  doc = "Tap"
-  [[reg.field]]
-  name = "PHASE"
-  bits = [5, 9]
-  doc = "Fractional-delay phase"
-
-[[reg]]
-name = "RRC_COEF_DATA"
-offset = 0x34
-access = "wo"
-doc = "Write the RRC coefficient at RRC_COEF_ADDR, then RRC_COEF_ADDR++"
-  [[reg.field]]
-  name = "DATA"
-  bits = [0, 17]
-  signed = true
-  doc = "Coefficient"
-
-[[reg]]
-name = "TIMING_GAINS"
-offset = 0x38
-access = "rw"
-doc = "Timing loop gains"
-  [[reg.field]]
-  name = "KP"
-  bits = [0, 15]
-  doc = "Proportional gain"
-  [[reg.field]]
-  name = "KI"
-  bits = [16, 31]
-  doc = "Integral gain"
-
-[[reg]]
-name = "FS_THRESH"
-offset = 0x3C
-access = "rw"
-doc = "Frame sync header metric threshold"
-
-[[reg]]
-name = "PLL_KP"
-offset = 0x40
-access = "rw"
-doc = "Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition)"
-  [[reg.field]]
-  name = "KP"
-  bits = [0, 17]
-  doc = "Gain"
-
-[[reg]]
-name = "PLL_KI"
-offset = 0x44
-access = "rw"
-doc = "Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th)"
-  [[reg.field]]
-  name = "KI"
-  bits = [0, 17]
-  doc = "Gain"
-
-[[reg]]
-name = "LDPC_MAX_IT"
-offset = 0x48
-access = "rw"
-doc = "LDPC iteration limit"
-  [[reg.field]]
-  name = "MAX_IT"
-  bits = [0, 5]
-  doc = "Iterations, 1..63"
-
-[[reg]]
-name = "DDC_CIC"
-offset = 0x4C
-access = "rw"
-reset = 0
-doc = "DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D"
-  [[reg.field]]
-  name = "R"
-  bits = [0, 5]
-  doc = "CIC decimation R: 0 or 1 = no CIC, 2..32"
-  [[reg.field]]
-  name = "SHIFT"
-  bits = [8, 11]
-  doc = "CIC output shift"
-
-[[reg]]
-name = "IN_OVERFLOWS"
-offset = 0x50
-access = "ro"
-doc = "2-sps samples lost at the core input FIFO"
-
-[[reg]]
-name = "DDC_DROPPED"
-offset = 0x54
-access = "ro"
-doc = "DDC outputs lost (input too fast for the taps)"
-
-[[reg]]
-name = "AGC_GAIN"
-offset = 0x58
-access = "ro"
-doc = "Digital AGC gain, Q5.12"
-
-[[reg]]
-name = "TIMING_INTEG"
-offset = 0x5C
-access = "rw"
-doc = "Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the core reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200)"
-
-[[reg]]
-name = "FS_STATE"
-offset = 0x60
-access = "ro"
-doc = "Frame sync state"
-  [[reg.field]]
-  name = "STATE"
-  bits = [0, 1]
-  doc = "State"
-  enum = { SEARCH = 0, CHECK = 1, LOCKED = 2 }
-
-[[reg]]
-name = "FS_FOUND"
-offset = 0x64
-access = "ro"
-doc = "Frame sync: headers found"
-
-[[reg]]
-name = "FS_FLYWHEEL"
-offset = 0x68
-access = "ro"
-doc = "Frame sync: flywheel frames"
-
-[[reg]]
-name = "FS_LOST"
-offset = 0x6C
-access = "ro"
-doc = "Frame sync: locks lost (MAXMISS misses in a row, or from 1.4 three tagged headers in a row without a confident PLS decode of the configured code or a dummy header)"
-
-[[reg]]
-name = "FREQ"
-offset = 0x70
-access = "ro"
-doc = "Carrier frequency, turns * 2^32 per symbol (signed)"
-
-[[reg]]
-name = "AMP"
-offset = 0x74
-access = "ro"
-doc = "Mean symbol amplitude"
-
-[[reg]]
-name = "ENERGY"
-offset = 0x78
-access = "ro"
-doc = "Mean symbol energy, bits [35:4] (multiply by 16)"
-
-[[reg]]
-name = "LLR_GAIN"
-offset = 0x7C
-access = "ro"
-doc = "LLR scaling gain"
-
-[[reg]]
-name = "FRAMES"
-offset = 0x80
-access = "ro"
-doc = "Data frames demodulated"
-
-[[reg]]
-name = "LDPC_FRAMES"
-offset = 0x84
-access = "ro"
-doc = "Frames LDPC decoded"
-
-[[reg]]
-name = "LDPC_FAILED"
-offset = 0x88
-access = "ro"
-doc = "Frames where LDPC did not converge"
-
-[[reg]]
-name = "PKT_DROPPED"
-offset = 0x8C
-access = "ro"
-doc = "Frames that found both packet slots full"
-
-[[reg]]
-name = "PKT_SENT"
-offset = 0x90
-access = "ro"
-doc = "Packets sent to the DMA"
-
-[[reg]]
-name = "CARRIER_ACQ"
-offset = 0x94
-access = "ro"
-doc = "Carrier acquisition counters"
-  [[reg.field]]
-  name = "ACQ"
-  bits = [0, 15]
-  doc = "Frequency acquisitions"
-  [[reg.field]]
-  name = "FALSE_LOCK"
-  bits = [16, 31]
-  doc = "1/1476 false-lock corrections"
-
-[[reg]]
-name = "CARRIER_RETYPE"
-offset = 0x98
-access = "ro"
-doc = "Coherent frame-type decision counter"
-  [[reg.field]]
-  name = "RETYPE"
-  bits = [0, 15]
-  doc = "Frame types changed by the coherent decision"
-
-[[reg]]
-name = "BCH"
-offset = 0x9C
-access = "ro"
-doc = "BCH decoder counters"
-  [[reg.field]]
-  name = "CORRECTED"
-  bits = [0, 15]
-  doc = "Frames corrected"
-  [[reg.field]]
-  name = "FAILED"
-  bits = [16, 31]
-  doc = "Frames not decodable"
+  name = "SLOT_EN"
+  bits = [8, 9]
+  doc = "Enable of slot 0 (bit 8), slot 1 (bit 9): the slots' SLOT[s].CTRL.ENABLE"
 
 [[reg]]
 name = "SNAP_CTRL"
-offset = 0xA0
+offset = 0x2A0
 access = "rw"
-doc = "Constellation snapshot control (write and read differ)"
+doc = "Constellation snapshot control, one buffer for both slots (write and read differ)"
   [[reg.field]]
   name = "ARM"
   bits = [0, 0]
   access = "wo"
-  doc = "Arm: capture the next 1024 symbols"
+  doc = "Arm: capture the next 1024 symbols of slot SLOT"
   [[reg.field]]
   name = "SOURCE"
   bits = [1, 1]
   access = "wo"
   doc = "Source of the capture"
   enum = { CARRIER = 0, TIMING = 1 }
+  [[reg.field]]
+  name = "SLOT"
+  bits = [3, 3]
+  doc = "Slot captured (written with ARM; a write to SLOT[s].SNAP_CTRL sets it to s)"
   [[reg.field]]
   name = "BUSY"
   bits = [0, 0]
@@ -447,7 +150,7 @@ doc = "Constellation snapshot control (write and read differ)"
 
 [[reg]]
 name = "SNAP_ADDR"
-offset = 0xA4
+offset = 0x2A4
 access = "rw"
 doc = "Snapshot read address"
   [[reg.field]]
@@ -457,7 +160,7 @@ doc = "Snapshot read address"
 
 [[reg]]
 name = "SNAP_DATA"
-offset = 0xA8
+offset = 0x2A8
 access = "ro"
 doc = "Snapshot symbol at SNAP_ADDR, then SNAP_ADDR++"
   [[reg.field]]
@@ -472,168 +175,662 @@ doc = "Snapshot symbol at SNAP_ADDR, then SNAP_ADDR++"
   doc = "Quadrature"
 
 [[reg]]
-name = "RAW_ERR"
-offset = 0xAC
-access = "ro"
-doc = "Pre-FEC bit errors (channel hard decisions vs. the decoded frame, Kldpc bits of each BCH-good frame), wraps"
-
-[[reg]]
-name = "RAW_BITS"
-offset = 0xB0
-access = "ro"
-doc = "Bits counted in RAW_ERR, wraps"
-
-[[reg]]
-name = "BCH_BITERR"
-offset = 0xB4
-access = "ro"
-doc = "Bit errors corrected by BCH (post-LDPC errors), wraps"
-
-[[reg]]
-name = "PLS_LAST"
-offset = 0xB8
-access = "ro"
-doc = "PLS decoder: the last decoded PLHEADER (data or dummy)"
-  [[reg.field]]
-  name = "MODCOD"
-  bits = [0, 4]
-  doc = "MODCOD (0 = dummy frame)"
-  [[reg.field]]
-  name = "PILOTS"
-  bits = [8, 8]
-  doc = "Pilots on"
-  [[reg.field]]
-  name = "SHORT"
-  bits = [9, 9]
-  doc = "Short frame"
-  [[reg.field]]
-  name = "CONF"
-  bits = [12, 12]
-  doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
-  [[reg.field]]
-  name = "CARRIER"
-  bits = [13, 13]
-  doc = "Decided at the carrier's frequency"
-  [[reg.field]]
-  name = "GRID"
-  bits = [14, 14]
-  doc = "The frequency grid was searched"
-  [[reg.field]]
-  name = "VALID"
-  bits = [15, 15]
-  doc = "A decode since reset"
-  [[reg.field]]
-  name = "COUNT"
-  bits = [16, 31]
-  doc = "Decodes (wraps)"
-
-[[reg]]
-name = "PLS_DATA"
-offset = 0xBC
-access = "ro"
-doc = "PLS decoder: the last confident decode of a data header (MODCOD != 0)"
-  [[reg.field]]
-  name = "MODCOD"
-  bits = [0, 4]
-  doc = "MODCOD (0 = dummy frame)"
-  [[reg.field]]
-  name = "PILOTS"
-  bits = [8, 8]
-  doc = "Pilots on"
-  [[reg.field]]
-  name = "SHORT"
-  bits = [9, 9]
-  doc = "Short frame"
-  [[reg.field]]
-  name = "CONF"
-  bits = [12, 12]
-  doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
-  [[reg.field]]
-  name = "CARRIER"
-  bits = [13, 13]
-  doc = "Decided at the carrier's frequency"
-  [[reg.field]]
-  name = "GRID"
-  bits = [14, 14]
-  doc = "The frequency grid was searched"
-  [[reg.field]]
-  name = "VALID"
-  bits = [15, 15]
-  doc = "A decode since reset"
-  [[reg.field]]
-  name = "COUNT"
-  bits = [16, 31]
-  doc = "Confident data decodes (wraps)"
-
-[[reg]]
-name = "PLS_FREQ"
-offset = 0xC0
-access = "ro"
-doc = "Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ"
-
-[[reg]]
-name = "PLS_BEST"
-offset = 0xC4
-access = "ro"
-doc = "Metric of the best code of the last decode"
-  [[reg.field]]
-  name = "METRIC"
-  bits = [0, 17]
-  doc = "A header at -3 dB gives >= ~300, noise alone <= ~220"
-
-[[reg]]
-name = "PLS_SECOND"
-offset = 0xC8
-access = "ro"
-doc = "Metric of the best other code at the same frequency"
-  [[reg.field]]
-  name = "METRIC"
-  bits = [0, 17]
-  doc = "Metric"
-
-[[reg]]
-name = "PLS_DIFF"
-offset = 0xCC
-access = "ro"
-doc = "Confident data decodes that differ from the configuration (wrap)"
-  [[reg.field]]
-  name = "MODCOD"
-  bits = [0, 15]
-  doc = "MODCOD or frame size differs from the configured one"
-  [[reg.field]]
-  name = "PILOTS"
-  bits = [16, 31]
-  doc = "Pilots differ from the configured setting"
-
-[[reg]]
-name = "PLS_SEEN"
-offset = 0xD0
-access = "w1c"
-doc = "Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins"
-
-[[reg]]
-name = "PLS_CFG"
-offset = 0xD4
+name = "LLRQ_BASE"
+offset = 0x2E0
 access = "rw"
-doc = "PLS frequency grid searched when the carrier's frequency gives no confident decode"
+reset = 0
+doc = "LLR queue ring region, 2 MB aligned (the device tree's dvbs2-llr-buffer, map 3; 0x3E800000 on the fishball): slot s frame f at base + s x 1 MB + f x 64 KB; takes effect at the next CTRL.RESET (while the queue is off also at a slot's reset). 0 (reset): the queue is off and no frame is decoded, so the PL never writes into memory the device tree does not reserve"
   [[reg.field]]
-  name = "H"
-  bits = [0, 5]
-  doc = "Grid half width: hypotheses h x STEP, h = -H..H (reset 32)"
-  [[reg.field]]
-  name = "STEP"
-  bits = [16, 25]
-  doc = "Grid step, turns x 2^16 per symbol (reset 262, ~0.004)"
+  name = "BASE"
+  bits = [21, 31]
+  doc = "Address bits 31:21"
 
 [[reg]]
-name = "PLS_SKIPPED"
-offset = 0xD8
+name = "LLRQ_CFG"
+offset = 0x2E4
+access = "rw"
+reset = 0x000A3F10
+doc = "LLR queue configuration (docs/rx2_design.md 6.2)"
+  [[reg.field]]
+  name = "NFR"
+  bits = [0, 4]
+  doc = "Frames per slot ring, 1..16 (reset 16; takes effect at the next CTRL.RESET)"
+  [[reg.field]]
+  name = "QHI"
+  bits = [8, 13]
+  doc = "While more than QHI frames wait, frames stop at MAX_IT_LO iterations (reset 63: no cap)"
+  [[reg.field]]
+  name = "MAX_IT_LO"
+  bits = [16, 21]
+  doc = "Iteration cap (reset 10)"
+
+[[reg]]
+name = "LLRQ_STAT"
+offset = 0x2E8
 access = "ro"
-doc = "Headers not decoded because the decoder was still busy"
+doc = "LLR queue status"
+  [[reg.field]]
+  name = "DEPTH"
+  bits = [0, 5]
+  doc = "Frames waiting (complete in DDR + the one being read)"
+  [[reg.field]]
+  name = "DEPTH_MAX"
+  bits = [8, 13]
+  doc = "The most since reset"
+  [[reg.field]]
+  name = "FRAMES"
+  bits = [16, 31]
+  doc = "Frames through the ring (wraps)"
+
+[[reg]]
+name = "LLRQ_DROPPED"
+offset = 0x2EC
+access = "ro"
+doc = "Frames dropped because the slot's ring was full"
+  [[reg.field]]
+  name = "SLOT0"
+  bits = [0, 15]
+  doc = "Slot 0 (cleared by its reset)"
+  [[reg.field]]
+  name = "SLOT1"
+  bits = [16, 31]
+  doc = "Slot 1 (cleared by its reset)"
+
+[[reg]]
+name = "LLRQ_AXI_ERR"
+offset = 0x2F0
+access = "ro"
+doc = "LLR queue AXI error responses (SLVERR/DECERR)"
   [[reg.field]]
   name = "COUNT"
   bits = [0, 15]
-  doc = "Headers (wraps)"
+  doc = "Responses"
+
+[[array]]
+name = "SLOT"
+offset = 0x000
+stride = 0x100
+count = 2
+doc = "Receive slot s: the 1.x single-slot map for slot s (1.x software adds 0x100 s to its offsets). Settings are static while the slot runs: change them with the slot disabled or in its reset"
+
+  [[array.reg]]
+  name = "VERSION"
+  offset = 0x00
+  access = "ro"
+  doc = "As VERSION (0x200)"
+
+  [[array.reg]]
+  name = "ID"
+  offset = 0x04
+  access = "ro"
+  doc = "As ID (0x204)"
+
+  [[array.reg]]
+  name = "SCRATCH"
+  offset = 0x08
+  access = "rw"
+  doc = "As SCRATCH (0x208)"
+
+  [[array.reg]]
+  name = "CTRL"
+  offset = 0x10
+  access = "rw"
+  reset = 0
+  doc = "Slot control"
+    [[array.reg.field]]
+    name = "ENABLE"
+    bits = [0, 0]
+    doc = "Enable: the slot takes ADC samples"
+    [[array.reg.field]]
+    name = "RESET"
+    bits = [1, 1]
+    doc = "Soft reset of the slot (self-clearing; reads 1 while in progress): its DDC, input FIFO, state in the shared engines, PLS decoder and counters; the other slot runs on"
+
+  [[array.reg]]
+  name = "MODCOD"
+  offset = 0x14
+  access = "rw"
+  doc = "Expected MODCOD"
+    [[array.reg.field]]
+    name = "MODCOD"
+    bits = [0, 4]
+    doc = "MODCOD (QPSK: 1..11)"
+    [[array.reg.field]]
+    name = "PILOTS"
+    bits = [8, 8]
+    doc = "Frames have pilots"
+
+  [[array.reg]]
+  name = "GOLD_XA"
+  offset = 0x18
+  access = "rw"
+  doc = "PL descrambler x sequence start (x LFSR advanced by the Gold code n)"
+    [[array.reg.field]]
+    name = "X"
+    bits = [0, 17]
+    doc = "LFSR state"
+
+  [[array.reg]]
+  name = "GOLD_XB"
+  offset = 0x1C
+  access = "rw"
+  doc = "PL descrambler second x sequence start (x LFSR advanced by n + 131072)"
+    [[array.reg.field]]
+    name = "X"
+    bits = [0, 17]
+    doc = "LFSR state"
+
+  [[array.reg]]
+  name = "DDC_FINC"
+  offset = 0x20
+  access = "rw"
+  doc = "DDC NCO phase increment per ADC sample, 2^32 = ADC rate (signed)"
+
+  [[array.reg]]
+  name = "DDC_CFG"
+  offset = 0x24
+  access = "rw"
+  doc = "DDC configuration"
+    [[array.reg.field]]
+    name = "DECIM"
+    bits = [0, 5]
+    doc = "FIR decimation D, 1..63 (ADC samples per 2 symbols = R * D, R from DDC_CIC)"
+    [[array.reg.field]]
+    name = "TAPS"
+    bits = [8, 17]
+    doc = "Lowpass taps (even, <= 512)"
+    [[array.reg.field]]
+    name = "SHIFT"
+    bits = [24, 28]
+    doc = "Output shift (16 - DDC gain exponent)"
+
+  [[array.reg]]
+  name = "DDC_COEF_ADDR"
+  offset = 0x28
+  access = "rw"
+  doc = "DDC coefficient address"
+    [[array.reg.field]]
+    name = "ADDR"
+    bits = [0, 8]
+    doc = "Tap index"
+
+  [[array.reg]]
+  name = "DDC_COEF_DATA"
+  offset = 0x2C
+  access = "wo"
+  doc = "Write the DDC coefficient at DDC_COEF_ADDR, then DDC_COEF_ADDR++"
+    [[array.reg.field]]
+    name = "DATA"
+    bits = [0, 17]
+    signed = true
+    doc = "Coefficient"
+
+  [[array.reg]]
+  name = "RRC_COEF_ADDR"
+  offset = 0x30
+  access = "rw"
+  doc = "RRC matched filter coefficient address"
+    [[array.reg.field]]
+    name = "TAP"
+    bits = [0, 4]
+    doc = "Tap"
+    [[array.reg.field]]
+    name = "PHASE"
+    bits = [5, 9]
+    doc = "Fractional-delay phase"
+
+  [[array.reg]]
+  name = "RRC_COEF_DATA"
+  offset = 0x34
+  access = "wo"
+  doc = "Write the RRC coefficient at RRC_COEF_ADDR, then RRC_COEF_ADDR++"
+    [[array.reg.field]]
+    name = "DATA"
+    bits = [0, 17]
+    signed = true
+    doc = "Coefficient"
+
+  [[array.reg]]
+  name = "TIMING_GAINS"
+  offset = 0x38
+  access = "rw"
+  doc = "Timing loop gains"
+    [[array.reg.field]]
+    name = "KP"
+    bits = [0, 15]
+    doc = "Proportional gain"
+    [[array.reg.field]]
+    name = "KI"
+    bits = [16, 31]
+    doc = "Integral gain"
+
+  [[array.reg]]
+  name = "FS_THRESH"
+  offset = 0x3C
+  access = "rw"
+  doc = "Frame sync header metric threshold"
+
+  [[array.reg]]
+  name = "PLL_KP"
+  offset = 0x40
+  access = "rw"
+  doc = "Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition)"
+    [[array.reg.field]]
+    name = "KP"
+    bits = [0, 17]
+    doc = "Gain"
+
+  [[array.reg]]
+  name = "PLL_KI"
+  offset = 0x44
+  access = "rw"
+  doc = "Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th)"
+    [[array.reg.field]]
+    name = "KI"
+    bits = [0, 17]
+    doc = "Gain"
+
+  [[array.reg]]
+  name = "LDPC_MAX_IT"
+  offset = 0x48
+  access = "rw"
+  doc = "LDPC iteration limit"
+    [[array.reg.field]]
+    name = "MAX_IT"
+    bits = [0, 5]
+    doc = "Iterations, 1..63"
+
+  [[array.reg]]
+  name = "DDC_CIC"
+  offset = 0x4C
+  access = "rw"
+  reset = 0
+  doc = "DDC CIC stage before the FIR (model/rxfixed.py ddc_config()); total decimation R * D"
+    [[array.reg.field]]
+    name = "R"
+    bits = [0, 5]
+    doc = "CIC decimation R: 0 or 1 = no CIC, 2..32"
+    [[array.reg.field]]
+    name = "SHIFT"
+    bits = [8, 11]
+    doc = "CIC output shift"
+
+  [[array.reg]]
+  name = "IN_OVERFLOWS"
+  offset = 0x50
+  access = "ro"
+  doc = "2-sps samples lost at the slot's input FIFO"
+
+  [[array.reg]]
+  name = "DDC_DROPPED"
+  offset = 0x54
+  access = "ro"
+  doc = "DDC outputs lost (input too fast for the taps)"
+
+  [[array.reg]]
+  name = "AGC_GAIN"
+  offset = 0x58
+  access = "ro"
+  doc = "Digital AGC gain, Q5.12"
+
+  [[array.reg]]
+  name = "TIMING_INTEG"
+  offset = 0x5C
+  access = "rw"
+  doc = "Timing loop integrator (Q.24 samples/symbol beyond 2, signed); write: its value at the slot's reset (default 0), 2 x (nominal / actual - 1) x 2^24 for a known symbol-rate offset (write and read differ; VERSION >= 0x0001_0200)"
+
+  [[array.reg]]
+  name = "FS_STATE"
+  offset = 0x60
+  access = "ro"
+  doc = "Frame sync state"
+    [[array.reg.field]]
+    name = "STATE"
+    bits = [0, 1]
+    doc = "State"
+    enum = { SEARCH = 0, CHECK = 1, LOCKED = 2 }
+
+  [[array.reg]]
+  name = "FS_FOUND"
+  offset = 0x64
+  access = "ro"
+  doc = "Frame sync: headers found"
+
+  [[array.reg]]
+  name = "FS_FLYWHEEL"
+  offset = 0x68
+  access = "ro"
+  doc = "Frame sync: flywheel frames"
+
+  [[array.reg]]
+  name = "FS_LOST"
+  offset = 0x6C
+  access = "ro"
+  doc = "Frame sync: locks lost (MAXMISS misses in a row, or from 1.4 three tagged headers in a row without a confident PLS decode of the configured code or a dummy header)"
+
+  [[array.reg]]
+  name = "FREQ"
+  offset = 0x70
+  access = "ro"
+  doc = "Carrier frequency, turns * 2^32 per symbol (signed)"
+
+  [[array.reg]]
+  name = "AMP"
+  offset = 0x74
+  access = "ro"
+  doc = "Mean symbol amplitude"
+
+  [[array.reg]]
+  name = "ENERGY"
+  offset = 0x78
+  access = "ro"
+  doc = "Mean symbol energy, bits [35:4] (multiply by 16)"
+
+  [[array.reg]]
+  name = "LLR_GAIN"
+  offset = 0x7C
+  access = "ro"
+  doc = "LLR scaling gain"
+
+  [[array.reg]]
+  name = "FRAMES"
+  offset = 0x80
+  access = "ro"
+  doc = "Data frames demodulated"
+
+  [[array.reg]]
+  name = "LDPC_FRAMES"
+  offset = 0x84
+  access = "ro"
+  doc = "Frames of the slot LDPC decoded"
+
+  [[array.reg]]
+  name = "LDPC_FAILED"
+  offset = 0x88
+  access = "ro"
+  doc = "Frames where LDPC did not converge"
+
+  [[array.reg]]
+  name = "PKT_DROPPED"
+  offset = 0x8C
+  access = "ro"
+  doc = "Frames of the slot that found both packet slots full"
+
+  [[array.reg]]
+  name = "PKT_SENT"
+  offset = 0x90
+  access = "ro"
+  doc = "Packets of the slot sent to the DMA"
+
+  [[array.reg]]
+  name = "CARRIER_ACQ"
+  offset = 0x94
+  access = "ro"
+  doc = "Carrier acquisition counters"
+    [[array.reg.field]]
+    name = "ACQ"
+    bits = [0, 15]
+    doc = "Frequency acquisitions"
+    [[array.reg.field]]
+    name = "FALSE_LOCK"
+    bits = [16, 31]
+    doc = "1/1476 false-lock corrections"
+
+  [[array.reg]]
+  name = "CARRIER_RETYPE"
+  offset = 0x98
+  access = "ro"
+  doc = "Coherent frame-type decision counter"
+    [[array.reg.field]]
+    name = "RETYPE"
+    bits = [0, 15]
+    doc = "Frame types changed by the coherent decision"
+
+  [[array.reg]]
+  name = "BCH"
+  offset = 0x9C
+  access = "ro"
+  doc = "BCH decoder counters"
+    [[array.reg.field]]
+    name = "CORRECTED"
+    bits = [0, 15]
+    doc = "Frames corrected"
+    [[array.reg.field]]
+    name = "FAILED"
+    bits = [16, 31]
+    doc = "Frames not decodable"
+
+  [[array.reg]]
+  name = "SNAP_CTRL"
+  offset = 0xA0
+  access = "rw"
+  doc = "As SNAP_CTRL (0x2A0), the slot being s: a write sets SNAP_CTRL.SLOT = s"
+    [[array.reg.field]]
+    name = "ARM"
+    bits = [0, 0]
+    access = "wo"
+    doc = "Arm: capture the next 1024 symbols"
+    [[array.reg.field]]
+    name = "SOURCE"
+    bits = [1, 1]
+    access = "wo"
+    doc = "Source of the capture"
+    enum = { CARRIER = 0, TIMING = 1 }
+    [[array.reg.field]]
+    name = "BUSY"
+    bits = [0, 0]
+    access = "ro"
+    doc = "Capture running"
+    [[array.reg.field]]
+    name = "DONE"
+    bits = [1, 1]
+    access = "ro"
+    doc = "Capture complete"
+    [[array.reg.field]]
+    name = "SOURCE_RD"
+    bits = [2, 2]
+    access = "ro"
+    doc = "Source of the capture (as written to SOURCE)"
+
+  [[array.reg]]
+  name = "SNAP_ADDR"
+  offset = 0xA4
+  access = "rw"
+  doc = "As SNAP_ADDR (0x2A4)"
+    [[array.reg.field]]
+    name = "ADDR"
+    bits = [0, 9]
+    doc = "Symbol index"
+
+  [[array.reg]]
+  name = "SNAP_DATA"
+  offset = 0xA8
+  access = "ro"
+  doc = "As SNAP_DATA (0x2A8)"
+    [[array.reg.field]]
+    name = "I"
+    bits = [0, 15]
+    signed = true
+    doc = "In-phase"
+    [[array.reg.field]]
+    name = "Q"
+    bits = [16, 31]
+    signed = true
+    doc = "Quadrature"
+
+  [[array.reg]]
+  name = "RAW_ERR"
+  offset = 0xAC
+  access = "ro"
+  doc = "Pre-FEC bit errors (channel hard decisions vs. the decoded frame, Kldpc bits of each BCH-good frame), wraps"
+
+  [[array.reg]]
+  name = "RAW_BITS"
+  offset = 0xB0
+  access = "ro"
+  doc = "Bits counted in RAW_ERR, wraps"
+
+  [[array.reg]]
+  name = "BCH_BITERR"
+  offset = 0xB4
+  access = "ro"
+  doc = "Bit errors corrected by BCH (post-LDPC errors), wraps"
+
+  [[array.reg]]
+  name = "PLS_LAST"
+  offset = 0xB8
+  access = "ro"
+  doc = "PLS decoder: the last decoded PLHEADER (data or dummy)"
+    [[array.reg.field]]
+    name = "MODCOD"
+    bits = [0, 4]
+    doc = "MODCOD (0 = dummy frame)"
+    [[array.reg.field]]
+    name = "PILOTS"
+    bits = [8, 8]
+    doc = "Pilots on"
+    [[array.reg.field]]
+    name = "SHORT"
+    bits = [9, 9]
+    doc = "Short frame"
+    [[array.reg.field]]
+    name = "CONF"
+    bits = [12, 12]
+    doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
+    [[array.reg.field]]
+    name = "CARRIER"
+    bits = [13, 13]
+    doc = "Decided at the carrier's frequency"
+    [[array.reg.field]]
+    name = "GRID"
+    bits = [14, 14]
+    doc = "The frequency grid was searched"
+    [[array.reg.field]]
+    name = "VALID"
+    bits = [15, 15]
+    doc = "A decode since reset"
+    [[array.reg.field]]
+    name = "COUNT"
+    bits = [16, 31]
+    doc = "Decodes (wraps)"
+
+  [[array.reg]]
+  name = "PLS_DATA"
+  offset = 0xBC
+  access = "ro"
+  doc = "PLS decoder: the last confident decode of a data header (MODCOD != 0)"
+    [[array.reg.field]]
+    name = "MODCOD"
+    bits = [0, 4]
+    doc = "MODCOD (0 = dummy frame)"
+    [[array.reg.field]]
+    name = "PILOTS"
+    bits = [8, 8]
+    doc = "Pilots on"
+    [[array.reg.field]]
+    name = "SHORT"
+    bits = [9, 9]
+    doc = "Short frame"
+    [[array.reg.field]]
+    name = "CONF"
+    bits = [12, 12]
+    doc = "Confident: best > 2 x the best other code at the same frequency and best > 2^8"
+    [[array.reg.field]]
+    name = "CARRIER"
+    bits = [13, 13]
+    doc = "Decided at the carrier's frequency"
+    [[array.reg.field]]
+    name = "GRID"
+    bits = [14, 14]
+    doc = "The frequency grid was searched"
+    [[array.reg.field]]
+    name = "VALID"
+    bits = [15, 15]
+    doc = "A decode since reset"
+    [[array.reg.field]]
+    name = "COUNT"
+    bits = [16, 31]
+    doc = "Confident data decodes (wraps)"
+
+  [[array.reg]]
+  name = "PLS_FREQ"
+  offset = 0xC0
+  access = "ro"
+  doc = "Frequency of the last decode's hypothesis, turns x 2^32 per symbol (signed, multiples of 2^16), relative to the DDC like FREQ"
+
+  [[array.reg]]
+  name = "PLS_BEST"
+  offset = 0xC4
+  access = "ro"
+  doc = "Metric of the best code of the last decode"
+    [[array.reg.field]]
+    name = "METRIC"
+    bits = [0, 17]
+    doc = "A header at -3 dB gives >= ~300, noise alone <= ~220"
+
+  [[array.reg]]
+  name = "PLS_SECOND"
+  offset = 0xC8
+  access = "ro"
+  doc = "Metric of the best other code at the same frequency"
+    [[array.reg.field]]
+    name = "METRIC"
+    bits = [0, 17]
+    doc = "Metric"
+
+  [[array.reg]]
+  name = "PLS_DIFF"
+  offset = 0xCC
+  access = "ro"
+  doc = "Confident data decodes that differ from the configuration (wrap)"
+    [[array.reg.field]]
+    name = "MODCOD"
+    bits = [0, 15]
+    doc = "MODCOD or frame size differs from the configured one"
+    [[array.reg.field]]
+    name = "PILOTS"
+    bits = [16, 31]
+    doc = "Pilots differ from the configured setting"
+
+  [[array.reg]]
+  name = "PLS_SEEN"
+  offset = 0xD0
+  access = "w1c"
+  doc = "Bit m = a confident normal-frame decode of MODCOD m since cleared (bit 0 = dummy); a clear in the same clock as a decode wins"
+
+  [[array.reg]]
+  name = "PLS_CFG"
+  offset = 0xD4
+  access = "rw"
+  doc = "PLS frequency grid searched when the carrier's frequency gives no confident decode"
+    [[array.reg.field]]
+    name = "H"
+    bits = [0, 5]
+    doc = "Grid half width: hypotheses h x STEP, h = -H..H (reset 32)"
+    [[array.reg.field]]
+    name = "STEP"
+    bits = [16, 25]
+    doc = "Grid step, turns x 2^16 per symbol (reset 262, ~0.004)"
+
+  [[array.reg]]
+  name = "PLS_SKIPPED"
+  offset = 0xD8
+  access = "ro"
+  doc = "Headers not decoded because the decoder was still busy"
+    [[array.reg.field]]
+    name = "COUNT"
+    bits = [0, 15]
+    doc = "Headers (wraps)"
+
+  [[array.reg]]
+  name = "LLRQ_DROPPED"
+  offset = 0xEC
+  access = "ro"
+  doc = "Frames of the slot dropped because its ring was full (cleared by the slot's reset)"
+    [[array.reg.field]]
+    name = "COUNT"
+    bits = [0, 15]
+    doc = "Frames"
 
 [[packet]]
 name = "HDR"
@@ -646,7 +843,7 @@ doc = "Word 0 of a DMA packet (64-bit words, byte 0 = [7:0]); BBFRAME bytes (BB-
   [[packet.field]]
   name = "COUNT"
   bits = [16, 31]
-  doc = "Frame counter"
+  doc = "Frame counter of the slot"
   [[packet.field]]
   name = "MODCOD"
   bits = [32, 36]
@@ -671,6 +868,10 @@ doc = "Word 0 of a DMA packet (64-bit words, byte 0 = [7:0]); BBFRAME bytes (BB-
   name = "BCH_ERRORS"
   bits = [50, 54]
   doc = "BCH errors located"
+  [[packet.field]]
+  name = "SLOT"
+  bits = [55, 55]
+  doc = "Receive slot"
   [[packet.field]]
   name = "MAGIC"
   bits = [56, 63]

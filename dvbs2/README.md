@@ -722,12 +722,213 @@ written before the soft reset is loaded at the reset
 With it acquisition is the same as at e = 0 (median 5 frames) for every
 tested offset up to +-2 % (`sr_offset_experiment.py --preset`).
 
+### Two receive slots: shared engines
+
+For the second DATV receive slot (`docs/rx2_design.md`) the timing, frame
+sync and carrier engines exist in two-slot versions: one engine serves both
+slots, per symbol, and per slot it does exactly what the single-slot engine
+does (bit exact per slot to the model). The receiver core `dvbs2_rx` (RX
+2.0) is built from them, see [Two receive slots: the receiver
+(2.0)](#two-receive-slots-the-receiver-20); the single-slot engines stay as
+the generators' sources and the reference.
+
+| Module | How | Per slot | Shared |
+| --- | --- | --- | --- |
+| `dvbs2_rx_timing2` | hand-written | sample buffer, coefficient bank (slot = coefficient RAM address MSB, `coef_slot`), kp/ki, integrator preset, loop state, output register | MAC pipeline, gain, TED, loop arithmetic |
+| `dvbs2_rx_framesync2` | generated from `dvbs2_rx_framesync` | context (38 registers, 502 bits), sbuf and the 6 lane memories (slot = address MSB, 256 deep: still one RAMB18 each), header pattern, PLS confirmation inputs | correlator, FSM, DSPs |
+| `dvbs2_rx_carrier2` | generated from `dvbs2_rx_carrier` | context (52 registers, 757 bits), seg (1440 words per slot: 2K x 32 + 1K x 32, 3 RAMB36), zbuf (banks 0..3 of both slots 1K x 32 + bank 4 of both 256 x 32: 1.5 tiles), header pattern, output frame counters | FSM, DSPs, CORDIC, divider, rotator (its NCO ROM), zrbuf, LLR pipeline, output FIFO (each word carries its slot) |
+| `dvbs2_rx_pls` | two instances | everything | nothing |
+
+`tools/make_rx2.py` generates the frame sync and carrier (`--check`: are
+the committed files up to date; `test_rx2.py` checks that): every register
+the single-slot FSM assigns is classified by hand as context (shadowed),
+per-symbol/per-job temporary or engine pipeline; a new register stops the
+generator until it is classified. The context swap takes one clock in the
+engine's input state (S_IN, M_IDLE), when the other slot has a symbol and
+the current one has none or was just served, so with both slots busy the
+engines alternate per symbol. Pulses for a slot (ty_v from the carrier,
+pls_v from its PLS decoder) reach that slot's context wherever it is. In
+simulation (`RX2_SCRAMBLE`) the temporaries are overwritten with random
+values at every swap, so a register wrongly taken for a temporary shows up
+as a mismatch (checked: moving `win_m` there fails `test_framesync2`).
+
+The PLS decoder is instantiated once per slot (607 LUT, 828 FF, 2 DSP, no
+BRAM each) rather than shared: its decode is clock-driven (~1420 clocks per
+frequency hypothesis, ~94k with the grid at H = 32), and the frame sync
+waits for it 3072 symbols after each tag. One shared decoder could have to
+do both slots' grid decodes (before the acquisition, or a carrier
+hypothesis below the noise level) in one window: ~190k clocks, more than
+the 153k of a 2 MBd slot; that slot's input would wait and its FIFO
+overflow, so it would no longer equal the single-slot receiver. A shared
+decoder with per-slot capture buffers and status would save ~400 LUT and
+2 DSP.
+
+Per-slot reset (`rst_s[s]`, level or pulse): the timing engine cancels the
+slot's symbol at once; the frame sync and carrier reset the slot's context
+at once if it is in the shadow, else when the engine is back at its input
+state (the symbol or header job in progress finishes first, so the units
+and pipelines are idle). A slot in reset takes no symbols, is not swapped
+in, and its output is dropped (the carrier's output FIFO keeps an epoch bit
+per slot, so words written before the reset are dropped too); the next
+word of the slot starts a frame (`m_first`). The other slot runs on
+unaffected (tested).
+
+Interfaces: per-slot inputs and outputs are 2-element arrays or 2-bit
+vectors (`modcod2`, `s_valid2`, `st_freq2`, ...). The frame sync's output
+and the carrier's LLR output are single streams with `m_slot`; the
+carrier's output (`m_llr_*`, `m_first`, `m_slot`) is what the LLR queue
+(`dvbs2_rx_llrq`) takes, with `s_modcod`/`s_pilots` from the slot's
+configuration. The carrier's per-slot `st_freq2` / `st_acquired2` feed the
+slot's PLS decoder (valid for the slot whose symbol the carrier takes).
+
+Throughput: timing 42 clocks per symbol of either slot (measured 42.1
+including the slot pick), so the two rates together are at most 2.38 MBd
+in theory; as for the single-slot receiver (input FIFO overflows at
+exactly 42 clocks per symbol, none at 44) leave a few percent: tested at
+1.67 + 0.67 MBd (42.9 clocks per symbol together) and one slot at 2.27
+MBd. Frame sync ~34 + 1 per swap; carrier ~8 per symbol plus the header
+and segment jobs. Unlike `dvbs2_rx_timing`, the two-slot timing engine
+starts a slot's symbol only when that slot's output register is free.
+
+Resources (out of context, xc7z020-2, 100 MHz, `syn/ooc2.tcl`; the
+carrier2 without the seg/zbuf packing: 5672 LUT, 7 tiles, WNS 0.41 ns):
+
+| Module | LUT | FF | BRAM tiles | DSP | WNS ns |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dvbs2_rx_timing` | 698 | 424 | 0.5 | 15 | 3.16 |
+| `dvbs2_rx_timing2` | 1025 | 726 | 1 | 15 | 2.86 |
+| `dvbs2_rx_framesync` | 1977 | 1333 | 3.5 | 8 | 1.94 |
+| `dvbs2_rx_framesync2` | 2468 | 1997 | 3.5 | 8 | 1.40 |
+| `dvbs2_rx_carrier` | 4818 | 2833 | 4 | 34 | 1.18 |
+| `dvbs2_rx_carrier2` | 5682 | 3764 | 5.5 | 34 | 0.84 |
+| `dvbs2_rx_pls` (x 2) | 607 | 828 | 0 | 2 | 3.56 |
+
+Tests (`sim/rx/test_rx2.py`, Verilator; each slot equal to the model of a
+single-slot receiver fed with its own signal, the other slot running
+another one): `test_timing2` (different signals, roll-offs, gains, stalls,
+integrator presets; a reset of either slot in the middle of its symbol; one
+slot idle), `test_framesync2` (pilots / no pilots, dropped symbols:
+flywheel, lost, re-lock; PLS stand-ins slower than the frame sync needs
+them in both slots; QPSK 1/4 without pilots with QPSK 1/2 configured; a
+slot reset; one slot idle), `test_carrier2` (the single-slot carrier cases
+paired: low SNR, gaps, segment timeout, the 1/1476 false-lock correction,
+pilots off through the PLL gears; a reset of either slot; one slot idle),
+`test_fe2_*` (input FIFOs, timing2, framesync2, carrier2 and a PLS decoder
+per slot from samples, against `rxfixed.receive()` per slot: LLRs, PLS
+decodes, AMP/ENERGY/GAIN, no overflow; the RX 1.4 regressions, null-packet
+false lock and QPSK 1/4 no-pilots start-up, one in each slot at 1.67 + 0.67
+MBd and exchanged; different MODCODs and pilots; a slot reset during a
+data frame; one slot idle with the other at 2.27 MBd; the frames decode
+with the LDPC/BCH models).
+
+### Two receive slots: the receiver (2.0)
+
+```
+ADC ─► async FIFO ─┬─► DDC 0 ─► FIFO 0 ─┐                       ┌─► PLS decoder 0
+                   └─► DDC 1 ─► FIFO 1 ─┴─► timing2 ─► framesync2 ─► carrier2 ─► LLR queue (DDR) ─► LDPC ─► BCH ─► packets (bit 55: slot)
+      (the DDCs share one NCO ROM)                                └─► PLS decoder 1
+```
+
+`dvbs2_rx` (core) and `dvbs2_rx_axi` (wrapper, VERSION 0x0002_0000) run two
+receive slots on rx0. Each slot has its own DDC (frequency, decimation), symbol
+rate, MODCOD, pilots, Gold code, loop gains, iteration limit and PLS decoder;
+the two symbol rates together must stay below 2.38 MBd; in practice 2.27 MBd,
+as for one slot (a long run at 2.33 MBd overflows the faster slot's input
+FIFO, rx2_design.md 5.5).
+Per slot the receiver equals the single-slot model fed with that slot's
+samples, whatever the other slot does.
+
+* **Input:** one ADC FIFO feeds both DDCs with the same samples (a slot that
+  is disabled or in its reset is skipped). The DDCs share the NCO ROM (one
+  RAMB36, a port each; `dvbs2_rx_ddc` `EXT_NCO`). Each DDC writes into its
+  slot's synchronous FIFO (`dvbs2_sync_fifo`, 512 words, `FIFO_RAM` block or
+  distributed); `IN_OVERFLOWS` counts per slot.
+* **LLR queue:** always in the path (no bypass): the carrier's LLR words of
+  both slots, each tagged with its slot, go through the DDR ring to the
+  decoder, each frame with its slot's MODCOD/pilots, `LDPC_MAX_IT` and tag.
+  `LLRQ_BASE` is 0 after reset: the queue is off and nothing is decoded
+  until software writes the reserved region's address (UIO map 3, which
+  `dvbs2-rx` does), so the PL never writes into memory a device tree without
+  the region does not reserve. The ring layout (`LLRQ_BASE`, frames per
+  slot) takes effect at the receiver's soft reset (while the queue is off
+  also at a slot's); QHI and MAX_IT_LO are live.
+* **Packets:** one DMA stream, header bit 55 = slot, the frame counter
+  [31:16] counts per slot; the two 8 KB packet slots are shared.
+* **Resets:** `CTRL` (0x210) [1] resets the whole receiver. A slot's own
+  `CTRL` [1] resets the slot alone (DDC, FIFO, its context in the shared
+  engines, PLS decoder, its counters, including its LLR queue drop count);
+  the other slot runs on unaffected. Nothing of the slot from before its
+  reset comes out after it: its frames carry an epoch bit (toggled by the
+  reset) through the queue and the decoders and are dropped at the decoder
+  output if it is not the current one, and the reset removes the slot's
+  packets in the packet buffer that the DMA has not started (a packet is
+  read out only once the DMA is ready). So restarting one slot (or 1.x
+  software's soft reset) gives no stale frames.
+* **Constellation snapshot:** one buffer; arming it through a slot's bank
+  captures that slot (`SNAP_CTRL` [3] reads the slot).
+* **Counters:** every status register is per slot, in its bank; the decoder
+  counts (`LDPC_FRAMES`, `LDPC_FAILED`, `BCH`, `RAW_ERR`, ...) count the
+  slot's frames at the BCH output.
+
+Register map v2 (header of `rtl/dvbs2_rx_axi.sv`, `regs/dvbs2_rx.toml`): slot
+s's bank at 0x100 s holds the 1.x map at the 1.x offsets for that slot
+(VERSION, ID and SCRATCH read the same in every bank; `CTRL` is the slot's:
+[0] enable, [1] its reset); the shared registers are at 0x200: VERSION
+0x200, ID 0x204, SCRATCH 0x208, `CTRL` 0x210 ([1] receiver reset, [9:8]
+slot enables), `SNAP_*` 0x2A0..0x2A8 ([3] slot), the LLR queue's
+`LLRQ_BASE`/`CFG`/`STAT`/`DROPPED`/`AXI_ERR` at 0x2E0..0x2F0 (1.5:
+0xE0..0xF0; `LLRQ_CTRL` is gone). A slot bank's 0xEC is the slot's
+`LLRQ_DROPPED`. Software for one slot adds 0x100 s to the 1.x offsets; 1.x
+software runs on slot 0 (`test_rx_axi[v1]`) once `LLRQ_BASE` is set (its
+`CTRL` soft reset now resets slot 0 only). The major version is 2 because
+of that: without `LLRQ_BASE` (and the device tree's region) nothing is
+decoded, and 1.5's queue registers moved.
+
+Tests: `test_rx.py` runs every whole-receiver case of 1.x through the
+two-slot core in either slot with the other idle (`tb_rx`:
+`test_rx_end_to_end`, the regressions `test_rx_falselock`,
+`test_rx_falselock_cycle`, `test_rx_start_np14`, `test_rx_esn0_restart`),
+`test_rx_axi_hold[True]` (a slot reset while the DMA is held removes the
+held packets), and `test_rx_axi` through the wrapper (slot 0 by map v2, slot 0 as 1.x
+software does it, slot 1, and without `LLRQ_BASE`: the slot demodulates,
+nothing is decoded, no memory access). `test_rx2.py`: `test_core2_*` (both slots at once
+through the core, per slot the LLRs, PLS decodes and status equal the model
+and every decoded frame equals the LDPC/BCH models of the slot's frames, in
+order: different MODCODs/pilots/offsets at 1.67 + 0.67 MBd, the 1.4
+regressions one in each slot both ways round, a reset of slot 1 in a data
+frame (also just after a frame left the carrier: that frame is not output),
+slot 1 idle with slot 0 at 2.27 MBd, LLR queue drops with one-frame
+rings, the shared iteration cap), `test_axi2_two_signals` (both signals in one
+12 MS/s ADC stream: 2 MBd QPSK 1/2 pilots 2.6 MHz below the LO and 333 kBd
+QPSK 3/4 without pilots, another Gold code, 2 MHz above it, every packet of
+each slot equal to its model and a transmitted BBFRAME, per-slot frame
+counters, registers and PLS status, slot 1's snapshot).
+
+`dvbs2-rx` runs either slot or both (one process owns the DMA and sorts the
+packets by their slot bit):
+
+```
+dvbs2-rx --slot 0 -s 1.5e6 -m qpsk4/5 -p -o -2.4e6 -u 192.168.2.10:1234 \
+         --slot 1 -s 333333 -m qpsk1/2 -p -o 1.9e6 -u 192.168.2.10:1235 -f 740e6
+```
+
+Options before any `--slot` are slot 0's (without `--slot` dvbs2-rx is the
+1.x tool for slot 0, also on a 1.x core); `-f`, `-G`, `-F`, `-q`, `-n` are
+the receiver's. Slot 1's TS goes to slot 0's UDP port + 1 unless given. The
+status line shows both slots (`[s] MODCOD state offset Es/N0 BER frames/LDPC
+failed/BCH failed/dropped TS ...`), `-C` snapshots alternate between the
+slots that ask for one. It sets each slot's `LDPC_MAX_IT` (`-I`, default 30)
+and the queue's cap from rx2_design.md 6.2: MAX_IT_LO = the iterations the
+decoder can give every frame of both slots, QHI = slots in use + 1.
+`--detect` works with one slot (the slot's soft reset only).
+
 ### Fishball bitstream integration
 
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_rx` (module reference
 `ip/dvbs2_rx_bd.v`) at 0x7C510000, fed from `axi_ad9361` channel 0 (through
 `rx_awgn`), and `axi_dvbs2_rx_dma` (stream -> memory, 32-bit on S_AXI_GP0)
-at 0x7C490000, IRQ ps-9. Everything after the ADC sample FIFO runs on
+at 0x7C490000, IRQ ps-9; the LLR queue's AXI master (`m_axi`) is on
+S_AXI_HP1 (64-bit). Everything after the ADC sample FIFO runs on
 `sys_cpu_clk`. Register map and packet format: header of
 `rtl/dvbs2_rx_axi.sv`. Each decoded BBFRAME becomes one 8 KB DMA packet
 (status word + BBFRAME); with both packet slots full a frame is dropped and
@@ -747,7 +948,8 @@ every decimation. `test_rx_axi_sr_offset` runs decimation 18 with the
 transmitter at 333000 S/s (-1000 ppm, TIMING_INTEG preset) and at +1000 ppm
 (pulled in from 0).
 
-Linux: UIO device `dvbs2-rx` (registers, DMA, 1 MB buffer at 0x3EF00000)
+Linux: UIO device `dvbs2-rx` (registers, DMA, 1 MB buffer at 0x3EF00000;
+map3: the LLR queue's 2 MB at 0x3E800000, used by the PL only)
 and `dvbs2-rx` in the same buildroot package as `dvbs2-tx`:
 
 ```
@@ -772,6 +974,11 @@ output, or the timing loop output with `--constellation-raw`) every second.
 With a core >= VERSION 0x0001_0200 the status line ends with the last
 confident PLS decode of a data header (`, PLS qpsk3/4 pilots`, `!` when it
 is not the configured MODCOD/pilots, `, PLS -` before the first).
+`--llr-queue` (core >= VERSION 0x0001_0500) decodes through the DDR LLR
+queue ([LLR queue](#llr-queue-ddr)); it refuses to start unless the UIO
+device has the reserved 2 MB as map3, and the status line then ends with
+`, LLRQ frames/waiting(most)/dropped/AXI errors`. On such a core dvbs2-rx
+always writes LLRQ_CTRL, so the queue is off unless asked for.
 
 `--detect` detects the MODCOD and pilots instead of receiving. The frame
 sync needs the right pilots (they set the frame length, and its correlation
@@ -795,6 +1002,60 @@ in a dummy frame).
 ```
 dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
 ```
+
+### LLR queue (DDR)
+
+`dvbs2_rx_llrq` (docs/rx2_design.md sections 6.1, 6.2, 7.3) queues the
+carrier's LLR frames in DDR between the carrier and the LDPC decoder: the
+path of the second receive slot, where two front ends share one decoder.
+In RX 1.5 it was off by default (`LLRQ_CTRL` = 1 and a soft reset put the
+single-slot receiver on it, with the same decoded frames); from 2.0 it is
+always in the path and on once `LLRQ_BASE` is set (registers at 0x2E0..,
+[Two receive slots: the receiver](#two-receive-slots-the-receiver-20)).
+
+```
+carrier ─► packer ─► staging (32 beats/slot) ─► AXI write bursts ─► DDR ring[slot][frame] (S_AXI_HP1)
+DDR ─► AXI read bursts ─► read FIFO (64 beats) ─► LDPC decoder (frames in completion order)
+```
+
+* Layout: 2 MB at `LLRQ_BASE` (0x3E800000, reserved by the device tree as
+  `dvbs2-llr-buffer`, map3 of the `dvbs2-rx` UIO device): slot s, frame f
+  at base + s x 1 MB + f x 64 KB, the frame's 64800 LLR bytes in bit order.
+  16-beat (128-byte) bursts of 64 bits, the last of a frame 4 beats; up to 4
+  write bursts and 64 read beats in flight; ID 0, in-order responses.
+* A frame is in the queue when the response of its last write burst is
+  back; its descriptor {slot, frame} then joins one FIFO, and the reader
+  streams the frames to the decoder in that order, each with its rate, its
+  slot's `LDPC_MAX_IT` and its tag {slot, pilots, MODCOD}. A ring entry is
+  free when its last read beat is in. A frame that starts while its slot's
+  ring is full (`LLRQ_CFG` frames per slot, default 16) is dropped and
+  counted (`LLRQ_DROPPED`).
+* Shared iteration budget: while more than QHI frames wait (`LLRQ_STAT`
+  [5:0]: complete frames + the one being read), the decoder stops each
+  frame at MAX_IT_LO iterations (checked after each iteration).
+* Soft reset: the AXI transfers in flight finish first (a burst is never cut
+  short; responses and read data are taken and ignored), then the queue
+  starts empty.
+* LDPC and BCH decoders: the rate, iteration limit and tag are per frame
+  (taken with the frame's first word, kept per APP buffer), so consecutive
+  frames may differ; the packet header's MODCOD/pilots are the frame's own
+  and bit 55 its slot.
+
+Tests: `sim/rx/test_llrq.py` (the queue and the LDPC decoder, the AXI
+side on `sim/rx/axi_mem.sv`, a memory model whose writes become visible
+only with their response, random stalls and latency, protocol checks):
+both slots at 2.38 MBd in total, heavy backpressure, drops when over
+budget, the iteration cap, abandoned frames, a soft reset with transfers in
+flight; every frame equal to `model/ldpcdec.py` at its iteration count and
+with its tag. `test_rx.py`: `test_ldpc_mixed`, `test_ldpc_itcap`,
+`test_bch_mixed` (per-frame rate), `test_rx_end_to_end[p_1_2_llrq]` and
+`test_rx_axi[1]` (the whole receiver through the queue, the same frames).
+
+Resources (`syn/ooc.tcl 100 dvbs2_rx_llrq`, xc7z020-2): 717 LUTs (250 of
+them distributed RAM: staging 2 x 32, read FIFO 64 beats), 490 FFs, no
+block RAM, no DSP, WNS +2.66 ns. The whole wrapper (`dvbs2_rx_axi`): 21367
+-> 22105 LUTs, 12877 -> 13361 FFs, 98 BRAM tiles and 73 DSPs as before, WNS
++0.82 -> +0.76 ns.
 
 ## Loopback self-test on the board
 
