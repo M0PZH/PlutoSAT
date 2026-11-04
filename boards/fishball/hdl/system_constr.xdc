@@ -134,6 +134,18 @@ set_max_delay -datapath_only 10.0 \
   -from [get_cells -hier -filter "NAME =~ ${nbiq_cdc}/mem_reg*"]
 set_false_path -to [get_cells -hier -filter {NAME =~ */nbiq/*/rst_s_reg[0]}]
 
+# Spectrum analyser: AD9361 l_clk -> sys_cpu_clk ADC sample FIFO inside fft
+set fft_cdc [get_cells -hier -filter {NAME =~ */fft/*/u_adc_fifo}]
+set_max_delay -datapath_only 4.0 \
+  -from [get_cells -hier -filter "NAME =~ ${fft_cdc}/wgray_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${fft_cdc}/wgray_r1_reg*"]
+set_max_delay -datapath_only 4.0 \
+  -from [get_cells -hier -filter "NAME =~ ${fft_cdc}/rgray_r_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${fft_cdc}/rgray_w1_reg*"]
+set_max_delay -datapath_only 10.0 \
+  -from [get_cells -hier -filter "NAME =~ ${fft_cdc}/mem_reg*"]
+set_false_path -to [get_cells -hier -filter {NAME =~ */fft/*/rst_s_reg[0]}]
+
 # Self-test noise source: synchronisers, quasi-static configuration
 # (sys_cpu_clk -> l_clk) and the power meter results (l_clk -> sys_cpu_clk)
 set awgn_i [get_cells -hier -filter {NAME =~ */rx_awgn/*/i_rx_awgn_axi}]

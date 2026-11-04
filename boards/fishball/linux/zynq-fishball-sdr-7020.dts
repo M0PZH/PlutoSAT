@@ -172,13 +172,21 @@
 		interrupts = <0 53 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
-	/* narrowband IQ channels (nbiq/): registers and the four 1 MB rings */
+	/* narrowband IQ channels (nbiq/): registers and the rings (ch0..3 512 KB each, ch4 2 MB) */
 	nbiq@7c520000 {
 		compatible = "generic-uio";
 		reg = <0x7c520000 0x10000>,     /* nbiq registers */
 		      <0x3eb00000 0x00400000>;  /* ring buffers */
 		interrupt-parent = <&intc>;
 		interrupts = <0 52 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/* spectrum analyser (fft/) */
+	fft@7c540000 {
+		compatible = "generic-uio";
+		reg = <0x7c540000 0x10000>;
+		interrupt-parent = <&intc>;
+		interrupts = <0 36 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
 	/* self-test noise source on the receive data (awgn/) */

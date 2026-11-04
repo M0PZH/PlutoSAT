@@ -209,6 +209,10 @@ ad_ip_parameter axi_ad9361 CONFIG.ID 0
 ad_ip_parameter axi_ad9361 CONFIG.CMOS_OR_LVDS_N 0
 ad_ip_parameter axi_ad9361 CONFIG.MODE_1R1T 0
 ad_ip_parameter axi_ad9361 CONFIG.ADC_INIT_DELAY 30
+# room for the PlutoSAT cores: no DDS test tones (dvbs2_tx's carrier-only
+# mode gives a test tone; DMA transmit is unaffected) and no TDD (FDD only)
+ad_ip_parameter axi_ad9361 CONFIG.DAC_DDS_DISABLE 1
+ad_ip_parameter axi_ad9361 CONFIG.TDD_DISABLE 1
 
 ad_ip_instance axi_dmac axi_ad9361_dac_dma
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_TYPE_SRC 0
@@ -473,9 +477,10 @@ ad_cpu_interconnect 0x7C490000 axi_dvbs2_rx_dma
 ad_cpu_interconnect 0x7C510000 dvbs2_rx
 ad_cpu_interrupt ps-9 mb-9 axi_dvbs2_rx_dma/irq
 
-# Narrowband IQ channels (nbiq/): 4 x (NCO, CIC, FIR) from either receive
-# channel -> one DDR ring per channel, written through S_AXI_GP0 (the HP
-# ports are taken).
+# Narrowband IQ channels (nbiq/): 5 x (NCO, CIC, FIR) from either receive
+# channel (4 user channels + 1 overview) -> one DDR ring per channel, written
+# through S_AXI_GP0 (the HP ports are taken). tap_* (the FIR outputs) feed
+# the spectrum FFT.
 
 set nbiq_dir [file normalize [file join $ad_hdl_dir .. nbiq]]
 add_files -norecurse [concat \
@@ -503,5 +508,32 @@ create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
 
 ad_cpu_interconnect 0x7C520000 nbiq
 ad_cpu_interrupt ps-8 mb-8 nbiq/irq
+
+# Spectrum analyser (fft/): averaged 4096-bin spectra of rx0, rx1 or an
+# nbiq channel (the tap), read by the ARM over AXI-Lite (UIO "fft")
+
+set fft_dir [file normalize [file join $ad_hdl_dir .. fft]]
+source [file join $fft_dir ip fft_xfft.tcl]
+fft_create_xfft
+add_files -norecurse [list \
+  [file join $fft_dir rtl fft_win.sv] [file join $fft_dir rtl fft_acc.sv] \
+  [file join $fft_dir rtl fft_axi.sv] [file join $fft_dir rtl gen fft_win.mem] \
+  [file join $fft_dir ip fft_bd.v]]
+update_compile_order -fileset sources_1
+create_bd_cell -type module -reference fft_bd fft
+
+ad_connect axi_ad9361/l_clk       fft/adc_clk
+ad_connect rx_awgn/out_valid_i0   fft/adc_valid
+ad_connect rx_awgn/out_data_i0    fft/adc_data_i0
+ad_connect rx_awgn/out_data_q0    fft/adc_data_q0
+ad_connect rx_awgn/out_data_i1    fft/adc_data_i1
+ad_connect rx_awgn/out_data_q1    fft/adc_data_q1
+ad_connect nbiq/tap_valid         fft/tap_valid
+ad_connect nbiq/tap_ch            fft/tap_ch
+ad_connect nbiq/tap_i             fft/tap_i
+ad_connect nbiq/tap_q             fft/tap_q
+
+ad_cpu_interconnect 0x7C540000 fft
+ad_cpu_interrupt ps-7 mb-7 fft/irq
 
 ad_cpu_interconnect 0x7C530000 rx_awgn
