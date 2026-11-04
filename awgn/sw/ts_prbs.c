@@ -94,15 +94,18 @@ static int check(double secs, double warm)
 	size_t fill = 0;
 	double t0 = 0, tc = 0;
 
-	signal(SIGINT, on_signal);
-	signal(SIGTERM, on_signal);
-	signal(SIGALRM, on_signal);
+	/* no SA_RESTART: the alarm must interrupt a read that waits forever */
+	struct sigaction sa = { .sa_handler = on_signal };
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGALRM, &sa, NULL);
 	if (secs > 0)
 		alarm((unsigned)(warm + secs + 10));    /* nothing arrives: give up */
 	while (!stop) {
 		ssize_t r = read(0, pkt + fill, TS - fill);
 		if (r < 0) {
-			if (errno == EINTR)
+			if (errno == EINTR && !stop)
 				continue;
 			break;
 		}
