@@ -222,6 +222,7 @@ module dvbs2_rx_framesync2
   logic        pw_on;                        // PLS decode of the last tag to be used ...
   logic [11:0] pw_cnt;                       // ... this many symbols later
   logic [1:0]  nbad;                         // LOCKED: tags in a row not confirmed
+  logic        nodz;                         // after a PLS drop: next search peak at the data length only
 
   wire pls_hold = pw_on && pw_cnt == '0 && pls_busy;
 
@@ -234,11 +235,12 @@ module dvbs2_rx_framesync2
 
 
   // ------------------------------------------------------------ the other slot's context
-  // context: 37 registers, 501 bits (shadowed):
+  // context: 38 registers, 502 bits (shadowed):
   //   best_m(32) best_n(32) best_v(1) chk_alt(1) cnt_flywheel(16) cnt_found(16) cnt_lost(16)
   //   csum(33) cwin_c(1) cwin_m(32) fst(2) have_last(1) last_n(32) miss(4) n(32) nbad(2) nchk(1)
-  //   nm(32) pend_c(1) pend_f(1) pend_hs(32) pend_v(1) pi_(16) pk(32) pq(16) pr_dummy(1) pr_ok(1)
-  //   pr_v(1) pred(32) pw_cnt(12) pw_on(1) ty_p(1) ty_pc(1) win_c(1) win_m(32) win_n(32) win_v(1)
+  //   nm(32) nodz(1) pend_c(1) pend_f(1) pend_hs(32) pend_v(1) pi_(16) pk(32) pq(16) pr_dummy(1)
+  //   pr_ok(1) pr_v(1) pred(32) pw_cnt(12) pw_on(1) ty_p(1) ty_pc(1) win_c(1) win_m(32) win_n(32)
+  //   win_v(1)
   // per-symbol / per-job temporaries (not shadowed, scrambled at swaps in RX2_SCRAMBLE):
   //   Ad_i Ad_q Az_i Az_q ad_i ad_q az_i az_q ci cq inwin md mz nm10 nm4 p1 p2 p3 p4 pdi pdq rd_nd
   //   rd_nz rd_ok sqd_i sqd_q sqz_i sqz_q t thr thresh_q
@@ -260,6 +262,7 @@ module dvbs2_rx_framesync2
   logic [1:0] nbad_sh;
   logic nchk_sh;
   logic [31:0] nm_sh;
+  logic nodz_sh;
   logic pend_c_sh;
   logic pend_f_sh;
   logic [31:0] pend_hs_sh;
@@ -292,6 +295,7 @@ module dvbs2_rx_framesync2
       n_sh <= '0;
       nbad_sh <= '0;
       nm_sh <= '0;
+      nodz_sh <= 1'b0;
       pend_v_sh <= 1'b0;
       pi__sh <= '0;
       pk_sh <= '0;
@@ -313,6 +317,7 @@ module dvbs2_rx_framesync2
         n_sh <= '0;
         nbad_sh <= '0;
         nm_sh <= '0;
+        nodz_sh <= 1'b0;
         pend_v_sh <= 1'b0;
         pi__sh <= '0;
         pk_sh <= '0;
@@ -340,6 +345,7 @@ module dvbs2_rx_framesync2
         nbad_sh <= nbad;
         nchk_sh <= nchk;
         nm_sh <= nm;
+        nodz_sh <= nodz;
         pend_c_sh <= pend_c;
         pend_f_sh <= pend_f;
         pend_hs_sh <= pend_hs;
@@ -399,6 +405,7 @@ module dvbs2_rx_framesync2
       pr_v <= 1'b0;
       pw_on <= 1'b0;
       nbad <= '0;
+      nodz <= 1'b0;
       if (rst || m_slot == cur) m_valid <= 1'b0;
       cnt_found <= '0; cnt_flywheel <= '0; cnt_lost <= '0;
     end else begin
@@ -442,6 +449,7 @@ module dvbs2_rx_framesync2
                 fst <= SEARCH;
                 best_v <= 1'b0;
                 chk_alt <= 1'b0;
+                nodz <= 1'b1;
                 have_last <= 1'b0;
                 pk <= '0;
               end else if (fst == LOCKED) begin
@@ -449,6 +457,7 @@ module dvbs2_rx_framesync2
                 else if (nbad == 2'(PLS_NBAD - 1)) begin
                   fst <= SEARCH;
                   best_v <= 1'b0;
+                  nodz <= 1'b1;
                   pk <= '0;
                   have_last <= 1'b0;
                   cnt_lost <= cnt_lost + 16'd1;
@@ -548,7 +557,10 @@ module dvbs2_rx_framesync2
         end
 
         S_DEC3: begin                                // next header of the best due: check it
-          if (fst == SEARCH && n == best_n + LEN_Z - 32'(W)) begin
+          // after a PLS drop the search covers a whole data frame first
+          // (repeating data found again at the dummy length cycles with the
+          // frame, a frame length apart: the carrier confirmed such tags)
+          if (fst == SEARCH && !nodz && n == best_n + LEN_Z - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
             nbad <= '0;
@@ -559,6 +571,7 @@ module dvbs2_rx_framesync2
             fst <= CHECK;
             nchk <= 1'b0;
             nbad <= '0;
+            nodz <= 1'b0;
             chk_alt <= 1'b0;
             pred <= best_n + len_d;
             win_v <= 1'b0;
@@ -689,6 +702,7 @@ module dvbs2_rx_framesync2
       nbad <= nbad_sh;
       nchk <= nchk_sh;
       nm <= nm_sh;
+      nodz <= nodz_sh;
       pend_c <= pend_c_sh;
       pend_f <= pend_f_sh;
       pend_hs <= pend_hs_sh;

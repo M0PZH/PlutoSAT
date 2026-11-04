@@ -716,7 +716,7 @@ does (bit exact per slot to the model). They are not yet used by
 | Module | How | Per slot | Shared |
 | --- | --- | --- | --- |
 | `dvbs2_rx_timing2` | hand-written | sample buffer, coefficient bank (slot = coefficient RAM address MSB, `coef_slot`), kp/ki, integrator preset, loop state, output register | MAC pipeline, gain, TED, loop arithmetic |
-| `dvbs2_rx_framesync2` | generated from `dvbs2_rx_framesync` | context (37 registers, 501 bits), sbuf and the 6 lane memories (slot = address MSB, 256 deep: still one RAMB18 each), header pattern, PLS confirmation inputs | correlator, FSM, DSPs |
+| `dvbs2_rx_framesync2` | generated from `dvbs2_rx_framesync` | context (38 registers, 502 bits), sbuf and the 6 lane memories (slot = address MSB, 256 deep: still one RAMB18 each), header pattern, PLS confirmation inputs | correlator, FSM, DSPs |
 | `dvbs2_rx_carrier2` | generated from `dvbs2_rx_carrier` | context (52 registers, 757 bits), seg (1440 words per slot: 2K x 32 + 1K x 32, 3 RAMB36), zbuf (banks 0..3 of both slots 1K x 32 + bank 4 of both 256 x 32: 1.5 tiles), header pattern, output frame counters | FSM, DSPs, CORDIC, divider, rotator (its NCO ROM), zrbuf, LLR pipeline, output FIFO (each word carries its slot) |
 | `dvbs2_rx_pls` | two instances | everything | nothing |
 

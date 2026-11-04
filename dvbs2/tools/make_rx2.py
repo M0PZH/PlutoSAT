@@ -208,7 +208,7 @@ FS_CONTEXT = [
     "n", "pi_", "pq", "fst", "best_v", "best_m", "best_n", "win_v", "win_m", "win_n", "win_c",
     "cwin_m", "cwin_c", "pred", "miss", "pk", "nm", "pend_v", "pend_hs", "pend_c", "pend_f", "nchk",
     "chk_alt", "csum", "have_last", "last_n", "ty_p", "ty_pc", "pr_v", "pr_ok", "pr_dummy", "pw_on",
-    "pw_cnt", "nbad", "cnt_found", "cnt_flywheel", "cnt_lost",
+    "pw_cnt", "nbad", "cnt_found", "cnt_flywheel", "cnt_lost", "nodz",
 ]
 # written and read within one symbol (S_IN .. S_OUT)
 FS_TEMP = [
