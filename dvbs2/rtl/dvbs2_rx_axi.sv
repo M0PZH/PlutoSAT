@@ -47,9 +47,13 @@
 //   0x2A8 SNAP_DATA   RO  [15:0] I, [31:16] Q of symbol SNAP_ADDR, then SNAP_ADDR++
 //   LLR queue (dvbs2_rx_llrq.sv; docs/rx2_design.md 6.1, 6.2): the frames of both
 //   slots through a ring in DDR (m_axi, S_AXI_HP1) to the LDPC decoder
-//   0x2E0 LLRQ_BASE   RW  [31:21] ring region, 2 MB aligned (default 0x3E80_0000, the
-//                         device tree's dvbs2-llr-buffer): slot s frame f at base +
-//                         s * 1 MB + f * 64 KB; takes effect at the next soft reset (0x210)
+//   0x2E0 LLRQ_BASE   RW  [31:21] ring region, 2 MB aligned (the device tree's
+//                         dvbs2-llr-buffer, UIO map 3; 0x3E80_0000 on the fishball): slot
+//                         s frame f at base + s * 1 MB + f * 64 KB; takes effect at the
+//                         next soft reset (0x210; while the queue is off also a slot's).
+//                         0 (the reset value): the queue is off, the slots' frames are not
+//                         decoded (so the PL never writes into memory the device tree
+//                         does not reserve)
 //   0x2E4 LLRQ_CFG    RW  [4:0] frames per slot ring (1..16, default 16; at the next soft
 //                         reset), [13:8] QHI (default 63: no cap), [21:16] MAX_IT_LO
 //                         (default 10): while more than QHI frames wait, frames stop at
@@ -216,6 +220,7 @@ module dvbs2_rx_axi #(
   logic [31:0] scratch;
   logic [1:0]  slot_en;
   logic [10:0] llrq_base, llrq_base_q;
+  logic        llrq_on;
   logic [4:0]  llrq_nfr, llrq_nfr_q;
   logic [5:0]  llrq_qhi, llrq_it_lo;
   logic [17:0] cdata;
@@ -252,9 +257,12 @@ module dvbs2_rx_axi #(
       else if (slot_cnt[s] != 0)     slot_cnt[s] <= slot_cnt[s] - 1'b1;
       slot_rst[s] <= slot_req[s] || (slot_cnt[s] != 0);
     end
-    if (core_rst) begin                      // the queue's ring layout changes only at a reset
+    // the queue's ring layout changes only at a reset: of the receiver, or while the
+    // queue is off of a slot (so 1.x software, whose soft reset is slot 0's, starts it)
+    if (core_rst || (!llrq_on && slot_rst != 0)) begin
       llrq_base_q <= llrq_base;
       llrq_nfr_q  <= llrq_nfr;
+      llrq_on     <= llrq_base != '0;
     end
   end
 
@@ -282,7 +290,7 @@ module dvbs2_rx_axi #(
       aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b0;
       scratch <= '0; slot_en <= '0;
       snap_src <= 1'b0; snap_sel <= 1'b0;
-      llrq_base <= 11'(32'h3E80_0000 >> 21);
+      llrq_base <= '0;                       // queue off until software sets the region
       llrq_nfr <= 5'd16; llrq_qhi <= 6'd63; llrq_it_lo <= 6'd10;
       for (int s = 0; s < 2; s++) begin
         modcod[s] <= 5'd4; pilots[s] <= 1'b1;
@@ -355,10 +363,12 @@ module dvbs2_rx_axi #(
   end
 
   // ---------------------------------------------------------------- ADC -> DDCs
-  // enable and reset cross into the ADC domain
+  // enable (either slot) and reset cross into the ADC domain, each from a register
+  logic en_any;
+  always_ff @(posedge clk) en_any <= |slot_en;
   (* ASYNC_REG = "TRUE" *) logic [1:0] en_a, rst_a;
   always_ff @(posedge adc_clk) begin
-    en_a  <= {en_a[0], |slot_en};
+    en_a  <= {en_a[0], en_any};
     rst_a <= {rst_a[0], core_rst};
   end
 
@@ -439,7 +449,7 @@ module dvbs2_rx_axi #(
     .timing_kp(t_kp), .timing_ki(t_ki), .timing_integ0(t_integ0_s), .modcod, .pilots, .fs_thresh, .gold_xa, .gold_xb,
     .pll_kp, .pll_ki, .ldpc_max_it(max_it),
     .pls_h, .pls_step, .pls_seen_clr,
-    .axi_rst(!aresetn_q), .llrq_base({llrq_base_q, 21'd0}), .llrq_nfr(llrq_nfr_q), .llrq_qhi, .llrq_it_lo,
+    .axi_rst(!aresetn_q), .llrq_en(llrq_on), .llrq_base({llrq_base_q, 21'd0}), .llrq_nfr(llrq_nfr_q), .llrq_qhi, .llrq_it_lo,
     .m_valid(b_valid), .m_ready(1'b1), .m_data(b_data), .m_last(b_last), .m_ok(b_ok), .m_ldpc_ok(b_ldpc_ok),
     .m_iters(b_iters), .m_nerr(b_nerr), .m_raw_err(b_raw_err),
     .m_rate(b_rate), .m_modcod(b_modcod), .m_pilots(b_pilots), .m_slot(b_slot),

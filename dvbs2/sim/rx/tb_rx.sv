@@ -62,7 +62,7 @@ module tb_rx;
   logic [31:0] st_pls_seen [2];
   logic [15:0] st_pls_freq [2], st_pls_count [2], st_pls_dcount [2], st_pls_diff_modcod [2], st_pls_diff_pilots [2];
   logic [15:0] st_pls_skipped [2];
-  logic axi_rst = 1;
+  logic axi_rst = 1, llrq_en = 1;
   logic [31:0] llrq_base = 32'h3E80_0000;
   logic [4:0] llrq_nfr;
   logic [5:0] llrq_qhi, llrq_it_lo;

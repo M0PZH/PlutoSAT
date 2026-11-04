@@ -771,7 +771,7 @@ def read_regs(fregs):
     return {int(a, 16): int(v, 16) for a, v in lines if a[0] not in "sw"}, lines
 
 
-@pytest.mark.parametrize("mode", ["v2", "v1", "s1"])
+@pytest.mark.parametrize("mode", ["v2", "v1", "s1", "nobase"])
 def test_rx_axi(rx_axi_exe, mode):
     """ADC-rate samples (6 per symbol, carrier offset partly removed by the
     DDC NCO) through the register-configured wrapper, one slot, the other
@@ -780,7 +780,8 @@ def test_rx_axi(rx_axi_exe, mode):
     latency), the LLRQ registers counting the frames. v2: slot 0 configured
     through map v2 (receiver reset 0x210, slot enable); v1: slot 0 as 1.x
     software does it (bank 0 alone, CTRL = 2 then 1: the 1.x map is slot 0's
-    bank); s1: slot 1."""
+    bank; LLRQ_BASE set before); s1: slot 1; nobase: LLRQ_BASE not set, the
+    queue off: the slot demodulates, nothing is decoded or written to memory."""
     slot = int(mode == "s1")
     base, other = SLOT_BANK * slot, SLOT_BANK * (1 - slot)
     import bchdec
@@ -848,12 +849,18 @@ def test_rx_axi(rx_axi_exe, mode):
                                            dec=dec, ntaps=len(dcoef), shift=shift, tkp=kp, tki=ki,
                                            thresh=fx.fs_threshold(), pkp=r["carrier"].kp_p, pki=r["carrier"].ki_p,
                                            maxit=30, axistall=30, axilat=200, v1=int(mode == "v1"),
-                                           **{"in": fin, "out": fout}))
+                                           nobase=int(mode == "nobase"), **{"in": fin, "out": fout},
+                                           **({"memhi": 0} if mode == "nobase" else {})))   # no access at all
     print(log)
     regs, lines = read_regs(fregs)
     snap_got = [int(v, 16) for a, v in lines if a.startswith("s")]
     print({hex(k): v for k, v in regs.items()})
     b = base
+    if mode == "nobase":
+        assert regs[0x2E0] == 0 and regs[0x2E8] == 0 and regs[b + 0x80] >= len(want) - 1
+        assert regs[b + 0x84] == regs[b + 0x90] == 0 and os.path.getsize(fout) == 0
+        assert regs[b + 0x50] == 0                       # the front end runs on
+        return
     assert regs[b + 0x50] == 0 and regs[b + 0x54] == 0 and regs[b + 0x8C] == 0     # nothing lost
     assert regs[b] == regs[0x200] == regs[other] == VERSION
     assert regs[0x2E0] == 0x3E80_0000 and regs[0x2E4] == 0x000A3F10

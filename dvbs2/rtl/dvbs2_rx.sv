@@ -25,9 +25,10 @@
 // the LLR queue's drop count). A frame of the slot cut by the reset is not
 // decoded; frames already queued are.
 //
-// The LLR queue is always on: the frames of both slots go through the DDR
-// ring (llrq_base, 2 MB) and are decoded in completion order, each with its
-// own rate, its slot's ldpc_max_it and its tag (dvbs2_rx_llrq.sv).
+// The LLR queue is always in the path (llrq_en: on; off, nothing is decoded):
+// the frames of both slots go through the DDR ring (llrq_base, 2 MB) and are
+// decoded in completion order, each with its own rate, its slot's
+// ldpc_max_it and its tag (dvbs2_rx_llrq.sv).
 
 module dvbs2_rx #(
   parameter string LUT_FILE = "nco_lut.mem",
@@ -62,8 +63,10 @@ module dvbs2_rx #(
   input  logic [5:0]         pls_h [2],        // PLS decoder grid -H..H
   input  logic [9:0]         pls_step [2],     // ... step, turns * 2^16 per symbol
   input  logic [31:0]        pls_seen_clr [2], // w1c of st_pls_seen
-  // LLR queue (base, nfr static, change under rst); axi_rst: the AXI bus reset
+  // LLR queue (en, base, nfr static, change under rst); axi_rst: the AXI bus reset;
+  // !llrq_en: the queue is off, the carrier's LLR words are dropped (nothing decoded)
   input  logic               axi_rst,
+  input  logic               llrq_en,
   input  logic [31:0]        llrq_base,    // 2 MB aligned
   input  logic [4:0]         llrq_nfr,     // frames per slot ring, 1..16
   input  logic [5:0]         llrq_qhi,     // iteration cap while more than qhi frames wait
@@ -271,12 +274,15 @@ module dvbs2_rx #(
   logic [4:0] d_modcod;
   logic       cap_en;
   logic [5:0] cap;
+  logic       q_ready;
+
+  assign l_ready = q_ready || !llrq_en;
 
   dvbs2_rx_llrq u_llrq (
-    .clk, .arst(axi_rst), .rst, .en(1'b1), .base(llrq_base), .nfr(llrq_nfr),
+    .clk, .arst(axi_rst), .rst, .en(llrq_en), .base(llrq_base), .nfr(llrq_nfr),
     .max_it0(ldpc_max_it[0]), .max_it1(ldpc_max_it[1]), .qhi(llrq_qhi), .it_lo(llrq_it_lo),
     .clr_dropped(rst_s),
-    .s_valid(l_valid), .s_ready(l_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
+    .s_valid(l_valid && llrq_en), .s_ready(q_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
     .s_slot(l_slot), .s_modcod(modcod[l_slot]), .s_pilots(pilots[l_slot]),
     .m_valid(d_valid), .m_ready(d_ready), .m_llr_i(d_i), .m_llr_q(d_q), .m_first(d_first),
     .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots),

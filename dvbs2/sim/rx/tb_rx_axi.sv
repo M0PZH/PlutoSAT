@@ -11,7 +11,8 @@
 //   +llrqcfg= (LLRQ_CFG, 0: default; the LLR queue on axi_mem +axistall= +axilat=)
 //   +snapslot= +snapsrc= constellation snapshot of that slot (armed through its bank)
 //   +v1=1: slot 0 configured as 1.x software does it (bank 0 alone: CTRL = 2, then 1),
-//          no write to the shared bank
+//          after LLRQ_BASE (the only write to the shared bank)
+//   +nobase=1: LLRQ_BASE not written (the queue off: no frame decoded)
 `timescale 1ps/1ps
 module tb_rx_axi;
   logic clk = 0, adc_clk = 0, aresetn = 0;
@@ -160,6 +161,8 @@ module tb_rx_axi;
     repeat (20) @(posedge clk);
     axi_read(v1 ? 10'h004 : 10'h204, r);
     if (r != 32'h44565232) $fatal(1, "bad ID %h", r);
+    // the LLR queue's region (dvbs2-rx: UIO map 3); +nobase=1: not set, the queue stays off
+    if (!arg("nobase", 0)) axi_write(10'h2E0, 32'h3E80_0000);
     if (!v1 && arg("llrqcfg", 0) != 0) axi_write(10'h2E4, arg("llrqcfg", 0));
     for (int s = 0; s < 2; s++)
       if (en[s]) config_slot(s);

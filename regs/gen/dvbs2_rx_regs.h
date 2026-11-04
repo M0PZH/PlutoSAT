@@ -103,7 +103,7 @@
 #define DVBS2_RX_SNAP_DATA_Q_SHIFT 16
 #define DVBS2_RX_SNAP_DATA_Q_WIDTH 16
 #define DVBS2_RX_SNAP_DATA_Q_MASK 0xFFFF0000u
-/* LLRQ_BASE (rw): LLR queue ring region, 2 MB aligned (the device tree's dvbs2-llr-buffer, map 3): slot s frame f at base + s x 1 MB + f x 64 KB; takes effect at the next CTRL.RESET */
+/* LLRQ_BASE (rw): LLR queue ring region, 2 MB aligned (the device tree's dvbs2-llr-buffer, map 3; 0x3E800000 on the fishball): slot s frame f at base + s x 1 MB + f x 64 KB; takes effect at the next CTRL.RESET (while the queue is off also at a slot's reset). 0 (reset): the queue is off and no frame is decoded, so the PL never writes into memory the device tree does not reserve */
 #define DVBS2_RX_LLRQ_BASE 0x2E0
 /*   [31:21] BASE: Address bits 31:21 */
 #define DVBS2_RX_LLRQ_BASE_BASE_SHIFT 21
