@@ -6,9 +6,11 @@
 // insensitive to the carrier frequency (the header differentials are +-j).
 //
 //   SEARCH : keep the largest metric seen (the search peak); its next
-//            header is CHECKed at the dummy length first (the type is
-//            unreliable at low SNR), for a data candidate then at the data
-//            length
+//            header is CHECKed at the dummy length first and then at the
+//            data length, whichever candidate gave the peak: the type is
+//            unreliable at low SNR, and a header of another MODCOD can be
+//            closer to the dummy header than to the configured one (QPSK
+//            1/4 differs from the dummy header in one differential)
 //   CHECK  : max over +-W around the prediction; NCHECK (2) headers in a
 //            row, each above max(thresh, 4 nm), both together above
 //            10 nm (nm: mean metric, the noise level) -> LOCKED, else SEARCH
@@ -128,7 +130,7 @@ module dvbs2_rx_framesync
   logic [1:0]  fst;
   logic        best_v, win_v;
   logic [31:0] best_m, best_n, win_m, win_n, pred;
-  logic        best_c, win_c;
+  logic        win_c;
   logic [31:0] cwin_m;                       // window: best at the predicted position
   logic        cwin_c;
   logic [3:0]  miss;
@@ -139,7 +141,7 @@ module dvbs2_rx_framesync
   logic        pend_v, pend_c, pend_f;
   logic [31:0] pend_hs;
   logic        nchk;                         // CHECK: headers found so far (NCHECK = 2)
-  logic        chk_alt;                      // CHECK at the dummy length of a data candidate
+  logic        chk_alt;                      // CHECK at the dummy length of a search peak
   logic [32:0] csum;                         // CHECK: sum of the metrics found
   logic [31:0] nm;                           // mean metric, IIR 2^-10 per symbol
   logic        have_last;                    // last_n: end of the last tagged header
@@ -267,7 +269,7 @@ module dvbs2_rx_framesync
             if (fst != SEARCH && have_last) pred <= last_n + flen(ty_pc, len_d);
           end
           if (fst == SEARCH && (!best_v || md > best_m)) begin
-            best_v <= 1'b1; best_m <= md; best_n <= n; best_c <= 1'b0;
+            best_v <= 1'b1; best_m <= md; best_n <= n;
           end
           nm <= 32'($signed({2'b0, nm}) + (($signed({2'b0, 32'((33'(md) + 33'(mz)) >> 1)}) - $signed({2'b0, nm})) >>> 10));
           st <= S_DEC2;
@@ -275,7 +277,7 @@ module dvbs2_rx_framesync
 
         S_DEC2: begin                                // search: dummy candidate
           if (fst == SEARCH && mz > best_m) begin
-            best_m <= mz; best_n <= n; best_c <= 1'b1;
+            best_m <= mz; best_n <= n;
           end
           thresh_q <= thresh;
           thr  <= (pk >> 2) > thresh ? (pk >> 2) : thresh;
@@ -288,10 +290,10 @@ module dvbs2_rx_framesync
           if (fst == SEARCH && n == best_n + LEN_Z - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
-            chk_alt <= !best_c;
+            chk_alt <= 1'b1;
             pred <= best_n + LEN_Z;
             win_v <= 1'b0;
-          end else if (fst == SEARCH && !best_c && n == best_n + len_d - 32'(W)) begin
+          end else if (fst == SEARCH && n == best_n + len_d - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
             chk_alt <= 1'b0;

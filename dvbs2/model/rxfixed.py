@@ -495,7 +495,7 @@ class FrameSync:
         self.pred = 0
         self.nchk = 0         # CHECK: headers found in a row
         self.csum = 0         # ... sum of their metrics
-        chk_alt = False       # CHECK at the dummy length of a "data" search peak
+        chk_alt = False       # CHECK at the dummy length of a search peak
         self.have_last = False
         self.last_n = 0
         win = None
@@ -512,15 +512,18 @@ class FrameSync:
                 for c in (0, 1):
                     if best is None or mets[c][k] > best[0]:
                         best = (int(mets[c][k]), k, c)
-                # the search peak's type is unreliable at low SNR: its next
-                # header is looked for at the dummy length first
+                # the search peak's type is unreliable (at low SNR; and a
+                # header of another MODCOD can be closer to the dummy header
+                # than to the configured one: QPSK 1/4 differs from it in one
+                # differential): its next header is looked for at the dummy
+                # length first, then at the data length
                 if k == best[1] + L_DUMMY - FS_W:
                     self.st = self.CHECK
                     self.nchk = 0
-                    chk_alt = best[2] == 0
+                    chk_alt = True
                     self.pred = best[1] + L_DUMMY
                     win = None
-                elif best[2] == 0 and k == best[1] + self.L[0] - FS_W:
+                elif k == best[1] + self.L[0] - FS_W:
                     self.st = self.CHECK
                     self.nchk = 0
                     chk_alt = False
