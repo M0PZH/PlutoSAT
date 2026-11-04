@@ -1,6 +1,6 @@
 # Out-of-context implementation of the DVB-S2 cores for resource/timing numbers.
 #   vivado -mode batch -source ooc.tcl [-tclargs <clock MHz> [dvbs2_tx | dvbs2_rx | dvbs2_ldpc_dec |
-#                                                             dvbs2_rx_ddc | dvbs2_rx_axi]]
+#                                                             dvbs2_rx_ddc | dvbs2_rx_axi | dvbs2_rx_pls]]
 # The RX wrapper (dvbs2_rx_axi) gets its 100 MHz AXI clock and a 61.44 MHz ADC clock.
 if {[info exists ::env(OOC_THREADS)]} { set_param general.maxThreads $::env(OOC_THREADS) }
 set mhz [expr {[llength $argv] > 0 ? [lindex $argv 0] : 150}]

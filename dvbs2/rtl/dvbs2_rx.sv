@@ -7,7 +7,7 @@
 //
 // Models: model/rxfixed.py (receive()), model/ldpcdec.py. The sample input
 // has no backpressure; samples arriving with the FIFO full are dropped and
-// counted.
+// counted. dvbs2_rx_pls decodes the PLS code of every PLHEADER (status only).
 
 module dvbs2_rx #(
   parameter string LUT_FILE = "nco_lut.mem",
@@ -37,6 +37,9 @@ module dvbs2_rx #(
   input  logic [17:0]        pll_kp,
   input  logic [17:0]        pll_ki,
   input  logic [5:0]         ldpc_max_it,
+  input  logic [5:0]         pls_h,        // PLS decoder grid -H..H
+  input  logic [9:0]         pls_step,     // ... step, turns * 2^16 per symbol
+  input  logic [31:0]        pls_seen_clr, // w1c of st_pls_seen
 
   output logic               m_valid,
   input  logic               m_ready,
@@ -74,7 +77,23 @@ module dvbs2_rx #(
   output logic [15:0]        st_ldpc_frames,
   output logic [15:0]        st_ldpc_failed,
   output logic [15:0]        st_bch_corrected,
-  output logic [15:0]        st_bch_failed
+  output logic [15:0]        st_bch_failed,
+
+  // PLS decoder (dvbs2_rx_pls): the last decode, the last confident data decode, counters
+  output logic               st_pls_v,       // pulse: a decode
+  output logic [6:0]         st_pls_code,    // {MODCOD, short frame, pilots}
+  output logic [3:0]         st_pls_flags,   // {valid, grid searched, carrier hypothesis, confident}
+  output logic [17:0]        st_pls_best,
+  output logic [17:0]        st_pls_second,
+  output logic [15:0]        st_pls_freq,    // turns * 2^16 per symbol
+  output logic [15:0]        st_pls_count,
+  output logic [6:0]         st_pls_dcode,
+  output logic [3:0]         st_pls_dflags,
+  output logic [15:0]        st_pls_dcount,
+  output logic [15:0]        st_pls_diff_modcod,
+  output logic [15:0]        st_pls_diff_pilots,
+  output logic [31:0]        st_pls_seen,
+  output logic [15:0]        st_pls_skipped
 );
 
   logic w_ready;
@@ -111,6 +130,7 @@ module dvbs2_rx #(
     .fs_state(st_fs_state), .cnt_found(st_fs_found), .cnt_flywheel(st_fs_flywheel), .cnt_lost(st_fs_lost));
 
   logic       l_valid, l_ready, l_first, l_last;
+  logic       c_acquired;
   logic [7:0] l_i, l_q;
 
   dvbs2_rx_carrier #(.LUT_FILE(LUT_FILE)) u_carrier (
@@ -118,8 +138,21 @@ module dvbs2_rx #(
     .s_valid(y_valid), .s_ready(y_ready), .s_i(y_i), .s_q(y_q), .s_sof(y_sof), .s_dummy(y_dummy), .s_found(y_found),
     .ty_v, .ty_dummy,
     .m_valid(l_valid), .m_ready(l_ready), .m_llr_i(l_i), .m_llr_q(l_q), .m_first(l_first), .m_last(l_last),
-    .st_freq, .st_amp, .st_energy, .st_gain, .st_frames, .st_acq, .st_fa, .st_retype,
+    .st_freq, .st_amp, .st_energy, .st_gain, .st_frames, .st_acq, .st_fa, .st_retype, .st_acquired(c_acquired),
     .snap_v(snap_c_v), .snap_i(snap_c_i), .snap_q(snap_c_q));
+
+  // PLS decoder on the carrier's input
+  dvbs2_rx_pls u_pls (
+    .clk, .rst, .modcod, .pilots, .cfg_h(pls_h), .cfg_step(pls_step),
+    .s_v(y_valid && y_ready), .s_i(y_i), .s_q(y_q), .s_sof(y_sof), .fhat(st_freq), .acquired(c_acquired),
+    .seen_clr(pls_seen_clr),
+    .res_v(st_pls_v), .res_code(st_pls_code), .res_conf(st_pls_flags[0]), .res_car(st_pls_flags[1]),
+    .res_grid(st_pls_flags[2]), .res_best(st_pls_best), .res_second(st_pls_second), .res_freq(st_pls_freq),
+    .res_valid(st_pls_flags[3]), .st_count(st_pls_count),
+    .data_code(st_pls_dcode), .data_conf(st_pls_dflags[0]), .data_car(st_pls_dflags[1]),
+    .data_grid(st_pls_dflags[2]), .data_valid(st_pls_dflags[3]), .st_data(st_pls_dcount),
+    .st_diff_modcod(st_pls_diff_modcod), .st_diff_pilots(st_pls_diff_pilots),
+    .st_seen(st_pls_seen), .st_skipped(st_pls_skipped));
 
   assign snap_t_v = t_valid && t_ready;
   assign snap_t_i = t_i;

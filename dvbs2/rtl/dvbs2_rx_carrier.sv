@@ -58,6 +58,7 @@ module dvbs2_rx_carrier
   output logic [15:0]        st_acq,       // frequency acquisitions
   output logic [15:0]        st_fa,        // 1/1476 false-lock corrections
   output logic [15:0]        st_retype,    // frame types changed by the coherent decision
+  output logic               st_acquired,  // frequency acquired
 
   output logic               snap_v,       // each data symbol (phase corrected, before the LLR gain)
   output logic signed [15:0] snap_i,
@@ -309,6 +310,7 @@ module dvbs2_rx_carrier
   assign st_acq    = n_acq;
   assign st_fa     = n_fa;
   assign st_retype = n_retype;
+  assign st_acquired = acquired;
 
   assign s_ready = (st == M_IDLE) && !rst;
 

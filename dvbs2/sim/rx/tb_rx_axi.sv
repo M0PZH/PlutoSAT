@@ -3,7 +3,7 @@
 // DMA packets ("hhhhhhhhhhhhhhhh last") and finally the status registers.
 //   +ddccoef= +rrccoef= +in= +out= +regs= +adcdiv= +stall= +hold=
 //   register values: +modcod= +pilots= +xa= +xb= +finc= +dec= +ntaps= +shift= +cicr= +cicshift=
-//                    +tkp= +tki= +thresh= +pkp= +pki= +maxit=
+//                    +tkp= +tki= +thresh= +pkp= +pki= +maxit= +plscfg= (PLS_CFG, 0: default)
 `timescale 1ps/1ps
 module tb_rx_axi;
   logic clk = 0, adc_clk = 0, aresetn = 0;
@@ -94,6 +94,7 @@ module tb_rx_axi;
     axi_write(8'h40, arg("pkp", 0));
     axi_write(8'h44, arg("pki", 0));
     axi_write(8'h48, arg("maxit", 30));
+    if (arg("plscfg", 0) != 0) axi_write(8'hD4, arg("plscfg", 0));
     fc = $fopen(fddc, "r");
     axi_write(8'h28, 0);
     for (int a = 0; a < arg("ntaps", 2); a++) begin
@@ -147,11 +148,20 @@ module tb_rx_axi;
     wait (eof);
     wait (idle > 3000000);
     fr = $fopen(fregs, "w");
-    for (int a = 'h50; a <= 'hB4; a += 4) begin
+    for (int a = 'h50; a <= 'hD8; a += 4) begin
       if (a == 'hA8) continue;
       axi_read(8'(a), r);
       $fdisplay(fr, "%02h %08h", a, r);
     end
+    axi_read(8'h00, r);
+    $fdisplay(fr, "%02h %08h", 0, r);
+    // PLS_SEEN: write 1 to clear
+    axi_write(8'hD0, 32'hFFFF_FFFE);
+    axi_read(8'hD0, r);
+    $fdisplay(fr, "w0 %08h", r);
+    axi_write(8'hD0, 32'h0000_0001);
+    axi_read(8'hD0, r);
+    $fdisplay(fr, "w1 %08h", r);
     axi_write(8'hA4, 0);
     for (int a = 0; a < 1024; a++) begin
       axi_read(8'hA8, r);
