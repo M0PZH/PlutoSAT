@@ -1,0 +1,6 @@
+sim/build*/
+syn/out*/
+__pycache__/
+*.jou
+*.log
+.Xil/
