@@ -147,7 +147,14 @@ module dvbs2_ldpc_dec
   logic [P-1:0]  hs5;
   logic [W-1:0]  wd6 [P];
   logic [4:0]    fifo_wp, fifo_rp;
+  // APP read address. It loads every clock from registers only (no enable,
+  // one 2:1 mux), because it fans out to the 36 APP memories across the die:
+  // ia0 in the decode phases, o_addr in D_OUT (rd_out). The words read while
+  // neither issues are not used (v3, o_r2).
   logic [AW-1:0] rd_addr;
+  logic [AW-1:0] ia0, ia1;                   // issue address of edge e, e + 1 (lookahead)
+  logic [AW-1:0] o_addr;                     // gs(og) + ow
+  (* max_fanout = 16 *) logic rd_out;        // D_OUT: rd_addr from o_addr
   logic [W-1:0]  ld_q [P];
 
   // output
@@ -328,12 +335,20 @@ module dvbs2_ldpc_dec
   end
 
   // ------------------------------------------------------------ decoder
-  // candidate edge at the issue stage
+  // APP address of edge ee of the current layer in sub-step b
+  function automatic logic [AW-1:0] eaddr(input logic [4:0] ee);
+    logic [4:0] w;
+    w = (b < ed_w0[ee]) ? b + 5'(S) - ed_w0[ee] : b - ed_w0[ee];
+    eaddr = gs(ed_g[ee]) + AW'(w);
+  endfunction
+
+  // candidate edge at the issue stage; its address c_a = eaddr(e) is ia0,
+  // registered one clock ahead (ia1 = eaddr(e + 1)), as b and ed_* are
+  // static from D_SUB2 to the end of D_B
   wire          c_brw = b < ed_w0[e];
-  wire [4:0]    c_w   = c_brw ? b + 5'(S) - ed_w0[e] : b - ed_w0[e];
   wire [5:0]    c_kt  = 6'(P) - 6'(ed_k0[e]) - 6'(c_brw);
   wire [4:0]    c_k   = (c_kt == 6'(P)) ? 5'd0 : c_kt[4:0];
-  wire [AW-1:0] c_a   = gs(ed_g[e]) + AW'(c_w);
+  wire [AW-1:0] c_a   = ia0;
   // the p_(c-1) edge of layer 0 (parity group q-1, shift 1) is absent in row 0
   wire          c_inv = j == 8'd0 && ed_g[e] == ng + q - 8'd1 && b == 5'd0;
   wire          hazard = phase_b && ((v2 && a2 == c_a) || (v3 && a3 == c_a) || (v4 && a4 == c_a) ||
@@ -358,9 +373,10 @@ module dvbs2_ldpc_dec
       v2 <= issuing;
       if (issuing) begin
         e2 <= e; k2 <= c_k; inv2 <= c_inv; a2 <= c_a;
-        rd_addr <= c_a;
         smem_q <= smem[sg_base + 14'(e)];
         e <= e + 5'd1;
+        ia0 <= ia1;
+        ia1 <= eaddr(e + 5'd2);
       end
       // T+1: APP memory read
       v3 <= v2; e3 <= e2; k3 <= k2; inv3 <= inv2; a3 <= a2; sg3 <= smem_q;
@@ -474,6 +490,8 @@ module dvbs2_ldpc_dec
             hpar[l] <= 1'b0;
           end
           e <= '0;
+          ia0 <= eaddr(5'd0);
+          ia1 <= eaddr(5'd1);
           phase_b <= 1'b0;
           fifo_wp <= '0;
           fifo_rp <= '0;
@@ -497,6 +515,8 @@ module dvbs2_ldpc_dec
           rmem_d  <= rw;
           rmem_we <= 1'b1;
           e <= '0;
+          ia0 <= eaddr(5'd0);
+          ia1 <= eaddr(5'd1);
           phase_b <= 1'b1;
           dst <= D_B;
         end
@@ -530,6 +550,7 @@ module dvbs2_ldpc_dec
             dst <= D_OUT;
           end else dst <= D_ITER;
           og <= '0; ow <= '0;
+          o_addr <= '0;
           obits <= '0;
         end
 
@@ -538,11 +559,11 @@ module dvbs2_ldpc_dec
         D_OUT: begin
           o_r1 <= 1'b0;
           if (ow != 5'(S)) begin
-            rd_addr <= gs(og) + AW'(ow);
             sg_ra <= 11'((16'(og) * 16'd360) >> 5) + 11'(ow);
             o_r1 <= 1'b1;
             ow1 <= ow;
             ow <= ow + 5'd1;
+            o_addr <= o_addr + AW'(1);
           end
           o_r2 <= o_r1;
           ow2 <= ow1;
@@ -582,6 +603,7 @@ module dvbs2_ldpc_dec
             end else if (obyte == 6'd44) begin
               og <= og + 8'd1;
               ow <= '0;
+              o_addr <= gs(og + 8'd1);
               dst <= D_OUT;
             end else obyte <= obyte + 6'd1;
           end
@@ -597,6 +619,9 @@ module dvbs2_ldpc_dec
         default: dst <= D_IDLE;
       endcase
     end
+    // D_OUT is only entered from these states, D_A / D_B never
+    rd_out  <= dst == D_ITEREND || dst == D_OUT || dst == D_OUT2;
+    rd_addr <= rd_out ? o_addr : ia0;
   end
 
 endmodule
