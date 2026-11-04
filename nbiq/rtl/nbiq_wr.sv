@@ -7,10 +7,11 @@
 // response is back, so everything below it is in memory. base must be
 // aligned to mask + 1, a power of two >= 4096. A sample that finds its
 // staging buffer full is dropped and counted. While a channel is disabled
-// its staging buffer and wptr are cleared.
+// its staging buffer and wptr are cleared. Channels with a full burst are
+// served round-robin.
 
 module nbiq_wr #(
-  parameter int NCH = 4
+  parameter int NCH = 5
 ) (
   input  logic               clk,
   input  logic               rst,
@@ -19,7 +20,7 @@ module nbiq_wr #(
   input  logic [31:0]        mask [NCH],
 
   input  logic               s_valid,
-  input  logic [1:0]         s_ch,
+  input  logic [2:0]         s_ch,
   input  logic [31:0]        s_data,
 
   output logic [31:0]        wptr [NCH],
@@ -50,13 +51,14 @@ module nbiq_wr #(
   assign m_axi_bready  = 1'b1;
 
   // ------------------------------------------------------------ staging
-  (* ram_style = "distributed" *) logic [31:0] stg [256];
+  (* ram_style = "distributed" *) logic [31:0] stg [NCH * 64];
   logic [6:0] wc [NCH], rc [NCH];             // written / read, mod 128
 
   // burst state
   typedef enum logic [1:0] {W_IDLE, W_BURST, W_RESP} wst_t;
   wst_t        st;
-  logic [1:0]  bc, rr;
+  logic [2:0]  bc, rr;
+  logic [5:0]  rb;                            // rc[bc] at the burst start
   logic        aw_done, w_done, kill;
   logic [3:0]  beat;
 
@@ -65,17 +67,20 @@ module nbiq_wr #(
     if (s_ok) stg[{s_ch, wc[s_ch][5:0]}] <= s_data;
   end
 
-  assign m_axi_wdata = stg[{bc, 6'(rc[bc][5:0] + 6'(beat))}];
+  assign m_axi_wdata = stg[{bc, 6'(rb + 6'(beat))}];
   assign m_axi_wlast = beat == 4'd15;
 
-  logic       pick;
-  logic [1:0] pc;
+  // round-robin: the first channel with a full burst from rr on
+  logic [NCH-1:0] rdy;
+  logic           pick;
+  logic [2:0]     pc;
   always_comb begin
+    for (int c = 0; c < NCH; c++) rdy[c] = en[c] && 7'(wc[c] - rc[c]) >= 7'd16;
     pick = 1'b0; pc = '0;
-    for (int k = NCH - 1; k >= 0; k--)
-      if (en[2'(rr + 2'(k))] && 7'(wc[2'(rr + 2'(k))] - rc[2'(rr + 2'(k))]) >= 7'd16) begin
-        pick = 1'b1; pc = 2'(rr + 2'(k));
-      end
+    for (int c = NCH - 1; c >= 0; c--)
+      if (rdy[c]) begin pick = 1'b1; pc = 3'(c); end
+    for (int c = NCH - 1; c >= 0; c--)
+      if (rdy[c] && 3'(c) >= rr) pc = 3'(c);
   end
 
   always_ff @(posedge clk) begin
@@ -84,9 +89,7 @@ module nbiq_wr #(
       m_axi_awvalid <= 1'b0;
       m_axi_wvalid <= 1'b0;
       rr <= '0;
-      for (int c = 0; c < NCH; c++) begin
-        wc[c] <= '0; rc[c] <= '0; wptr[c] <= '0; st_ovf[c] <= '0;
-      end
+      for (int c = 0; c < NCH; c++) st_ovf[c] <= '0;   // wc, rc, wptr: cleared by !en
     end else begin
       // staging writes
       if (s_ok) wc[s_ch] <= wc[s_ch] + 7'd1;
@@ -96,7 +99,8 @@ module nbiq_wr #(
 
       case (st)
         W_IDLE: if (pick) begin
-          bc <= pc; rr <= pc + 2'd1;
+          bc <= pc; rr <= (pc == 3'(NCH - 1)) ? 3'd0 : pc + 3'd1;
+          rb <= rc[pc][5:0];
           m_axi_awaddr <= base[pc] | (wptr[pc] & mask[pc]);
           m_axi_awvalid <= 1'b1;
           m_axi_wvalid <= 1'b1;

@@ -2,25 +2,37 @@
 // decimation of the 5-stage CIC (model: model/nbiq.py mixer(), cic()); the
 // combs follow in nbiq_comb, shared by the channels. Held cleared while !en.
 //
-//   in : s_valid with s_i/s_q (16-bit ADC samples), at most one per clock
-//   out: m_valid with m_i/m_q (48-bit, wrapping), one per R inputs
+//   in : s_valid with s_i/s_q (16-bit ADC samples), at most one per 2 clocks
+//   out: m_valid with m_i/m_q (W-bit, wrapping), one per R inputs; m_i/m_q
+//        hold their value until the next m_valid (the comb reads them later)
+//
+// I and Q share the mixer's two multipliers and the integrators' adders:
+// a sample's I goes through in one clock, its Q in the next. Each
+// integrator keeps its two states in a pair of registers that rotates on
+// every step (a = the state of the phase being added, b = the other one;
+// the sum goes to b, b to a), so no multiplexers are needed.
+//
+// W = 53: the CIC gain R^5 <= 2^35 times the 18-bit input range (-2^17 ..
+// 2^17 - 1) fits 53-bit two's complement, so the wrap-around arithmetic is
+// exact up to R = 128.
 
 module nbiq_chan #(
-  parameter string LUT_FILE = "nbiq_lut.mem"
+  parameter string LUT_FILE = "nbiq_lut.mem",
+  parameter int    W = 53
 ) (
   input  logic               clk,
   input  logic               en,          // 0: state cleared
 
   input  logic [31:0]        finc,
-  input  logic [6:0]         R,           // 2..64, static while en
+  input  logic [7:0]         R,           // 2..128, static while en
 
   input  logic               s_valid,
   input  logic signed [15:0] s_i,
   input  logic signed [15:0] s_q,
 
   output logic               m_valid,
-  output logic signed [47:0] m_i,
-  output logic signed [47:0] m_q
+  output logic signed [W-1:0] m_i,
+  output logic signed [W-1:0] m_q
 );
 
   // ------------------------------------------------------------ NCO table
@@ -31,13 +43,20 @@ module nbiq_chan #(
   logic [9:0]  ka, kb;
   logic [15:0] la, lb;
   logic [1:0]  q0, q1;
-  logic        v0, v1, v2, v3, v4;
-  logic signed [15:0] xi0, xq0, xi1, xq1, xi2, xq2;
-  logic signed [16:0] sn, cs;
-  logic signed [32:0] p_ic, p_qs, p_qc, p_is;
-  logic signed [33:0] mi_s, mq_s;
-  logic signed [17:0] mx_i, mx_q;
-  logic        mx_v;
+  logic        v0, v1, v2, v3, v4, v5;
+  logic        f3, f4, f5;                   // phase of the stage: 0 I, 1 Q
+  logic signed [15:0] xi0, xq0, xi1, xq1, xi2, xq2, xi3, xq3;
+  logic signed [16:0] sn, cs, sn3, cs3;
+  logic signed [32:0] pa, pb;
+  logic signed [33:0] mx_s;
+  logic signed [17:0] mx;
+  logic        mx_v, mx_f;
+
+  wire               qn   = v3 && !f3;          // stage 3 takes the Q products next
+  wire signed [15:0] ma_x = qn ? xq3 : xi2;
+  wire signed [16:0] ma_c = qn ? cs3 : cs;
+  wire signed [15:0] mb_x = qn ? xi3 : xq2;
+  wire signed [16:0] mb_s = qn ? sn3 : sn;
 
   function automatic logic signed [17:0] sat18(input logic signed [33:0] v);
     if (v > 34'sd131071) return 18'sd131071;
@@ -69,51 +88,61 @@ module nbiq_chan #(
       default: begin sn <= -17'(lb); cs <= 17'(la); end
     endcase
     xi2 <= xi1; xq2 <= xq1;
-    // stage 3: products
-    v3 <= v2 && en;
-    p_ic <= xi2 * cs;
-    p_qs <= xq2 * sn;
-    p_qc <= xq2 * cs;
-    p_is <= xi2 * sn;
-    // stage 4: sums + rounding
+    // stage 3: products, I (x_i c, x_q s) in the sample's first clock, Q
+    // (x_q c, x_i s) in the next, from the stage-2 values kept a clock
+    v3 <= (v2 || qn) && en;
+    f3 <= qn;
+    xi3 <= xi2; xq3 <= xq2; sn3 <= sn; cs3 <= cs;
+    pa <= ma_x * ma_c;
+    pb <= mb_x * mb_s;
+    // stage 4: sum + rounding (I: pa + pb, Q: pa - pb)
     v4 <= v3 && en;
-    mi_s <= ((34'(p_ic) + 34'(p_qs)) + 34'sd4096) >>> 13;
-    mq_s <= ((34'(p_qc) - 34'(p_is)) + 34'sd4096) >>> 13;
+    f4 <= f3;
+    mx_s <= ((f3 ? 34'(pa) - 34'(pb) : 34'(pa) + 34'(pb)) + 34'sd4096) >>> 13;
     // stage 5: saturation
     mx_v <= v4 && en;
-    mx_i <= sat18(mi_s);
-    mx_q <= sat18(mq_s);
+    mx_f <= f4;
+    mx <= sat18(mx_s);
   end
 
   // ------------------------------------------------------------ CIC
-  logic signed [47:0] ii [5], iq [5];
-  logic [6:0]  dcnt;
-  logic        dv;                           // decimated sample in ii[4]/iq[4]
+  logic signed [W-1:0] sa [5], sb [5];       // rotating I/Q state pairs
+  logic signed [W-1:0] sum [5];
+  logic [7:0]  dcnt;
+  logic        dec;                          // this sample is decimated
+  logic        dv;                           // m_i/m_q hold a new sample
+
+  always_comb begin
+    sum[0] = sa[0] + W'(mx);
+    for (int k = 1; k < 5; k++) sum[k] = sa[k] + sa[k - 1];
+  end
 
   always_ff @(posedge clk) begin
     dv <= 1'b0;
     if (!en) begin
-      for (int k = 0; k < 5; k++) begin ii[k] <= '0; iq[k] <= '0; end
+      for (int k = 0; k < 5; k++) begin sa[k] <= '0; sb[k] <= '0; end
       dcnt <= '0;
+      dec <= 1'b0;
     end else if (mx_v) begin
-      ii[0] <= ii[0] + 48'(mx_i);
-      iq[0] <= iq[0] + 48'(mx_q);
-      for (int k = 1; k < 5; k++) begin
-        ii[k] <= ii[k] + ii[k - 1];
-        iq[k] <= iq[k] + iq[k - 1];
+      for (int k = 0; k < 5; k++) begin
+        sb[k] <= sum[k];
+        sa[k] <= sb[k];
       end
-      if (dcnt == R - 7'd1) begin
-        dcnt <= '0;
+      if (!mx_f) begin
+        dec <= dcnt == R - 8'd1;
+        if (dcnt == R - 8'd1) begin
+          dcnt <= '0;
+          m_i <= sum[4];
+        end else dcnt <= dcnt + 8'd1;
+      end else if (dec) begin
+        m_q <= sum[4];
         dv <= 1'b1;
-      end else dcnt <= dcnt + 7'd1;
+      end
     end
   end
 
-  // the decimated last integrator; the combs are shared (nbiq_comb)
-  always_ff @(posedge clk) begin
-    m_valid <= dv && en;
-    m_i <= ii[4];
-    m_q <= iq[4];
-  end
+  // the decimated last integrator is held in m_i/m_q; the combs are shared
+  // (nbiq_comb)
+  always_ff @(posedge clk) m_valid <= dv && en;
 
 endmodule

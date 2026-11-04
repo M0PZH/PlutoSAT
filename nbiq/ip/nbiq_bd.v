@@ -2,7 +2,9 @@
 // module reference. See rtl/nbiq_axi.sv for the register map. Add rtl/*.sv,
 // rtl/gen/nbiq_lut.mem and dvbs2/rtl/dvbs2_async_fifo.sv with this file.
 // m_axi: 32-bit AXI3 write-only master (read channels tied off), for
-// S_AXI_GP0.
+// S_AXI_GP0. tap_*: the FIR output samples of all five channels, in the
+// s_axi_aclk domain (one clock per sample with tap_valid; see nbiq_axi.sv),
+// e.g. for the PL FFT; leave unconnected if unused.
 
 module nbiq_bd #(
   parameter LUT_FILE = "nbiq_lut.mem"
@@ -78,6 +80,11 @@ module nbiq_bd #(
   (* X_INTERFACE_PARAMETER = "SENSITIVITY LEVEL_HIGH" *)
   output wire        irq,
 
+  output wire        tap_valid,
+  output wire [2:0]  tap_ch,
+  output wire [15:0] tap_i,
+  output wire [15:0] tap_q,
+
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 adc_clk CLK" *)
   input  wire        adc_clk,
   input  wire        adc_valid,
@@ -139,6 +146,10 @@ module nbiq_bd #(
     .m_axi_bvalid  (m_axi_bvalid),
     .m_axi_bready  (m_axi_bready),
     .irq           (irq),
+    .tap_valid     (tap_valid),
+    .tap_ch        (tap_ch),
+    .tap_i         (tap_i),
+    .tap_q         (tap_q),
     .adc_clk       (adc_clk),
     .adc_valid     (adc_valid),
     .adc_data_i0   (adc_data_i0),

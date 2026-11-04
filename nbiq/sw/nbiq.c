@@ -4,10 +4,11 @@
  *
  *   nbiq [options] -c CH:OFFSET:RATE[:rx1] [-c ...]
  *
- *   -c CH:OFFSET:RATE[:rx1]  channel 0..3: OFFSET Hz from the LO (k/M suffix
+ *   -c CH:OFFSET:RATE[:rx1]  channel 0..4: OFFSET Hz from the LO (k/M suffix
  *                            allowed, may be negative), output RATE = fs/(2R),
- *                            R = 2..64 (12 MSPS: 1M, 857.142k, 750k, ...,
- *                            100k); source rx0 unless ":rx1"
+ *                            R = 2..128 (12 MSPS: 1M, 857.142k, 750k, ...,
+ *                            500k, ..., 100k, ..., 48k, 46.875k); source rx0
+ *                            unless ":rx1"
  *   -o TARGET               "-" (stdout, one channel), a file name (a "%d"
  *                            in it becomes the channel), or udp:HOST:PORT
  *                            (channel c to PORT + c). Default: nbiq%d.iq
@@ -17,10 +18,17 @@
  *   -F FS                   ADC sample rate (default: from ad9361-phy)
  *   -n SECONDS              stop after this long
  *   -q                      no status line
- *   -D R                    print the filter design for R and exit
+ *   -D R                    print the filter design for R (all five
+ *                            channels in use) and exit
  *
- * Map 0 of the "nbiq" UIO device: registers; map 1: the ring buffers (one
- * quarter per channel). The filter design is model/nbiq.py:design().
+ * Map 0 of the "nbiq" UIO device: registers; map 1: the ring buffers. With
+ * Q the largest power of two <= map size / 8 (512 KB for the 4 MB buffer),
+ * channels 0..3 have a ring of Q at c * Q and channel 4 one of 4 Q at 4 Q
+ * (2 MB: put the widest channel there). The filter design is
+ * model/nbiq.py:design(); the FIR engine is shared: each of the k channels
+ * in use gets npairs = floor(0.9 * 100 MHz / k / fout) - 1 (at most 127)
+ * tap pairs, and the limits of rtl/nbiq_fir.sv are checked
+ * (model/nbiq.py:fir_check()).
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -39,17 +47,23 @@
 #include <time.h>
 #include <unistd.h>
 
-#define NCH 4
+#define NCH 5
 #define R_MIN 2
-#define R_MAX 64
+#define R_MAX 128
 #define NPAIRS_MAX 127
 #define CIC_N 5
-#define FIR_BUDGET (0.9 * 100e6 / NCH)
+#define CLK_HZ 100e6
+#define FIR_LOAD (0.9 * CLK_HZ)      /* FIR engine clocks per second, all channels */
+#define FIR_PAIRS 128                /* sample buffer per channel */
+#define FIR_JQ 32                    /* job FIFO entries */
+#define VERSION_MAJOR 2
 
+#define R_VERSION   0x000
 #define R_ID        0x004
 #define R_CTRL      0x008
 #define R_IRQ_PER   0x00C
 #define R_IRQ_ST    0x010
+#define R_INFO      0x01C
 #define R_CH(c)     (0x100 + 0x40 * (c))
 #define C_CTRL      0x00
 #define C_FINC      0x04
@@ -61,7 +75,7 @@
 #define C_T0LO      0x1C
 #define C_T0HI      0x20
 #define C_DROPS     0x24
-#define R_COEF(c, i) (0x1000 + 0x400 * (c) + 4 * (i))
+#define R_COEF(c, i) (0x2000 + 0x400 * (c) + 4 * (i))
 
 static volatile uint32_t *regs;
 static volatile sig_atomic_t stop;
@@ -100,8 +114,9 @@ static double bessel_i0(double x)
 	return s;
 }
 
-/* CIC-compensated Kaiser-windowed lowpass, cutoff fout/2; see nbiq.py */
-static int design(double fs, double rate, double gain, struct design *d)
+/* CIC-compensated Kaiser-windowed lowpass, cutoff fout/2; see nbiq.py.
+ * budget: FIR engine clocks per second for this channel. */
+static int design(double fs, double rate, double gain, double budget, struct design *d)
 {
 	const double atten = 70;
 	int R = (int)lround(fs / (2 * rate));
@@ -109,7 +124,7 @@ static int design(double fs, double rate, double gain, struct design *d)
 		return -1;
 	d->R = R;
 	d->fout = fs / (2 * R);
-	int np = (int)floor(FIR_BUDGET / d->fout + 1e-9) - 1;
+	int np = (int)floor(budget / d->fout + 1e-9) - 1;
 	np = np < 1 ? 1 : np > NPAIRS_MAX ? NPAIRS_MAX : np;
 	d->npairs = np;
 	int ntaps = 2 * np;
@@ -141,6 +156,47 @@ static int design(double fs, double rate, double gain, struct design *d)
 	d->oshift = os < 0 ? 0 : os > 47 ? 47 : os;
 	for (int i = 0; i < ntaps; i++)
 		d->h[i] = (int32_t)lround(h[i] * hsum * pow(2, d->oshift));
+	return 0;
+}
+
+/* ---------------------------------------------------------------- output */
+struct chan {
+	int on, src;
+	double off, rate;
+	struct design d;
+	int fd;                       /* file / stdout, or the UDP socket */
+	struct sockaddr_storage to;
+	socklen_t tolen;
+	uint32_t rp;                  /* bytes consumed */
+	uint64_t total, lost;
+	const uint8_t *ring;
+	uint32_t size;
+};
+
+/* The limits of the shared FIR engine (rtl/nbiq_fir.sv, model/nbiq.py
+ * fir_check()): the load, the job FIFO and the per-channel sample buffers.
+ * The per-channel share of design() always meets them; 0 when met. */
+static int fir_check(const struct chan *ch)
+{
+	double load = 0, T[NCH];
+	int S = 0, jq = 0, buf = 1;
+	for (int c = 0; c < NCH; c++)
+		if (ch[c].on) {
+			load += ch[c].d.fout * (ch[c].d.npairs + 1);
+			S += ch[c].d.npairs;
+			T[c] = CLK_HZ / ch[c].d.fout;
+		}
+	for (int c = 0; c < NCH; c++)
+		if (ch[c].on) {
+			jq += (int)floor((S - ch[c].d.npairs + 2) / T[c]) + 1;
+			if (S > (FIR_PAIRS - ch[c].d.npairs) * T[c])
+				buf = 0;
+		}
+	if (load > FIR_LOAD * (1 + 1e-12) || jq > FIR_JQ || !buf) {
+		fprintf(stderr, "FIR engine overloaded: load %.0f%% (max 90), %d jobs queued (max %d)%s\n",
+			load / CLK_HZ * 100, jq, FIR_JQ, buf ? "" : ", sample buffer too short");
+		return -1;
+	}
 	return 0;
 }
 
@@ -213,19 +269,6 @@ static double adc_rate(void)
 }
 
 /* ---------------------------------------------------------------- output */
-struct chan {
-	int on, src;
-	double off, rate;
-	struct design d;
-	int fd;                       /* file / stdout, or the UDP socket */
-	struct sockaddr_storage to;
-	socklen_t tolen;
-	uint32_t rp;                  /* bytes consumed */
-	uint64_t total, lost;
-	const uint8_t *ring;
-	uint32_t size;
-};
-
 static int cf32;
 
 static void emit(struct chan *c, const uint8_t *p, size_t n)
@@ -329,7 +372,7 @@ int main(int argc, char **argv)
 		struct design d;
 		if (!fs)
 			fs = 12e6;
-		if (design(fs, fs / (2 * dshow), gain, &d))
+		if (design(fs, fs / (2 * dshow), gain, FIR_LOAD / NCH, &d))
 			usage();
 		printf("R %d cshift %d npairs %d oshift %d\n", d.R, d.cshift, d.npairs, d.oshift);
 		for (int i = 0; i < 2 * d.npairs; i++)
@@ -345,12 +388,14 @@ int main(int argc, char **argv)
 	}
 
 	int nch = 0;
-	double load = 0;
+	for (int c = 0; c < NCH; c++)
+		nch += ch[c].on;
+	if (!nch)
+		usage();
 	for (int c = 0; c < NCH; c++) {
 		if (!ch[c].on)
 			continue;
-		nch++;
-		if (design(fs, ch[c].rate, gain, &ch[c].d)) {
+		if (design(fs, ch[c].rate, gain, FIR_LOAD / nch, &ch[c].d)) {
 			fprintf(stderr, "channel %d: rate %.0f is not fs/(2R), R = %d..%d (fs %.0f)\n",
 				c, ch[c].rate, R_MIN, R_MAX, fs);
 			return 1;
@@ -359,14 +404,9 @@ int main(int argc, char **argv)
 			fprintf(stderr, "channel %d: offset beyond +-fs/2\n", c);
 			return 1;
 		}
-		load += ch[c].d.fout * (ch[c].d.npairs + 1);
 	}
-	if (!nch)
-		usage();
-	if (load > 0.95e8) {
-		fprintf(stderr, "FIR load %.0f%% of the clock\n", load / 1e6);
+	if (fir_check(ch))
 		return 1;
-	}
 
 	int uio = find_by_name("/sys/class/uio", "uio", "nbiq");
 	if (uio < 0) {
@@ -386,9 +426,18 @@ int main(int argc, char **argv)
 		fprintf(stderr, "nbiq: bad ID %08x\n", rd(R_ID));
 		return 1;
 	}
-	uint32_t size = 1;
-	while (size * 2 <= bsz / NCH)
-		size *= 2;
+	if (rd(R_VERSION) >> 16 != VERSION_MAJOR || (rd(R_INFO) & 0xFF) < NCH) {
+		fprintf(stderr, "nbiq: core version %08x info %08x, this tool needs %d.x with %d channels\n",
+			rd(R_VERSION), rd(R_INFO), VERSION_MAJOR, NCH);
+		return 1;
+	}
+	uint32_t q = 4096;                    /* rings: 4 x Q, then 4 Q for channel 4 */
+	while (q * 16 <= bsz)
+		q *= 2;
+	if (q * 8 > bsz) {
+		fprintf(stderr, "nbiq: ring buffer of %zu bytes too small\n", bsz);
+		return 1;
+	}
 
 	/* outputs */
 	for (int c = 0; c < NCH; c++) {
@@ -436,15 +485,16 @@ int main(int argc, char **argv)
 		wr(R_CH(c) + C_FINC, (uint32_t)finc);
 		wr(R_CH(c) + C_CIC, d->R | d->cshift << 8);
 		wr(R_CH(c) + C_FIR, d->npairs | d->oshift << 8);
-		wr(R_CH(c) + C_BASE, bphys + c * size);
+		uint32_t size = c < 4 ? q : 4 * q;
+		wr(R_CH(c) + C_BASE, bphys + c * q);
 		wr(R_CH(c) + C_MASK, size - 1);
 		for (int i = 0; i < 2 * d->npairs; i++)
 			wr(R_COEF(c, i), (uint32_t)d->h[i] & 0x3FFFF);
-		ch[c].ring = buf + c * size;
+		ch[c].ring = buf + c * q;
 		ch[c].size = size;
 		if (!quiet)
-			fprintf(stderr, "ch%d: rx%d %+.0f Hz, %.1f kSPS (R %d, %d taps)\n", c, ch[c].src,
-				ch[c].off, d->fout / 1e3, d->R, 2 * d->npairs);
+			fprintf(stderr, "ch%d: rx%d %+.0f Hz, %.3f kSPS (R %d, %d taps), ring %u KB\n", c,
+				ch[c].src, ch[c].off, d->fout / 1e3, d->R, 2 * d->npairs, size >> 10);
 	}
 	wr(R_IRQ_PER, 1000000);                    /* 10 ms */
 	wr(R_IRQ_ST, 1);

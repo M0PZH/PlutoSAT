@@ -7,7 +7,8 @@
 //                  A <n>             start sending the next n ADC samples (background)
 //                  E                 wait until the ADC samples sent so far are done
 //                  D <n>             wait n clocks
-//   +out=<file>  read results, then "M addr data" for every memory word written
+//   +out=<file>  read results and "T ch data" for every tap sample ({q, i}) as
+//                they come, then "M addr data" for every memory word written
 //   +stall=<0..100>  AXI3 slave ready/response stall probability (%)
 `timescale 1ns/1ps
 module tb_nbiq_axi;
@@ -36,6 +37,9 @@ module tb_nbiq_axi;
   logic        m_axi_awvalid, m_axi_awready, m_axi_wlast, m_axi_wvalid, m_axi_wready;
   logic        m_axi_bvalid = 0, m_axi_bready;
   logic        irq;
+  logic        tap_valid;
+  logic [2:0]  tap_ch;
+  logic [15:0] tap_i, tap_q;
 
   logic        adc_valid = 0;
   logic [15:0] adc_data_i0, adc_data_q0, adc_data_i1, adc_data_q1;
@@ -118,7 +122,11 @@ module tb_nbiq_axi;
   endtask
 
   string fcmd, fout, fadc, op;
-  int fc, fo, rc, n;
+  int fc, fo = 0, rc, n;
+
+  always @(posedge clk)
+    if (tap_valid && fo != 0) $fdisplay(fo, "T %0d %h", tap_ch, {tap_q, tap_i});
+
   logic [31:0] ca, cd, rd;
   int timeout_us;
   initial begin

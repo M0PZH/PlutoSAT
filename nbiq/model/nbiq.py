@@ -1,14 +1,14 @@
 """Narrowband IQ channels: bit-exact model of rtl/nbiq_*.sv, and the filter
 design used by the driver (sw/nbiq.c does the same in C).
 
-Per channel (4 channels, any of the two AD9363 receive channels):
+Per channel (5 channels, any of the two AD9363 receive channels):
 
   NCO / mixer   y[n] = x[n] * exp(-j theta[n]),  theta[n] = n * finc / 2^32 * 2 pi
                 (frequency +finc/2^32 * fs moves to DC). 4096-step phase
                 (12 bits), quarter-wave sine table of 1024 half-step entries,
                 amplitude 32767. Out: sat18(round(x * (c, s) / 2^13)).
-  CIC           5 stages, decimation R = 2..64, 48-bit wrap-around state.
-                Out: sat24(round(comb / 2^cshift)).
+  CIC           5 stages, decimation R = 2..128, 53-bit wrap-around state
+                (R^5 * 2^17 <= 2^52). Out: sat24(round(comb / 2^cshift)).
   FIR           real coefficients h[0..2*npairs-1] (18-bit), decimation 2:
                   y[m] = sum_i h[i] x[2m + 1 - i]     (x: CIC outputs)
                 computed as two polyphase halves (even taps on the odd
@@ -17,7 +17,12 @@ Per channel (4 channels, any of the two AD9363 receive channels):
                 outputs after enabling a channel are not produced (they would
                 use samples from before the enable).
 
-Output rate fs / (2 R): 1 MSPS at R = 6 and 100 kSPS at R = 60 for 12 MSPS.
+Output rate fs / (2 R): 1 MSPS at R = 6, 500 kSPS at R = 12 and 48 kSPS at
+R = 125 for 12 MSPS.
+
+FIR engine (rtl/nbiq_fir.sv): one tap pair per clock, jobs oldest first. The
+driver gives each of the k channels in use npairs_for(fout, 0.9 clk / k) and
+checks fir_check() (the bounds in the header of nbiq_fir.sv).
 The k-th output sample of a channel is y[m], m = k + npairs - 1, the CIC
 output index n of x[n] corresponds to ADC sample T0 + R n + R - 1 (T0: the
 ADC sample counter when the channel was enabled).
@@ -26,17 +31,20 @@ import math
 
 import numpy as np
 
-NCH = 4
+NCH = 5
 LUT_N = 1024                 # quarter-wave entries
 LUT_AMP = 32767
 MIX_SH = 13
 CIC_N = 5
-CIC_W = 48
-R_MIN, R_MAX = 2, 64
+CIC_W = 53
+R_MIN, R_MAX = 2, 128
 NPAIRS_MAX = 127             # FIR: up to 254 taps
+FIR_PAIRS = 128              # sample buffer per channel, pairs
+FIR_JQ = 32                  # job FIFO entries
 ACC_W = 48
 CLK_HZ = 100e6
-FIR_BUDGET = 0.9 * CLK_HZ / NCH   # FIR engine clocks per second per channel
+FIR_LOAD = 0.9 * CLK_HZ      # FIR engine clocks per second, all channels
+FIR_BUDGET = FIR_LOAD / NCH  # per channel when all channels are in use
 
 
 def lut():
@@ -76,11 +84,16 @@ def wrap(v, w):
 
 
 _SA = np.array(_S, np.int64)
-_M48 = (1 << CIC_W) - 1
+_MCIC = (1 << CIC_W) - 1
+
+
+def _wrapc(v):
+    """int64 (exact mod 2^64) -> CIC_W-bit two's complement."""
+    return ((v + (1 << (CIC_W - 1))) & _MCIC) - (1 << (CIC_W - 1))
 
 
 def _wrap48(v):
-    return ((v + (1 << (CIC_W - 1))) & _M48) - (1 << (CIC_W - 1))
+    return ((v + (1 << (ACC_W - 1))) & ((1 << ACC_W) - 1)) - (1 << (ACC_W - 1))
 
 
 def _rshift_round(v, sh):
@@ -105,13 +118,13 @@ def mixer(xi, xq, finc):
 
 def cic(x, R, cshift):
     """Vectorized CIC (same results as cic_ref): integrator k > 0 adds the
-    previous value of integrator k - 1; int64 wrap-around is exact mod 2^48."""
+    previous value of integrator k - 1; int64 wrap-around is exact mod 2^CIC_W."""
     v = np.cumsum(np.asarray(x, np.int64))
     for _ in range(1, CIC_N):
         v = np.concatenate(([0], np.cumsum(v)[:-1]))
-    u = _wrap48(v[R - 1::R])
+    u = _wrapc(v[R - 1::R])
     for _ in range(CIC_N):
-        u = _wrap48(np.diff(u, prepend=0))
+        u = _wrapc(np.diff(u, prepend=0))
     return np.clip(_rshift_round(u, cshift), -(1 << 23), (1 << 23) - 1)
 
 
@@ -203,16 +216,31 @@ def npairs_for(fout, budget=FIR_BUDGET):
     return int(max(1, min(NPAIRS_MAX, math.floor(budget / fout + 1e-9) - 1)))
 
 
-def design(fs, rate, gain=8.0, npairs=None, atten=70.0):
+def fir_check(fouts, npairs, clk=CLK_HZ):
+    """The FIR engine bounds (header of rtl/nbiq_fir.sv) for the channels
+    in use: (load, FIFO entries needed, ok). load = sum fout (npairs + 1) /
+    clk must stay <= 0.9; ok also needs FIFO entries <= FIR_JQ and every
+    channel's sample buffer to hold until its job is done."""
+    T = [clk / f for f in fouts]
+    S = sum(npairs)
+    load = sum(f * (p + 1) for f, p in zip(fouts, npairs)) / clk
+    jq = sum(math.floor((S - p + 2) / t) + 1 for p, t in zip(npairs, T))
+    buf = all(S <= (FIR_PAIRS - p) * t for p, t in zip(npairs, T))
+    return load, jq, load <= FIR_LOAD / clk + 1e-12 and jq <= FIR_JQ and buf
+
+
+def design(fs, rate, gain=8.0, npairs=None, atten=70.0, budget=FIR_BUDGET):
     """Channel parameters for an output rate fs/(2R). gain: output LSBs per
     ADC LSB (12-bit full scale 2048 -> 16384 for gain 8). Returns a cfg
     dict without finc. Filter: CIC-compensated Kaiser-windowed lowpass,
-    cutoff at fout/2 (the alias-protected band shrinks with fewer taps)."""
+    cutoff at fout/2 (the alias-protected band shrinks with fewer taps).
+    budget: FIR engine clocks per second for this channel (FIR_LOAD / the
+    number of channels in use)."""
     R = int(round(fs / (2 * rate)))
     if not R_MIN <= R <= R_MAX or abs(fs / (2 * R) - rate) > 1e-6 * rate:
         raise ValueError(f"rate {rate} is not fs/(2R) with R in {R_MIN}..{R_MAX}")
     fout = fs / (2 * R)
-    np_ = npairs or npairs_for(fout)
+    np_ = npairs or npairs_for(fout, budget)
     ntaps = 2 * np_
     G = R ** CIC_N
     cshift = max(0, math.ceil(CIC_N * math.log2(R)) - 6)
@@ -248,7 +276,7 @@ def write_lut(path=None):
 
 if __name__ == "__main__":
     write_lut()
-    for rate in (1e6, 500e3, 250e3, 200e3, 100e3):
+    for rate in (1e6, 500e3, 250e3, 200e3, 100e3, 48e3, 12e6 / 256):
         d = design(12e6, rate)
         print(f"{rate/1e3:7.1f} kSPS  R={d['R']:2d} cshift={d['cshift']:2d} taps={len(d['h']):3d} "
               f"oshift={d['oshift']:2d} max|h|={max(map(abs, d['h']))}")

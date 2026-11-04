@@ -1,5 +1,6 @@
 # Out-of-context synthesis + implementation of nbiq_axi for a resource and
 # timing estimate:  vivado -mode batch -source ooc.tcl [-tclargs <MHz>]
+set_param general.maxThreads 16
 set mhz [expr {[llength $argv] > 0 ? [lindex $argv 0] : 100}]
 set here [file dirname [file normalize [info script]]]
 set rtl [file join $here .. rtl]
