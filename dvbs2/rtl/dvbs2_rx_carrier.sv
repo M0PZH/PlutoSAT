@@ -350,15 +350,31 @@ module dvbs2_rx_carrier
   always_ff @(posedge clk) if (zw_v) zbuf[zw_a] <= zw_d;
 
   // zbuf read port: M_HZ reads the header bank, M_FLL_ROT the bank being
-  // correlated; zb_q is the word one clock later (M_HZ2, or the rotator input
-  // issued from zr_* one clock after M_FLL_ROT)
-  logic [31:0] zb_q;
-  logic        zr_v;
-  logic [31:0] zr_ph;
-  logic [6:0]  zr_tag;
+  // correlated. Two clocks of read latency: zb_q0 is the array output, zb_q
+  // the block RAM's output register (DOB_REG), so the logic after the read
+  // starts from a register instead of the RAM's slow clock-to-out. zb_q holds
+  // the word two clocks after the read: the first stage of the header z
+  // pipeline below (one clock after M_HZ2), or the rotator input issued from
+  // zr2_* two clocks after M_FLL_ROT.
+  logic [31:0] zb_q0, zb_q;
+  logic        zr_v, zr2_v;
+  logic [31:0] zr_ph, zr2_ph;
+  logic [6:0]  zr_tag, zr2_tag;
   wire  [9:0]  zb_ra = (st == M_HZ) ? 10'({wb, fk}) : 10'({fh, fk});
-  always_ff @(posedge clk) zb_q <= zbuf[zb_ra];
-  logic        hz_si, hz_sq;
+  always_ff @(posedge clk) begin
+    zb_q0 <= zbuf[zb_ra];
+    zb_q  <= zb_q0;
+  end
+  // header z pipeline (stored s1 -> z / 2 of the decided type, written back
+  // in place): M_HZ2 starts one word, hz1 = zb_q valid, hz2 = z valid, then
+  // zw_*. It runs beside the FSM, so the last word or two are still in
+  // flight during the first clocks of M_FLL_ROT / M_FLL_NOUPD. That is safe:
+  // M_FLL_ROT reads that bank from k = 0 up (the words written last, k = 88
+  // and 89, are read ~88 clocks later), and the next zbuf write from M_SYM2
+  // is many clocks away.
+  logic               hz1_v, hz1_si, hz1_sq, hz2_v;
+  logic [9:0]         hz1_a, hz2_a;
+  logic signed [17:0] hz2_i, hz2_q;
   logic [5:0] inflight;                      // segment words issued, not yet out of the rotator
   // seg read port: the word M_SEG_EMIT issues (same condition as there)
   wire seg_issue = (st == M_SEG_EMIT) && (sk != nd) && (6'(of_cnt) + inflight < 6'd22);
@@ -375,6 +391,7 @@ module dvbs2_rx_carrier
     zw_v      <= 1'b0;
     sw_v      <= 1'b0;
     zr_v      <= 1'b0;
+    hz1_v     <= 1'b0;
 
     if (rst) begin
       st <= M_IDLE;
@@ -636,20 +653,14 @@ module dvbs2_rx_carrier
         end
 
         // stored s1 -> z / 2 of the decided type, in place
-        M_HZ: begin
-          hz_si <= hk_si;
-          hz_sq <= hk_sq;
-          st <= M_HZ2;
-        end
+        M_HZ: st <= M_HZ2;                  // read {wb, fk}
 
-        M_HZ2: begin : hz2
-          logic signed [17:0] a_i, a_q, z_i, z_q;
-          a_i = hz_si ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0]));
-          a_q = hz_si ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16]));
-          z_i = a_i + (hz_sq ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16])));
-          z_q = a_q - (hz_sq ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0])));
-          zw_v <= 1'b1; zw_a <= 10'({wb, fk});
-          zw_d <= {sat16((48'(z_q) + 48'sd1) >>> 1), sat16((48'(z_i) + 48'sd1) >>> 1)};
+        M_HZ2: begin
+          // the word read in M_HZ goes through the header z pipeline (below)
+          hz1_v  <= 1'b1;
+          hz1_si <= hk_si;
+          hz1_sq <= hk_sq;
+          hz1_a  <= 10'({wb, fk});
           if (fk == 7'd89) begin
             fst <= '0;
             ff  <= '0;
@@ -1048,13 +1059,31 @@ module dvbs2_rx_carrier
         default: st <= M_IDLE;
       endcase
     end
-    // M_FLL_ROT: the zbuf word read in the previous clock goes to the rotator
-    if (zr_v) begin
+    // M_FLL_ROT: the zbuf word read two clocks earlier goes to the rotator
+    zr2_v   <= zr_v;
+    zr2_ph  <= zr_ph;
+    zr2_tag <= zr_tag;
+    if (zr2_v) begin
       rot_v   <= 1'b1;
       rot_i   <= $signed(zb_q[15:0]);
       rot_q   <= $signed(zb_q[31:16]);
-      rot_ph  <= zr_ph;
-      rot_tag <= {1'b0, zr_tag};
+      rot_ph  <= zr2_ph;
+      rot_tag <= {1'b0, zr2_tag};
+    end
+    // header z pipeline, stage 1: z = s1 * conj(h) of the stored s1 (zb_q)
+    hz2_v <= hz1_v;
+    hz2_a <= hz1_a;
+    if (hz1_v) begin : hzp1
+      logic signed [17:0] a_i, a_q;
+      a_i = hz1_si ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0]));
+      a_q = hz1_si ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16]));
+      hz2_i <= a_i + (hz1_sq ? -18'($signed(zb_q[31:16])) : 18'($signed(zb_q[31:16])));
+      hz2_q <= a_q - (hz1_sq ? -18'($signed(zb_q[15:0]))  : 18'($signed(zb_q[15:0])));
+    end
+    // stage 2: z / 2 rounded, saturated, written back in place
+    if (hz2_v) begin
+      zw_v <= 1'b1; zw_a <= hz2_a;
+      zw_d <= {sat16((48'(hz2_q) + 48'sd1) >>> 1), sat16((48'(hz2_i) + 48'sd1) >>> 1)};
     end
   end
 
