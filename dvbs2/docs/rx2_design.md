@@ -502,8 +502,13 @@ Decided by the user (2026-11-04):
 8. The carrier BRAM fix is done: merged into master (1349130).
 
 Still open (only if needed during implementation): if timing or BRAM does
-not close, the fallbacks are:
+not close, the fallbacks are, in this order (user decision: BRAM first by
+reverting the carrier BRAM fix, as long as LUT allows):
 
+* revert the carrier BRAM fix (commit 1349130): seg and zbuf back in
+  LUTRAM. That frees about 3 tiles for about +2.4k LUT with one slot; with
+  the two-slot carrier, whose seg and zbuf are per slot, about 6 tiles for
+  an estimated +4.8k LUT. Only if the LUT budget still closes timing;
 * the BRAM recovery items in section 8 (about 6 tiles);
 * a slimmer BCH (Chien search 4 positions per clock instead of 8, an
   estimated -1..1.5k LUT);
