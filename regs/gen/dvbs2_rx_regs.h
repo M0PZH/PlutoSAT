@@ -132,13 +132,13 @@
 #define DVBS2_RX_TIMING_GAINS_KI_MASK 0xFFFF0000u
 /* FS_THRESH (rw): Frame sync header metric threshold */
 #define DVBS2_RX_FS_THRESH 0x03C
-/* PLL_KP (rw): Carrier PLL proportional gain */
+/* PLL_KP (rw): Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition) */
 #define DVBS2_RX_PLL_KP 0x040
 /*   [17:0] KP: Gain */
 #define DVBS2_RX_PLL_KP_KP_SHIFT 0
 #define DVBS2_RX_PLL_KP_KP_WIDTH 18
 #define DVBS2_RX_PLL_KP_KP_MASK 0x0003FFFFu
-/* PLL_KI (rw): Carrier PLL integral gain */
+/* PLL_KI (rw): Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th) */
 #define DVBS2_RX_PLL_KI 0x044
 /*   [17:0] KI: Gain */
 #define DVBS2_RX_PLL_KI_KI_SHIFT 0

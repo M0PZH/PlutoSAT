@@ -227,7 +227,7 @@ doc = "Frame sync header metric threshold"
 name = "PLL_KP"
 offset = 0x40
 access = "rw"
-doc = "Carrier PLL proportional gain"
+doc = "Carrier PLL proportional gain (default 227248; pilots off: the same gain is kept after acquisition)"
   [[reg.field]]
   name = "KP"
   bits = [0, 17]
@@ -237,7 +237,7 @@ doc = "Carrier PLL proportional gain"
 name = "PLL_KI"
 offset = 0x44
 access = "rw"
-doc = "Carrier PLL integral gain"
+doc = "Carrier PLL integral gain (pilots off: the acquisition gain; it narrows to 1/4 after the 4th header and to 1/16 after the 6th)"
   [[reg.field]]
   name = "KI"
   bits = [0, 17]

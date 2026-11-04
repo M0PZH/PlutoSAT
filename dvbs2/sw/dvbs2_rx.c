@@ -102,7 +102,7 @@
 /* defaults of rtl/gen/dvbs2_rx_pkg.sv (model/rxfixed.py) */
 #define TIMING_KP 1394          /* loop bandwidth 0.002 */
 #define TIMING_KI 952
-#define PLL_KP 113624
+#define PLL_KP 227248
 #define PLL_KI 77567
 #define FS_THRESH 324444
 

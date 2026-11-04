@@ -11,8 +11,16 @@ package dvbs2_rx_pkg;
   localparam int FLL_M [3] = '{1, 6, 45};
   localparam logic [15:0] TIMING_KP_DEFAULT = 16'd1394;
   localparam logic [15:0] TIMING_KI_DEFAULT = 16'd952;
-  localparam logic [17:0] PLL_KP_DEFAULT = 18'd113624;
+  localparam logic [17:0] PLL_KP_DEFAULT = 18'd227248;
   localparam logic [17:0] PLL_KI_DEFAULT = 18'd77567;
+  // pilots off: PLL gears (from nhdr >= N: kp >> KP_SH, ki >> KI_SH), header
+  // frequency updates while nhdr < PLL_KICK_NHDR, soft phase detector
+  localparam int PLL_NGEAR = 2;
+  localparam logic [3:0] PLL_GEAR_N [PLL_NGEAR] = '{4'd4, 4'd6};
+  localparam logic [2:0] PLL_GEAR_KP_SH [PLL_NGEAR] = '{3'd0, 3'd0};
+  localparam logic [2:0] PLL_GEAR_KI_SH [PLL_NGEAR] = '{3'd2, 3'd4};
+  localparam logic [3:0] PLL_KICK_NHDR = 4'd4;
+  localparam int PLL_SOFT_SH = 11;
   localparam logic [31:0] FS_THRESH_DEFAULT = 32'd324444;
   localparam logic signed [15:0] FA_THRESH = 16'sd19661;
   localparam logic signed [31:0] FA_STEP = 32'sd2909869;
