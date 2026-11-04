@@ -2,8 +2,11 @@
 # fft_axi with the xfft IP) for a resource and timing estimate:
 #   vivado -mode batch -source ooc.tcl [-tclargs <DOUBLE_BUF 0|1> [<MHz>]]
 # s_axi_aclk at <MHz> (default 100), adc_clk at 250 MHz (4 ns, the l_clk
-# constraint). Reports in out_db<DOUBLE_BUF>/.
+# constraint). Reports in out_db<DOUBLE_BUF>/. OOC_THREADS (environment)
+# sets the thread count (default 16). The xfft IP is generated once into
+# out_ip/ (delete it after changing ip/fft_xfft.tcl).
 set_param general.maxThreads 16
+if {[info exists ::env(OOC_THREADS)]} { set_param general.maxThreads $::env(OOC_THREADS) }
 set db  [expr {[llength $argv] > 0 ? [lindex $argv 0] : 0}]
 set mhz [expr {[llength $argv] > 1 ? [lindex $argv 1] : 100}]
 set here [file dirname [file normalize [info script]]]
