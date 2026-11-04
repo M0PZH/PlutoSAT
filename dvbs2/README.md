@@ -985,8 +985,10 @@ dvbs2-rx -s 333333 -f 739.75e6 --detect      # e.g. "7 qpsk3/4 1 0 -1250"
 `dvbs2_rx_llrq` (docs/rx2_design.md sections 6.1, 6.2, 7.3) queues the
 carrier's LLR frames in DDR between the carrier and the LDPC decoder: the
 path of the second receive slot, where two front ends share one decoder.
-Off by default; `LLRQ_CTRL` = 1 and a soft reset put today's receiver
-(slot 0) on it, with the same decoded frames.
+In RX 1.5 it was off by default (`LLRQ_CTRL` = 1 and a soft reset put the
+single-slot receiver on it, with the same decoded frames); from 2.0 it is
+always in the path and on once `LLRQ_BASE` is set (registers at 0x2E0..,
+[Two receive slots: the receiver](#two-receive-slots-the-receiver-20)).
 
 ```
 carrier ─► packer ─► staging (32 beats/slot) ─► AXI write bursts ─► DDR ring[slot][frame] (S_AXI_HP1)
