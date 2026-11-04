@@ -1,6 +1,7 @@
 // Sequential vectoring CORDIC (model: rxfixed.cordic): angle of (x, y) in
 // turns * 2^16 and magnitude * K. Inputs are first shifted right until
-// max(|x|, |y|) < 2^22; the magnitude is shifted back. 21 clocks.
+// max(|x|, |y|) < 2^22; the magnitude is shifted back. 22 clocks: the shift
+// is found in its own clock (from |x| | |y|, registered at start).
 module dvbs2_rx_cordic
   import dvbs2_rx_pkg::*;
 (
@@ -18,14 +19,16 @@ module dvbs2_rx_cordic
   logic [4:0]         it;
   logic [5:0]         sh;
   logic signed [49:0] xin, yin;
+  logic [49:0]        mor;                   // |x| | |y|: same highest set bit as max(|x|, |y|)
   logic signed [26:0] cx, cy;
   logic signed [20:0] acc;
 
-  function automatic logic [5:0] nshift(input logic signed [49:0] a, input logic signed [49:0] b);
-    logic [49:0] ma, mb, mx;
-    ma = a[49] ? 50'(-a) : 50'(a);
-    mb = b[49] ? 50'(-b) : 50'(b);
-    mx = ma > mb ? ma : mb;
+  function automatic logic [49:0] mabs(input logic signed [49:0] a);
+    mabs = a[49] ? 50'(-a) : 50'(a);
+  endfunction
+
+  // right shift that brings the highest set bit of mx below bit 22
+  function automatic logic [5:0] nshift(input logic [49:0] mx);
     nshift = 0;
     for (int i = 0; i < 50; i++)
       if (mx[i]) nshift = (i + 1 > 22) ? 6'(i + 1 - 22) : 6'd0;
@@ -37,12 +40,16 @@ module dvbs2_rx_cordic
       busy <= 1'b0;
     end else if (start && !busy) begin
       busy <= 1'b1;
-      ph   <= 2'd0;
+      ph   <= 2'd3;
       xin  <= x;
       yin  <= y;
-      sh   <= nshift(x, y);
+      mor  <= mabs(x) | mabs(y);
     end else if (busy) begin
       case (ph)
+        2'd3: begin
+          sh <= nshift(mor);
+          ph <= 2'd0;
+        end
         2'd0: begin : pre
           logic signed [49:0] xs, ys;
           xs = xin >>> sh;
