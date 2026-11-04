@@ -24,7 +24,8 @@
 // every bank. The slot's settings are static while it runs: change them with
 // the slot disabled or in its soft reset.
 //   0x200 VERSION     RO  0x0002_0000: two receive slots, register map v2, the DDR LLR
-//                         queue always on (0x0001_0500: DDR LLR queue (0xDC..0xF0), the
+//                         queue in the path (on once LLRQ_BASE is set), a slot's reset
+//                         drops everything of the slot from before it (0x0001_0500: DDR LLR queue (0xDC..0xF0), the
 //                         packet header's MODCOD/pilots are the frame's own; 0x0001_0402:
 //                         the LDPC decoder clips channel LLRs to +-61; 0x0001_0401:
 //                         a whole-frame search after a PLS drop; 0x0001_0400: frame sync
