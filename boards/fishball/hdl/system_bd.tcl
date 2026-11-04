@@ -3,7 +3,20 @@
 ## Derived from the ADI pluto project (Copyright (C) 2014-2025 Analog Devices,
 ## Inc., ADIBSD). Differences: xc7z020clg400, 32-bit/1 GB DDR3, AD9363 LVDS,
 ## GEM0 RGMII, SD0, no TDD/phaser glue, no PL FIR decimator/interpolator
-## (fixed 12 MS/s; nbiq gives the narrow channels).
+## (fixed 12 MS/s; nbiq gives the narrow channels), no IIO streaming (no
+## axi_ad9361 ADC/DAC DMAs, no util_cpack2/util_upack2): the AD9363's
+## samples go to the PlutoSAT cores only.
+##
+## PS-PL AXI ports (boards/fishball/README.md, "AXI ports"):
+##   M_AXI_GP0  all AXI-Lite registers        M_AXI_GP1  spare
+##   S_AXI_HP0  reserved: future IQ transmit DMA (memory -> DAC)
+##   S_AXI_HP1  reserved: second DATV receiver's LDPC LLR frame queue
+##   S_AXI_HP2  nbiq ring writer (64-bit)
+##   S_AXI_HP3  FFT result DMA (64-bit)
+##   S_AXI_GP0  DVB-S2 RX DMA (32-bit)       S_AXI_GP1  DVB-S2 TX DMA (32-bit)
+##   S_AXI_ACP  spare
+## The HP ports stay in their 64-bit mode: a board that keeps its own FSBL
+## (fishball Debian) leaves the AFI width registers at the 64-bit default.
 ###############################################################################
 
 # create board design
@@ -48,8 +61,6 @@ ad_ip_parameter sys_ps7 CONFIG.PCW_ENET0_PERIPHERAL_ENABLE 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_ENET0_ENET0_IO {MIO 16 .. 27}
 ad_ip_parameter sys_ps7 CONFIG.PCW_ENET0_GRP_MDIO_ENABLE 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_ENET0_GRP_MDIO_IO {MIO 52 .. 53}
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP1 1
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP2 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_EN_CLK1_PORT 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_EN_RST1_PORT 1
 ad_ip_parameter sys_ps7 CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ 100.0
@@ -214,37 +225,16 @@ ad_ip_parameter axi_ad9361 CONFIG.ADC_INIT_DELAY 30
 ad_ip_parameter axi_ad9361 CONFIG.DAC_DDS_DISABLE 1
 ad_ip_parameter axi_ad9361 CONFIG.TDD_DISABLE 1
 
-ad_ip_instance axi_dmac axi_ad9361_dac_dma
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_TYPE_SRC 0
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_TYPE_DEST 1
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.CYCLIC 1
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.SYNC_TRANSFER_START 0
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.AXI_SLICE_SRC 0
-# a register slice on the stream side: the store-and-forward BRAM output
-# to tx_upack missed 250 MHz in the full design
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.AXI_SLICE_DEST 1
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_2D_TRANSFER 0
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_DATA_WIDTH_DEST 64
-
 # no PL FIR interpolator/decimator (the Pluto's x8 filters for IIO rates
 # below 2.08 MS/s): the AD9363 runs at a fixed 12 MS/s, nbiq provides the
-# narrow channels; frees 44 DSPs and ~1.2k LUTs
-ad_ip_instance util_upack2 tx_upack
-
-ad_ip_instance axi_dmac axi_ad9361_adc_dma
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.DMA_TYPE_SRC 2
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.DMA_TYPE_DEST 0
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.CYCLIC 0
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.SYNC_TRANSFER_START 1
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.AXI_SLICE_SRC 0
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.AXI_SLICE_DEST 0
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.DMA_2D_TRANSFER 0
-ad_ip_parameter axi_ad9361_adc_dma CONFIG.DMA_DATA_WIDTH_SRC 64
-
-ad_ip_instance util_cpack2 cpack
+# narrow channels; frees 44 DSPs and ~1.2k LUTs.
+# No IIO streaming either (axi_ad9361_adc_dma + util_cpack2,
+# axi_ad9361_dac_dma + util_upack2 are gone): the ad9361-phy, cf-ad9361-lpc
+# and cf-ad9361-dds-core-lpc drivers probe without DMAs (no "dmas" in the
+# device tree), so LO, gains, rates and the core's IQ/DC correction stay.
 
 # Self-test noise source (awgn/): between the AD9363 receive data and all of
-# its users (IIO DMA, dvbs2_rx, nbiq, fft). Adds programmable
+# its users (dvbs2_rx, nbiq, fft). Adds programmable
 # AWGN to rx0; delays all four lanes by 6 ADC clocks.
 
 set awgn_dir [file normalize [file join $ad_hdl_dir .. awgn]]
@@ -283,82 +273,30 @@ foreach l {i0 q0 i1 q1} {
   ad_connect axi_ad9361/adc_data_$l  rx_awgn/adc_data_$l
 }
 
-ad_connect axi_ad9361/l_clk cpack/clk
-ad_connect axi_ad9361/rst cpack/reset
-
-ad_connect axi_ad9361/adc_enable_i0 cpack/enable_0
-ad_connect rx_awgn/out_data_i0 cpack/fifo_wr_data_0
-ad_connect axi_ad9361/adc_enable_q0 cpack/enable_1
-ad_connect rx_awgn/out_data_q0 cpack/fifo_wr_data_1
-ad_connect axi_ad9361/adc_enable_i1 cpack/enable_2
-ad_connect rx_awgn/out_data_i1 cpack/fifo_wr_data_2
-ad_connect axi_ad9361/adc_enable_q1 cpack/enable_3
-ad_connect rx_awgn/out_data_q1 cpack/fifo_wr_data_3
-
-ad_connect rx_awgn/out_valid_i0 cpack/fifo_wr_en
-
-ad_connect axi_ad9361_adc_dma/fifo_wr cpack/packed_fifo_wr
-ad_connect axi_ad9361_adc_dma/sync cpack/packed_sync
-
-ad_connect  axi_ad9361/l_clk tx_upack/clk
-ad_connect  axi_ad9361/rst tx_upack/reset
-
-ad_connect axi_ad9361/dac_enable_i0 tx_upack/enable_0
-ad_connect axi_ad9361/dac_enable_q0 tx_upack/enable_1
-
-ad_connect axi_ad9361/dac_enable_i1 tx_upack/enable_2
-ad_connect axi_ad9361/dac_data_i1 tx_upack/fifo_rd_data_2
-ad_connect axi_ad9361/dac_enable_q1 tx_upack/enable_3
-ad_connect axi_ad9361/dac_data_q1 tx_upack/fifo_rd_data_3
-
-ad_connect tx_upack/s_axis  axi_ad9361_dac_dma/m_axis
-
-ad_connect  axi_ad9361/dac_valid_i0 tx_upack/fifo_rd_en
-ad_connect  tx_upack/fifo_rd_underflow axi_ad9361/dac_dunf
-
-
-ad_connect  axi_ad9361/l_clk axi_ad9361_adc_dma/fifo_wr_clk
-ad_connect  axi_ad9361/l_clk axi_ad9361_dac_dma/m_axis_aclk
-ad_connect  cpack/fifo_wr_overflow axi_ad9361/adc_dovf
+# no sample FIFOs behind the core: never an ADC overflow / DAC underflow;
+# DAC channel 1 (TX2) gets zeros
+ad_connect axi_ad9361/adc_dovf GND
+ad_connect axi_ad9361/dac_dunf GND
+ad_connect axi_ad9361/dac_data_i1 GND
+ad_connect axi_ad9361/dac_data_q1 GND
 
 # interconnects
 
 ad_cpu_interconnect 0x79020000 axi_ad9361
-ad_cpu_interconnect 0x7C400000 axi_ad9361_adc_dma
-ad_cpu_interconnect 0x7C420000 axi_ad9361_dac_dma
 ad_cpu_interconnect 0x7C430000 axi_spi
 
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP1 {1}
-ad_connect sys_cpu_clk sys_ps7/S_AXI_HP1_ACLK
-ad_connect axi_ad9361_adc_dma/m_dest_axi sys_ps7/S_AXI_HP1
+# interrupts (ps-13 and ps-12 were the IIO DMAs')
 
-create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
-                    [get_bd_addr_spaces axi_ad9361_adc_dma/m_dest_axi] \
-                    [get_bd_addr_segs sys_ps7/S_AXI_HP1/HP1_DDR_LOWOCM] \
-                    SEG_sys_ps7_HP1_DDR_LOWOCM
-
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP2 {1}
-ad_connect sys_cpu_clk sys_ps7/S_AXI_HP2_ACLK
-ad_connect axi_ad9361_dac_dma/m_src_axi sys_ps7/S_AXI_HP2
-
-create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
-                    [get_bd_addr_spaces axi_ad9361_dac_dma/m_src_axi] \
-                    [get_bd_addr_segs sys_ps7/S_AXI_HP2/HP2_DDR_LOWOCM] \
-                    SEG_sys_ps7_HP2_DDR_LOWOCM
-
-ad_connect sys_cpu_clk axi_ad9361_dac_dma/m_src_axi_aclk
-ad_connect sys_cpu_clk axi_ad9361_adc_dma/m_dest_axi_aclk
-ad_connect sys_cpu_resetn axi_ad9361_adc_dma/m_dest_axi_aresetn
-ad_connect sys_cpu_resetn axi_ad9361_dac_dma/m_src_axi_aresetn
-
-# interrupts
-
-ad_cpu_interrupt ps-13 mb-13 axi_ad9361_adc_dma/irq
-ad_cpu_interrupt ps-12 mb-12 axi_ad9361_dac_dma/irq
 ad_cpu_interrupt ps-11 mb-11 axi_spi/ip2intc_irpt
 
-# DVB-S2 transmitter (dvbs2/), fed by its own DMA, selectable onto DAC channel 0.
-# The FIR interpolator output now passes through dvbs2_tx's DAC selector.
+# DVB-S2 transmitter (dvbs2/), fed by its own DMA (S_AXI_GP1), selectable
+# onto DAC channel 0 by CTRL bit 2 ("DAC select": dvbs2_tx or dac_in_i/q).
+#
+# Future IQ transmit (memory -> DAC, up to 12 MS/s, narrow- or wideband):
+# its DMA goes on S_AXI_HP0 (64-bit, reserved), its sample stream into
+# dvbs2_tx/dac_in_i/q (dac_clk domain, one sample per dac_valid) instead
+# of the zeros below, or into a separate mux after dvbs2_tx
+# (dac_out_i/q -> axi_ad9361/dac_data_i0/q0).
 
 set dvbs2_dir [file normalize [file join $ad_hdl_dir .. dvbs2]]
 add_files -norecurse [concat \
@@ -375,8 +313,8 @@ create_bd_cell -type module -reference dvbs2_tx_bd dvbs2_tx
 
 ad_connect axi_ad9361/l_clk          dvbs2_tx/dac_clk
 ad_connect axi_ad9361/dac_valid_i0   dvbs2_tx/dac_valid
-ad_connect tx_upack/fifo_rd_data_0   dvbs2_tx/dac_in_i
-ad_connect tx_upack/fifo_rd_data_1   dvbs2_tx/dac_in_q
+ad_connect GND                       dvbs2_tx/dac_in_i
+ad_connect GND                       dvbs2_tx/dac_in_q
 ad_connect dvbs2_tx/dac_out_i        axi_ad9361/dac_data_i0
 ad_connect dvbs2_tx/dac_out_q        axi_ad9361/dac_data_q0
 
@@ -388,19 +326,19 @@ ad_ip_parameter axi_dvbs2_dma CONFIG.SYNC_TRANSFER_START 0
 ad_ip_parameter axi_dvbs2_dma CONFIG.AXI_SLICE_SRC 0
 ad_ip_parameter axi_dvbs2_dma CONFIG.AXI_SLICE_DEST 0
 ad_ip_parameter axi_dvbs2_dma CONFIG.DMA_2D_TRANSFER 0
-ad_ip_parameter axi_dvbs2_dma CONFIG.DMA_DATA_WIDTH_SRC 64
+ad_ip_parameter axi_dvbs2_dma CONFIG.DMA_DATA_WIDTH_SRC 32
 ad_ip_parameter axi_dvbs2_dma CONFIG.DMA_DATA_WIDTH_DEST 32
 
 ad_connect sys_cpu_clk axi_dvbs2_dma/m_axis_aclk
 ad_connect axi_dvbs2_dma/m_axis dvbs2_tx/s_axis
 
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP3 {1}
-ad_connect sys_cpu_clk sys_ps7/S_AXI_HP3_ACLK
-ad_connect axi_dvbs2_dma/m_src_axi sys_ps7/S_AXI_HP3
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_GP1 {1}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_GP1_ACLK
+ad_connect axi_dvbs2_dma/m_src_axi sys_ps7/S_AXI_GP1
 create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
                     [get_bd_addr_spaces axi_dvbs2_dma/m_src_axi] \
-                    [get_bd_addr_segs sys_ps7/S_AXI_HP3/HP3_DDR_LOWOCM] \
-                    SEG_sys_ps7_HP3_DDR_LOWOCM
+                    [get_bd_addr_segs sys_ps7/S_AXI_GP1/GP1_DDR_LOWOCM] \
+                    SEG_sys_ps7_GP1_DDR_LOWOCM
 ad_connect sys_cpu_clk axi_dvbs2_dma/m_src_axi_aclk
 ad_connect sys_cpu_resetn axi_dvbs2_dma/m_src_axi_aresetn
 
@@ -409,7 +347,8 @@ ad_cpu_interconnect 0x7C500000 dvbs2_tx
 ad_cpu_interrupt ps-10 mb-10 axi_dvbs2_dma/irq
 
 # DVB-S2 receiver (dvbs2/): AD9361 channel 0 ADC samples -> DDC -> demodulator
-# -> LDPC -> one DMA packet per BBFRAME (axi_dvbs2_rx_dma, stream -> memory, HP0)
+# -> LDPC -> one DMA packet per BBFRAME (axi_dvbs2_rx_dma, stream -> memory,
+# S_AXI_GP0)
 
 create_bd_cell -type module -reference dvbs2_rx_bd dvbs2_rx
 
@@ -427,18 +366,18 @@ ad_ip_parameter axi_dvbs2_rx_dma CONFIG.AXI_SLICE_SRC 0
 ad_ip_parameter axi_dvbs2_rx_dma CONFIG.AXI_SLICE_DEST 0
 ad_ip_parameter axi_dvbs2_rx_dma CONFIG.DMA_2D_TRANSFER 0
 ad_ip_parameter axi_dvbs2_rx_dma CONFIG.DMA_DATA_WIDTH_SRC 64
-ad_ip_parameter axi_dvbs2_rx_dma CONFIG.DMA_DATA_WIDTH_DEST 64
+ad_ip_parameter axi_dvbs2_rx_dma CONFIG.DMA_DATA_WIDTH_DEST 32
 
 ad_connect sys_cpu_clk axi_dvbs2_rx_dma/s_axis_aclk
 ad_connect dvbs2_rx/m_axis axi_dvbs2_rx_dma/s_axis
 
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP0 {1}
-ad_connect sys_cpu_clk sys_ps7/S_AXI_HP0_ACLK
-ad_connect axi_dvbs2_rx_dma/m_dest_axi sys_ps7/S_AXI_HP0
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_GP0 {1}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_GP0_ACLK
+ad_connect axi_dvbs2_rx_dma/m_dest_axi sys_ps7/S_AXI_GP0
 create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
                     [get_bd_addr_spaces axi_dvbs2_rx_dma/m_dest_axi] \
-                    [get_bd_addr_segs sys_ps7/S_AXI_HP0/HP0_DDR_LOWOCM] \
-                    SEG_sys_ps7_HP0_DDR_LOWOCM
+                    [get_bd_addr_segs sys_ps7/S_AXI_GP0/GP0_DDR_LOWOCM] \
+                    SEG_sys_ps7_GP0_DDR_LOWOCM
 ad_connect sys_cpu_clk axi_dvbs2_rx_dma/m_dest_axi_aclk
 ad_connect sys_cpu_resetn axi_dvbs2_rx_dma/m_dest_axi_aresetn
 
@@ -448,8 +387,7 @@ ad_cpu_interrupt ps-9 mb-9 axi_dvbs2_rx_dma/irq
 
 # Narrowband IQ channels (nbiq/): 5 x (NCO, CIC, FIR) from either receive
 # channel (4 user channels + 1 overview) -> one DDR ring per channel, written
-# through S_AXI_GP0 (the HP ports are taken). tap_* (the FIR outputs) feed
-# the spectrum FFT.
+# through S_AXI_HP2 (64-bit). tap_* (the FIR outputs) feed the spectrum FFT.
 
 set nbiq_dir [file normalize [file join $ad_hdl_dir .. nbiq]]
 add_files -norecurse [concat \
@@ -467,19 +405,21 @@ ad_connect rx_awgn/out_data_q0      nbiq/adc_data_q0
 ad_connect rx_awgn/out_data_i1      nbiq/adc_data_i1
 ad_connect rx_awgn/out_data_q1      nbiq/adc_data_q1
 
-ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_GP0 {1}
-ad_connect sys_cpu_clk sys_ps7/S_AXI_GP0_ACLK
-ad_connect nbiq/m_axi sys_ps7/S_AXI_GP0
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP2 {1}
+ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP2_DATA_WIDTH {64}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_HP2_ACLK
+ad_connect nbiq/m_axi sys_ps7/S_AXI_HP2
 create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
                     [get_bd_addr_spaces nbiq/m_axi] \
-                    [get_bd_addr_segs sys_ps7/S_AXI_GP0/GP0_DDR_LOWOCM] \
-                    SEG_sys_ps7_GP0_DDR_LOWOCM
+                    [get_bd_addr_segs sys_ps7/S_AXI_HP2/HP2_DDR_LOWOCM] \
+                    SEG_sys_ps7_HP2_DDR_LOWOCM
 
 ad_cpu_interconnect 0x7C520000 nbiq
 ad_cpu_interrupt ps-8 mb-8 nbiq/irq
 
-# Spectrum analyser (fft/): averaged 4096-bin spectra of rx0, rx1 or an
-# nbiq channel (the tap), read by the ARM over AXI-Lite (UIO "fft")
+# Spectrum analyser (fft/): averaged 512- to 4096-bin spectra of rx0, rx1 or an
+# nbiq channel (the tap), read by the ARM over AXI-Lite (UIO "fft") or
+# written to memory by axi_fft_dma through S_AXI_HP3
 
 set fft_dir [file normalize [file join $ad_hdl_dir .. fft]]
 source [file join $fft_dir ip fft_xfft.tcl]
@@ -504,5 +444,39 @@ ad_connect nbiq/tap_q             fft/tap_q
 
 ad_cpu_interconnect 0x7C540000 fft
 ad_cpu_interrupt ps-7 mb-7 fft/irq
+
+# FFT result DMA (stream -> memory, S_AXI_HP3, 64-bit): one packet per
+# result from fft/m_axis (CTRL.STREAM; s_axi_aclk = sys_cpu_clk domain), see
+# fft/README.md "Result stream". Registers 0x7C4A0000, irq ps-13; buffer:
+# fft-buffer in the device tree (1 MB @ 0x3EA00000), map1/map2 of the fft
+# UIO node.
+
+ad_ip_instance axi_dmac axi_fft_dma
+ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_SRC 1
+ad_ip_parameter axi_fft_dma CONFIG.DMA_TYPE_DEST 0
+ad_ip_parameter axi_fft_dma CONFIG.CYCLIC 0
+ad_ip_parameter axi_fft_dma CONFIG.SYNC_TRANSFER_START 0
+ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_SRC 0
+ad_ip_parameter axi_fft_dma CONFIG.AXI_SLICE_DEST 0
+ad_ip_parameter axi_fft_dma CONFIG.DMA_2D_TRANSFER 0
+ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_SRC 64
+ad_ip_parameter axi_fft_dma CONFIG.DMA_DATA_WIDTH_DEST 64
+
+ad_connect sys_cpu_clk axi_fft_dma/s_axis_aclk
+ad_connect fft/m_axis axi_fft_dma/s_axis
+
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP3 {1}
+ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP3_DATA_WIDTH {64}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_HP3_ACLK
+ad_connect axi_fft_dma/m_dest_axi sys_ps7/S_AXI_HP3
+create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
+                    [get_bd_addr_spaces axi_fft_dma/m_dest_axi] \
+                    [get_bd_addr_segs sys_ps7/S_AXI_HP3/HP3_DDR_LOWOCM] \
+                    SEG_sys_ps7_HP3_DDR_LOWOCM
+ad_connect sys_cpu_clk axi_fft_dma/m_dest_axi_aclk
+ad_connect sys_cpu_resetn axi_fft_dma/m_dest_axi_aresetn
+
+ad_cpu_interconnect 0x7C4A0000 axi_fft_dma
+ad_cpu_interrupt ps-13 mb-13 axi_fft_dma/irq
 
 ad_cpu_interconnect 0x7C530000 rx_awgn

@@ -126,8 +126,28 @@
 	compatible = "adi,axi-ad9361-dds-6.00.a";
 };
 
+/* No IIO streaming DMAs and no FIR decimator/interpolator in the PL: the
+ * ADC and DDS core drivers probe without "dmas" (no IIO buffer); they still
+ * tune the digital interface, take the core out of reset and give access to
+ * its registers (debugfs direct_reg_access). */
+/delete-node/ &rx_dma;
+/delete-node/ &tx_dma;
+
+&cf_ad9364_adc_core_0 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	/delete-property/ adi,axi-decimation-core-available;
+};
+
+&cf_ad9364_dac_core_0 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	/delete-property/ adi,axi-interpolation-core-available;
+};
+
 /* DVB-S2 transmitter and receiver (dvbs2/): registers, their axi_dmac and
- * uncached buffers at the top of RAM (16 MB TX, 1 MB RX; 4 MB for nbiq), exported to user
+ * uncached buffers at the top of RAM (16 MB TX, 1 MB RX; 4 MB for nbiq,
+ * 1 MB for the FFT result DMA), exported to user
  * space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
  * uio_pdrv_genirq.of_id=generic-uio on the command line. */
 / {
@@ -148,6 +168,11 @@
 
 		nbiq_buffer: nbiq-buffer@3eb00000 {
 			reg = <0x3eb00000 0x00400000>;
+			no-map;
+		};
+
+		fft_buffer: fft-buffer@3ea00000 {
+			reg = <0x3ea00000 0x00100000>;
 			no-map;
 		};
 	};
@@ -181,10 +206,13 @@
 		interrupts = <0 52 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
-	/* spectrum analyser (fft/) */
+	/* spectrum analyser (fft/); map1/map2: its result DMA (axi_fft_dma on
+	 * S_AXI_HP3, in the PL once fft_bd has a result stream) and buffer */
 	fft@7c540000 {
 		compatible = "generic-uio";
-		reg = <0x7c540000 0x10000>;
+		reg = <0x7c540000 0x10000>,     /* fft registers */
+		      <0x7c4a0000 0x10000>,     /* axi_dmac (results, stream -> memory) */
+		      <0x3ea00000 0x00100000>;  /* DMA buffer */
 		interrupt-parent = <&intc>;
 		interrupts = <0 36 IRQ_TYPE_LEVEL_HIGH>;
 	};

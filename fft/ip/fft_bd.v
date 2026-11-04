@@ -6,13 +6,16 @@
 //
 // s_axi: AXI-Lite slave, 64 KB. adc_*: AD9363 receive samples (l_clk domain).
 // tap_*: nbiq channel outputs, s_axi_aclk domain. irq: level, "average done".
+// m_axis: AXI4-Stream master (64-bit, tlast, s_axi_aclk), one packet per
+// result with CTRL.STREAM, for an axi_dmac (stream -> memory); see
+// README.md "Result stream". Unconnected, tie m_axis_tready to 0.
 
 module fft_bd #(
   parameter WIN_FILE   = "fft_win.mem",
   parameter DOUBLE_BUF = 0
 ) (
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi, ASSOCIATED_RESET s_axi_aresetn" *)
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:m_axis, ASSOCIATED_RESET s_axi_aresetn" *)
   input  wire        s_axi_aclk,
   (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 s_axi_aresetn RST" *)
   (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
@@ -52,7 +55,12 @@ module fft_bd #(
   input  wire        tap_valid,
   input  wire [2:0]  tap_ch,
   input  wire [15:0] tap_i,
-  input  wire [15:0] tap_q
+  input  wire [15:0] tap_q,
+
+  output wire [63:0] m_axis_tdata,
+  output wire        m_axis_tvalid,
+  input  wire        m_axis_tready,
+  output wire        m_axis_tlast
 );
 
   fft_axi #(.WIN_FILE(WIN_FILE), .DOUBLE_BUF(DOUBLE_BUF)) i_fft_axi (
@@ -84,7 +92,11 @@ module fft_bd #(
     .tap_valid     (tap_valid),
     .tap_ch        (tap_ch),
     .tap_i         (tap_i),
-    .tap_q         (tap_q)
+    .tap_q         (tap_q),
+    .m_axis_tdata  (m_axis_tdata),
+    .m_axis_tvalid (m_axis_tvalid),
+    .m_axis_tready (m_axis_tready),
+    .m_axis_tlast  (m_axis_tlast)
   );
 
 endmodule

@@ -21,7 +21,7 @@ all from rx1; any channel can take any rate and either receive channel.
 | Filter | CIC-compensated Kaiser lowpass, cutoff fout/2; taps from the FIR budget (below) |
 | Passband ripple | < 0.03 dB over 80 % of fout (0.17 dB at 1 MSPS with five channels in use) |
 | Output | int16 I/Q pairs, gain 8 by default (12-bit full scale → 16384) |
-| Cost | 6.3k LUT, 7.0k FF, 16 DSP, 2 RAMB36 + 9 RAMB18 (out of context, +1.86 ns at 100 MHz; DDR writes through S_AXI_GP0) |
+| Cost | 6.3k LUT, 7.0k FF, 16 DSP, 2 RAMB36 + 9 RAMB18 (out of context with the 32-bit AXI master, +1.86 ns at 100 MHz); the fishball writes DDR through S_AXI_HP2 with `DW` 64 |
 
 Taps and alias rejection (worst alias at the edge of the given part of the
 band) with all five channels in use; with fewer channels the share is

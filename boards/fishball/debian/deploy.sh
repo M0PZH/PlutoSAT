@@ -4,11 +4,13 @@
 #
 #   deploy.sh [--boot] root@HOST
 #
-# Always:   build/system_top.bit -> /lib/firmware/plutosat.bit.bin,
+# Always:   build/system_top.bit -> /lib/firmware/plutosat.bit.bin (the one
+#           before kept as plutosat.bit.bin.prev),
 #           plutosat-pl-load (run-time FPGA load), and the tools built on the
 #           board from dvbs2/sw, nbiq/sw, awgn/sw into /usr/local/bin.
-# --boot:   once per board: devicetree.dtb + reserved memory and the UIO
-#           nodes (dtb-add-plutosat.py), uEnv.txt + uio_pdrv_genirq.of_id;
+# --boot:   once per board (and again when dtb-add-plutosat.py changes):
+#           devicetree.dtb + reserved memory and the UIO nodes, - the IIO
+#           streaming DMAs (dtb-add-plutosat.py), uEnv.txt + uio_pdrv_genirq.of_id;
 #           the originals stay on the card as *.pre-plutosat. Reboot after.
 #
 # Then on the board: plutosat-pl-load (after every boot, until the
@@ -19,7 +21,7 @@ TOP=$(cd "$(dirname "$0")/../../.." && pwd)
 HERE=$TOP/boards/fishball/debian
 BOOT=0
 [ "$1" = --boot ] && { BOOT=1; shift; }
-[ -n "$1" ] || { sed -n '2,16s/^# \{0,1\}//p' "$0"; exit 2; }
+[ -n "$1" ] || { sed -n '2,18s/^# \{0,1\}//p' "$0"; exit 2; }
 H=$1
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -30,6 +32,7 @@ ssh_() { ssh -o BatchMode=yes "$H" "$@" < /dev/null; }
 cp "$TOP/build/system_top.bit" "$TMP/plutosat.bit"
 printf 'all:\n{\n  plutosat.bit\n}\n' > "$TMP/bit.bif"
 (cd "$TMP" && bootgen -image bit.bif -arch zynq -process_bitstream bin -w > bootgen.log)
+ssh_ '[ ! -e /lib/firmware/plutosat.bit.bin ] || cp -p /lib/firmware/plutosat.bit.bin /lib/firmware/plutosat.bit.bin.prev'
 scp -q "$TMP/plutosat.bit.bin" "$H:/lib/firmware/plutosat.bit.bin"
 scp -q "$HERE/pl-load.sh" "$H:/usr/local/sbin/plutosat-pl-load"
 ssh_ chmod 755 /usr/local/sbin/plutosat-pl-load

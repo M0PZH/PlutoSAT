@@ -1,8 +1,9 @@
 // Verilog-2001 top of the narrowband IQ channels for Vivado block-design
 // module reference. See rtl/nbiq_axi.sv for the register map. Add rtl/*.sv,
 // rtl/gen/nbiq_lut.mem and dvbs2/rtl/dvbs2_async_fifo.sv with this file.
-// m_axi: 32-bit AXI3 write-only master (read channels tied off), for
-// S_AXI_GP0. tap_*: the FIR output samples of all five channels, in the
+// m_axi: 64-bit AXI3 write-only master (read channels tied off), for a
+// Zynq S_AXI_HP port in its default 64-bit mode (fishball: S_AXI_HP2).
+// tap_*: the FIR output samples of all five channels, in the
 // s_axi_aclk domain (one clock per sample with tap_valid; see nbiq_axi.sv),
 // e.g. for the PL FFT; leave unconnected if unused.
 
@@ -36,7 +37,7 @@ module nbiq_bd #(
   input  wire        s_axi_rready,
 
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi AWID" *)
-  (* X_INTERFACE_PARAMETER = "PROTOCOL AXI3, DATA_WIDTH 32, ID_WIDTH 6, READ_WRITE_MODE READ_WRITE, MAX_BURST_LENGTH 16, NUM_WRITE_OUTSTANDING 1, NUM_READ_OUTSTANDING 1" *)
+  (* X_INTERFACE_PARAMETER = "PROTOCOL AXI3, DATA_WIDTH 64, ID_WIDTH 6, READ_WRITE_MODE READ_WRITE, MAX_BURST_LENGTH 16, NUM_WRITE_OUTSTANDING 1, NUM_READ_OUTSTANDING 1" *)
   output wire [5:0]  m_axi_awid,
   output wire [31:0] m_axi_awaddr,
   output wire [3:0]  m_axi_awlen,
@@ -49,8 +50,8 @@ module nbiq_bd #(
   output wire        m_axi_awvalid,
   input  wire        m_axi_awready,
   output wire [5:0]  m_axi_wid,
-  output wire [31:0] m_axi_wdata,
-  output wire [3:0]  m_axi_wstrb,
+  output wire [63:0] m_axi_wdata,
+  output wire [7:0]  m_axi_wstrb,
   output wire        m_axi_wlast,
   output wire        m_axi_wvalid,
   input  wire        m_axi_wready,
@@ -70,7 +71,7 @@ module nbiq_bd #(
   output wire        m_axi_arvalid,
   input  wire        m_axi_arready,
   input  wire [5:0]  m_axi_rid,
-  input  wire [31:0] m_axi_rdata,
+  input  wire [63:0] m_axi_rdata,
   input  wire [1:0]  m_axi_rresp,
   input  wire        m_axi_rlast,
   input  wire        m_axi_rvalid,
@@ -111,7 +112,7 @@ module nbiq_bd #(
   assign m_axi_arvalid = 1'b0;
   assign m_axi_rready  = 1'b1;
 
-  nbiq_axi #(.LUT_FILE(LUT_FILE)) i_nbiq_axi (
+  nbiq_axi #(.LUT_FILE(LUT_FILE), .DW(64)) i_nbiq_axi (
     .s_axi_aclk    (s_axi_aclk),
     .s_axi_aresetn (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

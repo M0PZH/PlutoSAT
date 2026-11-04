@@ -6,25 +6,43 @@
 #define FFT_UIO "fft"
 #define FFT_SIZE 0x00010000u
 #define FFT_ID_VALUE 0x46465453u
-#define FFT_VERSION_VALUE 0x00010000u
+#define FFT_VERSION_VALUE 0x00010100u
 #define FFT_MAP_REGS 0
+#define FFT_MAP_DMAC 1
+#define FFT_MAP_RING 2
 
-/* FFT length (bins, RESULT words) */
+/* Largest FFT length (bins, RESULT words; CTRL.LEN = 0, the reset value) */
 #define FFT_N 4096
+/* log2 of the smallest FFT length (512, CTRL.LEN = 3) */
+#define FFT_LOG2N_MIN 9
+/* Stream packet header (HDR0, HDR1); RESULT word j follows at byte 16 + 4 j */
+#define FFT_PKT_HDR_BYTES 16
+/* Largest stream packet (N = 4096): 16 + 4 N bytes, 2 + N/2 64-bit beats */
+#define FFT_PKT_BYTES_MAX 16400
+/* HDR0.MAGIC value of a stream packet */
+#define FFT_PKT_MAGIC 245
+/* Sum of the reset window over 4096 samples (2^17 = 1.0): 1469.08 x 2^17 */
+#define FFT_WIN_SUM_4096 192555426
+/* Sum of the reset window over 2048 samples (every 2nd): 734.54 x 2^17 */
+#define FFT_WIN_SUM_2048 96277713
+/* Sum of the reset window over 1024 samples (every 4th): 367.27 x 2^17 */
+#define FFT_WIN_SUM_1024 48138849
+/* Sum of the reset window over 512 samples (every 8th): 183.64 x 2^17 */
+#define FFT_WIN_SUM_512 24069419
 /* Largest NAVG */
 #define FFT_NAVG_MAX 256
 /* Largest RSHIFT */
 #define FFT_RSHIFT_MAX 8
 /* WIN value for a gain of 1 (2^17) */
 #define FFT_WIN_ONE 131072
-/* Scale schedule for the 12-bit ADC sources (rx0, rx1): total shift 7, no overflow */
+/* Scale schedule for the 12-bit ADC sources (rx0, rx1): total shift 7 at N = 4096 (12 - log2 N less for shorter N), no overflow at any N */
 #define FFT_SCALE_RX 5592064
-/* Scale schedule for nbiq channels at their default gain 8 (12-bit full scale = 16384): total shift 10 */
+/* Scale schedule for nbiq channels at their default gain 8 (12-bit full scale = 16384): total shift 10 at N = 4096, any N */
 #define FFT_SCALE_NBIQ 5592400
-/* Scale schedule for full-scale 16-bit data (nbiq): total shift 12, no overflow */
+/* Scale schedule for full-scale 16-bit data (nbiq): total shift 12 at N = 4096 (log2 N in general), no overflow */
 #define FFT_SCALE_16 5592405
 
-/* VERSION (ro): Core version, 0x0001_0000 = 1.0 */
+/* VERSION (ro): Core version, 0x0001_0100 = 1.1 (1.0: N = 4096 only, no stream) */
 #define FFT_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define FFT_VERSION_MINOR_SHIFT 0
@@ -36,9 +54,9 @@
 #define FFT_VERSION_MAJOR_MASK 0xFFFF0000u
 /* ID (ro): Core identification "FFTS" (0x46465453) */
 #define FFT_ID 0x004
-/* CTRL (rw): Control; SRC and NB_CH are taken when an average starts */
+/* CTRL (rw): Control; SRC, NB_CH and LEN are taken when an average starts */
 #define FFT_CTRL 0x008
-/*   [0] RUN: Start averages back to back (DOUBLE_BUF = 0: each after DONE is cleared); 0 stops after the current one */
+/*   [0] RUN: Start averages back to back (DOUBLE_BUF = 0 without STREAM: each after DONE is cleared); 0 stops after the current one */
 #define FFT_CTRL_RUN_SHIFT 0
 #define FFT_CTRL_RUN_WIDTH 1
 #define FFT_CTRL_RUN_MASK 0x00000001u
@@ -46,6 +64,10 @@
 #define FFT_CTRL_IRQ_EN_SHIFT 1
 #define FFT_CTRL_IRQ_EN_WIDTH 1
 #define FFT_CTRL_IRQ_EN_MASK 0x00000002u
+/*   [2] STREAM: Send each result on the AXI4-Stream master (one packet); RUN then no longer waits for DONE, and DONE no longer protects RESULT */
+#define FFT_CTRL_STREAM_SHIFT 2
+#define FFT_CTRL_STREAM_WIDTH 1
+#define FFT_CTRL_STREAM_MASK 0x00000004u
 /*   [5:4] SRC: Source */
 #define FFT_CTRL_SRC_SHIFT 4
 #define FFT_CTRL_SRC_WIDTH 2
@@ -57,16 +79,28 @@
 #define FFT_CTRL_NB_CH_SHIFT 8
 #define FFT_CTRL_NB_CH_WIDTH 3
 #define FFT_CTRL_NB_CH_MASK 0x00000700u
+/*   [13:12] LEN: Transform length N = 4096 >> LEN */
+#define FFT_CTRL_LEN_SHIFT 12
+#define FFT_CTRL_LEN_WIDTH 2
+#define FFT_CTRL_LEN_MASK 0x00003000u
+#define FFT_CTRL_LEN_N4096 0
+#define FFT_CTRL_LEN_N2048 1
+#define FFT_CTRL_LEN_N1024 2
+#define FFT_CTRL_LEN_N512 3
 /* CMD (wo): Commands (write 1) */
 #define FFT_CMD 0x00C
 /*   [0] START: Clear DONE; start one average if the core is idle (BUSY = 0) */
 #define FFT_CMD_START_SHIFT 0
 #define FFT_CMD_START_WIDTH 1
 #define FFT_CMD_START_MASK 0x00000001u
-/*   [1] ABORT: Reset the FFT and the sequencer, drop the average in progress, clear DONE (RUN stays: a new average starts with the current configuration) */
+/*   [1] ABORT: Reset the FFT and the sequencer, drop the average in progress, clear DONE (RUN stays: a new average starts with the current configuration); a stream packet in progress is completed */
 #define FFT_CMD_ABORT_SHIFT 1
 #define FFT_CMD_ABORT_WIDTH 1
 #define FFT_CMD_ABORT_MASK 0x00000002u
+/*   [2] STR_ABORT: Drop the result waiting for the stream, or end the packet in progress at once without TLAST (only with the DMA stopped) */
+#define FFT_CMD_STR_ABORT_SHIFT 2
+#define FFT_CMD_STR_ABORT_WIDTH 1
+#define FFT_CMD_STR_ABORT_MASK 0x00000004u
 /* NAVG (rw): Spectra per average */
 #define FFT_NAVG 0x010
 /*   [8:0] NAVG: 1..256 (0 counts as 1, larger values as 256) */
@@ -75,7 +109,7 @@
 #define FFT_NAVG_NAVG_MASK 0x000001FFu
 /* SCALE (rw): FFT scale schedule */
 #define FFT_SCALE 0x014
-/*   [23:0] SCALE: 2 bits per radix-2 stage (shift 0..3), stage 0 in bits [1:0]; output = DFT / 2^(sum of the shifts) */
+/*   [23:0] SCALE: 2 bits per radix-2 stage (shift 0..3), stage 0 in bits [1:0]; stages 0..log2 N - 1 apply (the bits above are ignored); output = DFT / 2^(sum of the shifts) */
 #define FFT_SCALE_SCALE_SHIFT 0
 #define FFT_SCALE_SCALE_WIDTH 24
 #define FFT_SCALE_SCALE_MASK 0x00FFFFFFu
@@ -99,6 +133,14 @@
 #define FFT_STATUS_CAPT_SHIFT 2
 #define FFT_STATUS_CAPT_WIDTH 1
 #define FFT_STATUS_CAPT_MASK 0x00000004u
+/*   [3] STR_WAIT: A result waits for the stream (m_axis_tready low) */
+#define FFT_STATUS_STR_WAIT_SHIFT 3
+#define FFT_STATUS_STR_WAIT_WIDTH 1
+#define FFT_STATUS_STR_WAIT_MASK 0x00000008u
+/*   [4] STR_SEND: A stream packet is being sent */
+#define FFT_STATUS_STR_SEND_SHIFT 4
+#define FFT_STATUS_STR_SEND_WIDTH 1
+#define FFT_STATUS_STR_SEND_MASK 0x00000010u
 /*   [15:8] FRAME: Frame of the average being captured (0..NAVG-1) */
 #define FFT_STATUS_FRAME_SHIFT 8
 #define FFT_STATUS_FRAME_WIDTH 8
@@ -127,6 +169,10 @@
 #define FFT_FLAGS_DROP_SHIFT 3
 #define FFT_FLAGS_DROP_WIDTH 1
 #define FFT_FLAGS_DROP_MASK 0x00000008u
+/*   [4] SDROP: STREAM: a result was not streamed (m_axis_tready low until the buffer was needed again) */
+#define FFT_FLAGS_SDROP_SHIFT 4
+#define FFT_FLAGS_SDROP_WIDTH 1
+#define FFT_FLAGS_SDROP_MASK 0x00000010u
 /* FRAMES (ro): FFT frames accumulated since reset (wraps) */
 #define FFT_FRAMES 0x028
 /* AVGS (ro): Results published since reset (wraps); unchanged before and after reading RESULT means a consistent copy */
@@ -150,10 +196,22 @@
 #define FFT_RES_CFG_RSHIFT_SHIFT 8
 #define FFT_RES_CFG_RSHIFT_WIDTH 4
 #define FFT_RES_CFG_RSHIFT_MASK 0x00000F00u
+/*   [15:12] LOG2N: log2 of the transform length (9..12): the result has 2^LOG2N words */
+#define FFT_RES_CFG_LOG2N_SHIFT 12
+#define FFT_RES_CFG_LOG2N_WIDTH 4
+#define FFT_RES_CFG_LOG2N_MASK 0x0000F000u
 /*   [24:16] NAVG: Spectra averaged (1..256) */
 #define FFT_RES_CFG_NAVG_SHIFT 16
 #define FFT_RES_CFG_NAVG_WIDTH 9
 #define FFT_RES_CFG_NAVG_MASK 0x01FF0000u
+/*   [28] FFT_OVF: FFT overflow in a frame of this average */
+#define FFT_RES_CFG_FFT_OVF_SHIFT 28
+#define FFT_RES_CFG_FFT_OVF_WIDTH 1
+#define FFT_RES_CFG_FFT_OVF_MASK 0x10000000u
+/*   [29] SAT: A word of this result saturated */
+#define FFT_RES_CFG_SAT_SHIFT 29
+#define FFT_RES_CFG_SAT_WIDTH 1
+#define FFT_RES_CFG_SAT_MASK 0x20000000u
 /* RES_SCALE (ro): Scale schedule of the published result */
 #define FFT_RES_SCALE 0x038
 /*   [23:0] SCALE: As SCALE */
@@ -162,7 +220,7 @@
 #define FFT_RES_SCALE_SCALE_MASK 0x00FFFFFFu
 /* INFO (ro): Build options */
 #define FFT_INFO 0x03C
-/*   [3:0] LOG2N: log2 FFT length (12) */
+/*   [3:0] LOG2N: log2 of the largest FFT length (12) */
 #define FFT_INFO_LOG2N_SHIFT 0
 #define FFT_INFO_LOG2N_WIDTH 4
 #define FFT_INFO_LOG2N_MASK 0x0000000Fu
@@ -170,17 +228,80 @@
 #define FFT_INFO_DOUBLE_BUF_SHIFT 4
 #define FFT_INFO_DOUBLE_BUF_WIDTH 1
 #define FFT_INFO_DOUBLE_BUF_MASK 0x00000010u
+/*   [5] STREAM: The AXI4-Stream result output exists (CTRL.STREAM) */
+#define FFT_INFO_STREAM_SHIFT 5
+#define FFT_INFO_STREAM_WIDTH 1
+#define FFT_INFO_STREAM_MASK 0x00000020u
+/*   [11:8] LOG2N_MIN: log2 of the smallest FFT length (9) */
+#define FFT_INFO_LOG2N_MIN_SHIFT 8
+#define FFT_INFO_LOG2N_MIN_WIDTH 4
+#define FFT_INFO_LOG2N_MIN_MASK 0x00000F00u
+/* STR_SENT (ro): Stream packets sent since reset (wraps) */
+#define FFT_STR_SENT 0x040
+/* STR_DROPS (ro): Results not streamed since reset (wraps; SEQ gaps in the packets) */
+#define FFT_STR_DROPS 0x044
 
-/* WIN: Window table: w[n] = w[4095 - n] = WIN[n], unsigned, 2^17 = 1.0 (at most 2^17); write while idle. Reset: 4-term Blackman-Harris (wo, 18 bits) */
+/* WIN: Window table: w[m] = w[4095 - m] = WIN[m], unsigned, 2^17 = 1.0 (at most 2^17); write while idle. Reset: 4-term Blackman-Harris. An N-point frame uses w[n 4096 / N] (wo, 18 bits) */
 #define FFT_WIN_BASE 0x2000
 #define FFT_WIN_WORDS 2048
 #define FFT_WIN_WIDTH 18
 #define FFT_WIN(i) (FFT_WIN_BASE + 4 * (i))
 
-/* RESULT: Result word j = min(sum over NAVG frames of |X[k]|^2 >> RSHIFT, 2^32 - 1), k = j ^ 2048: FFT-shifted, frequency (j - 2048) fs / 4096; valid while DONE (ro, 32 bits) */
+/* RESULT: Result word j < N = min(sum over NAVG frames of |X[k]|^2 >> RSHIFT, 2^32 - 1), k = j ^ N/2: FFT-shifted, frequency (j - N/2) fs / N; valid while DONE (without STREAM) (ro, 32 bits) */
 #define FFT_RESULT_BASE 0x4000
 #define FFT_RESULT_WORDS 4096
 #define FFT_RESULT_WIDTH 32
 #define FFT_RESULT(i) (FFT_RESULT_BASE + 4 * (i))
+
+/* DMA packet word HDR0 (64 bits): Beat 0 of a stream packet (bytes 0..7, little endian) */
+/*   [7:0] MAGIC: 0xF5 (PKT_MAGIC) */
+#define FFT_PKT_HDR0_MAGIC_SHIFT 0
+#define FFT_PKT_HDR0_MAGIC_WIDTH 8
+#define FFT_PKT_HDR0_MAGIC_MASK 0x00000000000000FFULL
+/*   [11:8] LOG2N: log2 N: 2^LOG2N result words follow the header */
+#define FFT_PKT_HDR0_LOG2N_SHIFT 8
+#define FFT_PKT_HDR0_LOG2N_WIDTH 4
+#define FFT_PKT_HDR0_LOG2N_MASK 0x0000000000000F00ULL
+/*   [13:12] SRC: Source */
+#define FFT_PKT_HDR0_SRC_SHIFT 12
+#define FFT_PKT_HDR0_SRC_WIDTH 2
+#define FFT_PKT_HDR0_SRC_MASK 0x0000000000003000ULL
+#define FFT_PKT_HDR0_SRC_RX0 0
+#define FFT_PKT_HDR0_SRC_RX1 1
+#define FFT_PKT_HDR0_SRC_NBIQ 2
+/*   [18:16] NB_CH: nbiq channel */
+#define FFT_PKT_HDR0_NB_CH_SHIFT 16
+#define FFT_PKT_HDR0_NB_CH_WIDTH 3
+#define FFT_PKT_HDR0_NB_CH_MASK 0x0000000000070000ULL
+/*   [23:20] RSHIFT: Result right shift */
+#define FFT_PKT_HDR0_RSHIFT_SHIFT 20
+#define FFT_PKT_HDR0_RSHIFT_WIDTH 4
+#define FFT_PKT_HDR0_RSHIFT_MASK 0x0000000000F00000ULL
+/*   [24] FFT_OVF: FFT overflow in a frame of this average */
+#define FFT_PKT_HDR0_FFT_OVF_SHIFT 24
+#define FFT_PKT_HDR0_FFT_OVF_WIDTH 1
+#define FFT_PKT_HDR0_FFT_OVF_MASK 0x0000000001000000ULL
+/*   [25] SAT: A word of this result saturated */
+#define FFT_PKT_HDR0_SAT_SHIFT 25
+#define FFT_PKT_HDR0_SAT_WIDTH 1
+#define FFT_PKT_HDR0_SAT_MASK 0x0000000002000000ULL
+/*   [26] SKIP: Results were dropped since the previous packet (SEQ jumped) */
+#define FFT_PKT_HDR0_SKIP_SHIFT 26
+#define FFT_PKT_HDR0_SKIP_WIDTH 1
+#define FFT_PKT_HDR0_SKIP_MASK 0x0000000004000000ULL
+/*   [63:32] SEQ: Sequence number: AVGS of this result */
+#define FFT_PKT_HDR0_SEQ_SHIFT 32
+#define FFT_PKT_HDR0_SEQ_WIDTH 32
+#define FFT_PKT_HDR0_SEQ_MASK 0xFFFFFFFF00000000ULL
+
+/* DMA packet word HDR1 (64 bits): Beat 1 of a stream packet (bytes 8..15); RESULT words from byte 16, two per beat ({word 2m+1, word 2m}), TLAST on the last */
+/*   [23:0] SCALE: Scale schedule (as RES_SCALE) */
+#define FFT_PKT_HDR1_SCALE_SHIFT 0
+#define FFT_PKT_HDR1_SCALE_WIDTH 24
+#define FFT_PKT_HDR1_SCALE_MASK 0x0000000000FFFFFFULL
+/*   [40:32] NAVG: Spectra averaged (1..256) */
+#define FFT_PKT_HDR1_NAVG_SHIFT 32
+#define FFT_PKT_HDR1_NAVG_WIDTH 9
+#define FFT_PKT_HDR1_NAVG_MASK 0x000001FF00000000ULL
 
 #endif /* FFT_REGS_H */

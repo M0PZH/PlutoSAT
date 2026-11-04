@@ -2,8 +2,8 @@
 """Board test for the PL spectrum analyser (fft/): take averaged spectra and
 print or save them in dB. Needs numpy; run as root on the board.
 
-    fft_spectrum.py [--src rx0|rx1|nbiq] [--ch N] [--navg N] [--count K]
-                    [--fs HZ] [--csv FILE] [--mem]
+    fft_spectrum.py [--src rx0|rx1|nbiq] [--ch N] [--len 4096|2048|1024|512]
+                    [--navg N] [--count K] [--fs HZ] [--csv FILE] [--mem]
 
 Finds the UIO device named "fft" (generic-uio, interrupt on DONE); --mem
 uses /dev/mem at --base instead (polling). Not tested on hardware yet.
@@ -23,9 +23,13 @@ import numpy as np
 # register offsets: regs/fft.toml (regs/gen/fft_regs.h)
 VERSION, ID, CTRL, CMD, NAVG, SCALE, RSHIFT, STATUS = 0x000, 0x004, 0x008, 0x00C, 0x010, 0x014, 0x018, 0x01C
 DONE, FLAGS, FRAMES, AVGS, DROPS, RES_CFG, RES_SCALE, INFO = 0x020, 0x024, 0x028, 0x02C, 0x030, 0x034, 0x038, 0x03C
+STR_SENT, STR_DROPS = 0x040, 0x044
 WIN, RESULT = 0x2000, 0x4000
 ID_VALUE = 0x46465453
-N = 4096
+N = 4096                           # largest transform; CTRL.LEN: N = 4096 >> LEN
+LENS = {4096: 0, 2048: 1, 1024: 2, 512: 3}
+# sum of the reset window over N samples / 2^17 (regs/fft.toml WIN_SUM_*)
+WIN_SUM = {4096: 1469.081, 2048: 734.541, 1024: 367.270, 512: 183.635}
 SRC = {"rx0": 0, "rx1": 1, "nbiq": 2}
 SCALE_RX, SCALE_NBIQ = 0x555400, 0x555550
 
@@ -69,18 +73,18 @@ class Fft:
             else:
                 time.sleep(0.001)
 
-    def result(self):
+    def result(self, n=N):
         base = RESULT >> 2
-        return np.fromiter((self.mv[base + j] for j in range(N)), np.uint64, N)
+        return np.fromiter((self.mv[base + j] for j in range(n)), np.uint64, n)
 
-    def configure(self, src, ch, navg, scale, rshift, run=False):
+    def configure(self, src, ch, navg, scale, rshift, run=False, n=N):
         self.wr(CTRL, 0)
         self.wr(CMD, 2)                                  # abort whatever runs
         self.wr(NAVG, navg)
         self.wr(SCALE, scale)
         self.wr(RSHIFT, rshift)
-        self.wr(FLAGS, 0xF)
-        self.wr(CTRL, int(run) | (self.uio is not None) << 1 | src << 4 | ch << 8)
+        self.wr(FLAGS, 0x1F)
+        self.wr(CTRL, int(run) | (self.uio is not None) << 1 | src << 4 | ch << 8 | LENS[n] << 12)
 
     def spectra(self, count, run=True):
         """Yield (words, rshift, navg, scale, flags) per published result."""
@@ -90,7 +94,7 @@ class Fft:
             self.wait_done()
             seq = self.rd(AVGS)
             cfg, scale, flags = self.rd(RES_CFG), self.rd(RES_SCALE), self.rd(FLAGS)
-            w = self.result()
+            w = self.result(1 << ((cfg >> 12) & 15))
             if self.rd(AVGS) != seq:
                 print("warning: result changed while reading", file=sys.stderr)
             self.wr(DONE, 1)                             # acknowledge
@@ -101,9 +105,12 @@ class Fft:
 
 def to_db(words, rshift, navg, scale, full_scale=2048.0):
     """dB relative to a full-scale complex tone (amplitude full_scale) on a bin
-    centre, with the reset (Blackman-Harris) window: sum(w) / 2^17 = 1469.1."""
-    shift = sum((scale >> (2 * s)) & 3 for s in range(12))
-    ref = (full_scale * 1469.08 / 2.0 ** shift) ** 2
+    centre, with the reset (Blackman-Harris) window (sum(w) / 2^17 = 1469.1
+    at N = 4096, N / 4096 of that for shorter N). N = len(words); the first
+    log2 N stages of the scale schedule apply."""
+    n = len(words)
+    shift = sum((scale >> (2 * s)) & 3 for s in range(n.bit_length() - 1))
+    ref = (full_scale * WIN_SUM[n] / 2.0 ** shift) ** 2
     p = words.astype(float) * 2.0 ** rshift / navg
     return 10 * np.log10(np.maximum(p, 1e-3) / ref)
 
@@ -112,6 +119,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", choices=SRC, default="rx0")
     ap.add_argument("--ch", type=int, default=0, help="nbiq channel 0..4")
+    ap.add_argument("--len", type=int, choices=sorted(LENS), default=N, help="transform length")
     ap.add_argument("--navg", type=int, default=16)
     ap.add_argument("--scale", type=lambda s: int(s, 0), default=None)
     ap.add_argument("--count", type=int, default=1)
@@ -127,8 +135,8 @@ def main():
     navg = max(1, min(a.navg, 256))
     rshift = min(8, int(math.floor(math.log2(navg))))   # result ~ mean power
     full = 16384.0 if src == 2 else 2048.0     # nbiq: default gain 8
-    f.configure(src, a.ch, navg, scale, rshift, run=a.count > 1)
-    freq = (np.arange(N) - N // 2) * a.fs / N
+    f.configure(src, a.ch, navg, scale, rshift, run=a.count > 1, n=a.len)
+    freq = (np.arange(a.len) - a.len // 2) * a.fs / a.len
     t0 = time.time()
     out = open(a.csv, "a") if a.csv else None
     for k, (w, rsh, nav, sc, flags) in enumerate(f.spectra(a.count, run=a.count > 1)):

@@ -29,7 +29,5 @@ M_DEPS += $(wildcard $(AWGN_DIR)/rtl/*.sv) $(wildcard $(AWGN_DIR)/ip/*.v)
 FFT_DIR := $(abspath $(ADI_HDL_DIR)/../fft)
 M_DEPS += $(wildcard $(FFT_DIR)/rtl/*.sv) $(wildcard $(FFT_DIR)/rtl/gen/*) $(wildcard $(FFT_DIR)/ip/*)
 LIB_DEPS += axi_dmac
-LIB_DEPS += util_pack/util_cpack2
-LIB_DEPS += util_pack/util_upack2
 
 include $(ADI_HDL_DIR)/projects/scripts/project-xilinx.mk

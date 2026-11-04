@@ -8,10 +8,11 @@
 # rounding: convergent_rounding (default, what the RTL and the model expect)
 #           or truncation
 #
-# 4096 points, radix-2 Lite burst I/O, 16-bit input and phase factors, fixed
-# scaling (run-time schedule), natural output order, non-realtime throttle
-# (the input may pause between samples, the output may be held off),
-# overflow flag. 100 MHz.
+# 4096 points maximum with run-time transform length (the config word's
+# NFFT field, 9..12 used), radix-2 Lite burst I/O, 16-bit input and phase
+# factors, fixed scaling (run-time schedule), natural output order,
+# non-realtime throttle (the input may pause between samples, the output may
+# be held off), overflow flag. 100 MHz.
 
 proc fft_create_xfft {{ip_dir ""} {rounding convergent_rounding}} {
   set args [list -vlnv xilinx.com:ip:xfft:9.1 -module_name fft_xfft]
@@ -34,7 +35,7 @@ proc fft_create_xfft {{ip_dir ""} {rounding convergent_rounding}} {
     CONFIG.aresetn true \
     CONFIG.ovflo true \
     CONFIG.xk_index false \
-    CONFIG.run_time_configurable_transform_length false \
+    CONFIG.run_time_configurable_transform_length true \
     CONFIG.cyclic_prefix_insertion false \
     CONFIG.memory_options_data block_ram \
     CONFIG.memory_options_phase_factors block_ram \
