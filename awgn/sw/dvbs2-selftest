@@ -13,10 +13,13 @@
 # usage: dvbs2-selftest [-L digital|rf] [-s SYMRATE] [-m MODCOD] [-p]
 #                       [-e "ESN0 ..."] [-t SEC] [-w SEC] [-o NCO_HZ] [-r ROLLOFF]
 #                       [-f LO_HZ] [-d RX_LO_OFFSET_HZ] [-a TX_ATTEN_DB] [-G RX_GAIN_DB]
-#   -s  symbol rate (default 1000000), 12 MS/s / (2 x 1..32): the transmitter
-#       interpolates by at most 64, the receiver supports all of these
+#   -s  symbol rate (default 1000000): 12 MS/s / an integer that both
+#       dvbs2-tx and dvbs2-rx support (to 100 ppm: 33333 = 12e6 / 360); down to
+#       33.33 kS/s through the TX and RX CICs
 #   -e  Es/N0 points in dB, "off" for no added noise (default "off 1 0 -1 -2")
-#   -t  counting time per point (default 10 s), -w warm-up (default 3 s)
+#   -t  counting time per point (default 10 s, at least 20 frames), -w warm-up
+#       (default 3 s, at least 8 frames + 1 s: the receiver needs ~7 frames to
+#       acquire; a frame lasts 33282 / SR s, 1 s at 33.33 kS/s)
 #   -o  transmitter NCO offset (a carrier offset for the receiver, which is
 #       told nothing about it)
 #   -r  roll-off 0.35 (default), 0.25 or 0.20
@@ -24,7 +27,7 @@
 # Prints per point: Es/N0 set, packets ok / bad / lost, packet error rate, and
 # the receiver's last status line.
 
-L=digital SR=1000000 MC=qpsk1/4 P= ES="off 1 0 -1 -2" T=10 W=3 NCO=0 RO=0.35
+L=digital SR=1000000 MC=qpsk1/4 P= ES="off 1 0 -1 -2" T= W= NCO=0 RO=0.35
 LO=2400250000 DLO=0 ATT=40 GAIN=
 FS=12000000
 
@@ -51,14 +54,21 @@ while getopts "L:s:m:pe:t:w:o:f:d:a:G:r:h" o; do
 done
 case $L in digital|rf) ;; *) usage ;; esac
 
-# the transmitter interpolates by FS / SR = 2..64; the receiver's DDC
-# decimation FS / (2 SR) must be one dvbs2-rx supports (1..32, larger ones
-# with its CIC): ask dvbs2-rx, which applies the same rules as for -d
-DEC=$((FS / (2 * SR)))
-[ $((DEC * 2 * SR)) -eq $FS ] && [ $((2 * DEC)) -ge 2 ] && [ $((2 * DEC)) -le 64 ] ||
-	die "symbol rate must be $FS / (2 x 1..32) (transmitter: $FS / SR = 2..64)"
-dvbs2-rx --dump-coefs -s $SR -d $DEC >/dev/null 2>&1 ||
-	die "dvbs2-rx does not support decimation $DEC (symbol rate $SR at $FS)"
+# the symbol rate must be FS / an integer (to 100 ppm) that the transmitter
+# (RRC x CIC) and the receiver (DDC decimation FS / (2 SR), FIR or CIC x FIR)
+# both support: ask the tools, which apply their own rules
+SPS=$(( (FS + SR / 2) / SR ))
+ERR=$(( SPS * SR - FS )); [ $ERR -lt 0 ] && ERR=$(( -ERR ))
+[ $SPS -ge 2 ] && [ $(( ERR * 10000 )) -le $FS ] ||
+	die "symbol rate $SR is not $FS / an integer"
+dvbs2-tx -F $FS -s $SR --dump-coefs >/dev/null 2>&1 ||
+	die "dvbs2-tx does not support $SPS samples per symbol (symbol rate $SR at $FS)"
+dvbs2-rx --dump-coefs -F $FS -s $SR >/dev/null 2>&1 ||
+	die "dvbs2-rx does not support decimation $((SPS / 2)) (symbol rate $SR at $FS)"
+# warm-up and counting time scale with the frame duration (33282 symbols with pilots)
+FRAME_MS=$(( 33282000 / SR ))
+[ -n "$W" ] || { W=$(( (8 * FRAME_MS + 999) / 1000 + 1 )); [ $W -lt 3 ] && W=3; }
+[ -n "$T" ] || { T=$(( (20 * FRAME_MS + 999) / 1000 )); [ $T -lt 10 ] && T=10; }
 
 phy=
 for d in /sys/bus/iio/devices/iio:device*; do
@@ -96,7 +106,7 @@ fi
 echo "$MC${P:+ pilots}, $SR S/s, roll-off $RO, fs $FS, TX NCO offset $NCO Hz, $T s per point"
 
 # configure the AD9363 receive side once, then the transmitter for the whole run
-dvbs2-rx -s $SR -d $DEC -m $MC -r $RO $P $RXOPT -q -O /dev/null 2>/dev/null &
+dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $RXOPT -q -O /dev/null 2>/dev/null &
 pid=$!
 sleep 1
 kill $pid 2>/dev/null
@@ -121,7 +131,7 @@ for e in $ES; do
 	mkfifo "$TMP/ts"
 	ts-prbs check -t $T -w $W < "$TMP/ts" > "$TMP/res" &
 	ck=$!
-	dvbs2-rx -s $SR -d $DEC -m $MC -r $RO $P $RXOPT -O "$TMP/ts" 2>"$TMP/rx.log" &
+	dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $RXOPT -O "$TMP/ts" 2>"$TMP/rx.log" &
 	rx=$!
 	sleep 1
 	loopback                                 # (re)asserted after the receiver's setup

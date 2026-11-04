@@ -46,6 +46,7 @@ statistics.
 dvbs2-selftest                              # digital loopback, QPSK 1/4, 1 MS/s
 dvbs2-selftest -p -m qpsk1/2 -s 500000 -e "off 3 2 1" -t 30
 dvbs2-selftest -o 20000                     # 20 kHz carrier offset at the TX NCO
+dvbs2-selftest -p -m qpsk1/2 -s 33333 -e "off 3"  # 33.33 kS/s through the TX and RX CICs
 dvbs2-selftest -L rf -f 2400250000 -a 40 -G 20 -d 3000   # cable + attenuator, 3 kHz LO offset
 ```
 
