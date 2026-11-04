@@ -9,12 +9,12 @@ RTL = os.path.join(HERE, "..", "..", "rtl")
 BUILD = os.path.join(HERE, "build")
 
 
-def build(top, sources, params=()):
+def build(top, sources, params=(), defines=()):
     obj = os.path.join(BUILD, top)
     os.makedirs(obj, exist_ok=True)
     cmd = ["verilator", "--binary", "--timing", "-j", "16", "-O3", "-Wno-fatal",
            "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "--top-module", top, "-Mdir", obj,
-           "-I" + RTL] + [f"-G{p}" for p in params] + \
+           "-I" + RTL] + [f"-G{p}" for p in params] + [f"-D{d}" for d in defines] + \
           [os.path.join(RTL, s) if not os.path.isabs(s) else s for s in sources]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
     return os.path.join(obj, "V" + top)
