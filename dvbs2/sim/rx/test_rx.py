@@ -813,7 +813,7 @@ def check_pls_regs(regs, lines, pls, modcod, pilots):
     st = pls.status()
     last = st["last"]
     print("PLS", [(d["code"], d["conf"], d["carrier_hyp"], d["grid"]) for d in pls.results])
-    assert regs[0x00] == 0x00010401
+    assert regs[0x00] == 0x00010402
     assert regs[0xB8] == pls_word(last, st["count"])
     assert regs[0xBC] == pls_word(st["data"], st["data_count"])
     assert regs[0xC0] == (last["freq"] & 0xFFFF) << 16
