@@ -216,7 +216,9 @@ ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_TYPE_DEST 1
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.CYCLIC 1
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.SYNC_TRANSFER_START 0
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.AXI_SLICE_SRC 0
-ad_ip_parameter axi_ad9361_dac_dma CONFIG.AXI_SLICE_DEST 0
+# a register slice on the stream side: the store-and-forward BRAM output
+# to tx_upack missed 250 MHz in the full design
+ad_ip_parameter axi_ad9361_dac_dma CONFIG.AXI_SLICE_DEST 1
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_2D_TRANSFER 0
 ad_ip_parameter axi_ad9361_dac_dma CONFIG.DMA_DATA_WIDTH_DEST 64
 
