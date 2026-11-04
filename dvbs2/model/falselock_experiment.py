@@ -48,6 +48,26 @@ def rx_input(tx, start_sym, esn0, cfo, ppm, seed, sps_tx=8, rms=1500.0):
     return np.clip(x, -32768, 32767).astype(np.int64)
 
 
+def adc_signal(rate_idx, pilots, nframes, seed, payload="null", esn0=30.0, rms=1500.0, dec=6):
+    """Board-like input: the TX model through the 12 MS/s ADC (12 bit, AGC
+    from far above: the board's digital loopback level) and the DDC
+    (decimation `dec`, as dvbs2-rx loads it), the receiver started at a
+    random symbol of the stream. Returns (2 sps DDC output, BBFRAMEs, start)."""
+    import sr_offset_experiment as so
+    kb = m.LDPC[m.RATES[rate_idx]]["kbch"]
+    npkt = (nframes + 1) * kb // 1504 + 3
+    ts = null_ts(npkt) if payload == "null" else prbs_ts(npkt, seed)
+    bb = grref.bbheader(ts.ravel(), m.RATES[rate_idx])[: nframes * kb].reshape(nframes, kb)
+    iq = m.signs_to_iq(np.concatenate([m.plframe_signs(m.fec_frame(b, rate_idx), rate_idx + 1, pilots)
+                                       for b in bb]))
+    start = int(np.random.default_rng(seed).integers(0, fx.frame_len(pilots)))
+    cfg = fx.ddc_config(dec)
+    delay = np.random.default_rng(50 + seed).random()
+    x2 = so.ddc_stream(so.adc_chunks(iq[start:], dec, 0.0, 0.0, esn0, seed, delay=delay, rms=rms,
+                                     chunk=cfg["R"] * cfg["D"] * 8192), cfg)
+    return x2, bb, start
+
+
 def classify(r, L, start_sym):
     """Header tags of the frame sync: right (a frame start, +-1 symbol) or wrong."""
     out = []

@@ -171,6 +171,7 @@ module dvbs2_rx_framesync
   logic        pw_on;                        // PLS decode of the last tag to be used ...
   logic [11:0] pw_cnt;                       // ... this many symbols later
   logic [1:0]  nbad;                         // LOCKED: tags in a row not confirmed
+  logic        nodz;                         // after a PLS drop: next search peak at the data length only
 
   wire pls_hold = pw_on && pw_cnt == '0 && pls_busy;
 
@@ -198,6 +199,7 @@ module dvbs2_rx_framesync
       pr_v <= 1'b0;
       pw_on <= 1'b0;
       nbad <= '0;
+      nodz <= 1'b0;
       m_valid <= 1'b0;
       cnt_found <= '0; cnt_flywheel <= '0; cnt_lost <= '0;
     end else begin
@@ -241,6 +243,7 @@ module dvbs2_rx_framesync
                 fst <= SEARCH;
                 best_v <= 1'b0;
                 chk_alt <= 1'b0;
+                nodz <= 1'b1;
                 have_last <= 1'b0;
                 pk <= '0;
               end else if (fst == LOCKED) begin
@@ -248,6 +251,7 @@ module dvbs2_rx_framesync
                 else if (nbad == 2'(PLS_NBAD - 1)) begin
                   fst <= SEARCH;
                   best_v <= 1'b0;
+                  nodz <= 1'b1;
                   pk <= '0;
                   have_last <= 1'b0;
                   cnt_lost <= cnt_lost + 16'd1;
@@ -347,7 +351,10 @@ module dvbs2_rx_framesync
         end
 
         S_DEC3: begin                                // next header of the best due: check it
-          if (fst == SEARCH && n == best_n + LEN_Z - 32'(W)) begin
+          // after a PLS drop the search covers a whole data frame first
+          // (repeating data found again at the dummy length cycles with the
+          // frame, a frame length apart: the carrier confirmed such tags)
+          if (fst == SEARCH && !nodz && n == best_n + LEN_Z - 32'(W)) begin
             fst <= CHECK;
             nchk <= 1'b0;
             nbad <= '0;
@@ -358,6 +365,7 @@ module dvbs2_rx_framesync
             fst <= CHECK;
             nchk <= 1'b0;
             nbad <= '0;
+            nodz <= 1'b0;
             chk_alt <= 1'b0;
             pred <= best_n + len_d;
             win_v <= 1'b0;

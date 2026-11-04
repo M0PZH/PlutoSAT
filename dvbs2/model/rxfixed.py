@@ -526,6 +526,7 @@ class FrameSync:
         self.nchk = 0         # CHECK: headers found in a row
         self.csum = 0         # ... sum of their metrics
         chk_alt = False       # CHECK at the dummy length of a search peak
+        nodz = False          # after a PLS drop: the next search peak at the data length only
         self.have_last = False
         self.last_n = 0
         win = None
@@ -552,6 +553,7 @@ class FrameSync:
                         self.st = self.SEARCH
                         best = None
                         chk_alt = False
+                        nodz = True
                         self.have_last = False
                         pk = 0
                         self.n_pls_drop += 1
@@ -561,6 +563,7 @@ class FrameSync:
                         if nbad == FS_PLS_NBAD:
                             self.st = self.SEARCH
                             best = None
+                            nodz = True
                             pk = 0
                             self.have_last = False
                             self.n_pls_drop += 1
@@ -575,7 +578,12 @@ class FrameSync:
                 # than to the configured one: QPSK 1/4 differs from it in one
                 # differential): its next header is looked for at the dummy
                 # length first, then at the data length
-                if k == best[1] + L_DUMMY - FS_W:
+                # after a PLS drop the search covers a whole data frame first
+                # (FS_PLS_AT): repeating data found again at the dummy length
+                # cycles with the frame, a frame length apart each time, which
+                # the carrier takes for confirmed headers, and keeps the search
+                # from ever reaching the real header
+                if k == best[1] + L_DUMMY - FS_W and not nodz:
                     self.st = self.CHECK
                     self.nchk = 0
                     nbad = 0
@@ -586,6 +594,7 @@ class FrameSync:
                     self.st = self.CHECK
                     self.nchk = 0
                     nbad = 0
+                    nodz = False
                     chk_alt = False
                     self.pred = best[1] + self.L[0]
                     win = None

@@ -125,3 +125,25 @@ def test_rx_esn0_restart():
     cr = fx.receive(x, 6, False)["carrier"]
     est = [10 * math.log10(A * A / (E - A * A)) for (nhdr, f, fh, th, A, E, G) in cr.log if nhdr >= 3]
     assert len(est) >= 5 and all(18.5 < e < 22 for e in est), est
+
+
+def test_rx_falselock_cycle():
+    """Board finding (RX 1.4 as first built, QPSK 1/4 without pilots, null
+    packets, digital loopback at 1 MS/s: half the starts acquired +374 kHz,
+    retyped headers, failed frames, re-acquired). Reproduced through the ADC
+    and DDC: after a PLS drop the search found the same repeating data again
+    at the dummy length, a frame length after the last false tag, every
+    frame; the carrier took those tags for confirmed headers and acquired
+    0.374 cycles/symbol. Now the first search after a drop covers a data
+    frame."""
+    import falselock_experiment as fe
+    import rxfixed as fx
+    import rxmodel as rf
+    x2, bb, start = fe.adc_signal(0, False, 12, 5)
+    r = fx.receive(x2, 1, False)
+    cr = r["carrier"]
+    assert cr.n_acq == 1 and cr.n_retype == 0 and abs(cr.fhat) < (1 << 20)
+    kb = m.LDPC["1/4"]["kbch"]
+    out = rf.gr_ldpc_decode_llr(np.array(cr.frames), 0)
+    dec = [any(np.array_equal(out[j * kb:(j + 1) * kb], b) for b in bb) for j in range(len(out) // kb)]
+    assert len(dec) >= 3 and all(dec)

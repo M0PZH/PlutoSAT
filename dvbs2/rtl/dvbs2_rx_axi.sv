@@ -13,7 +13,8 @@
 // A frame that finds both packet slots full is dropped (PKT_DROPPED).
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0400: frame sync confirms headers by their PLS decode
+//   0x00 VERSION      RO  0x0001_0401: (0x0001_0400 + a whole-frame search after a PLS drop)
+//                         0x0001_0400: frame sync confirms headers by their PLS decode
 //                         (no false lock on repeating frames), acquisition headers
 //                         typed by the frame length, pilots off: no header kicks after
 //                         the acquisition (0x0001_0300: pilots-off carrier tracking and
@@ -500,7 +501,7 @@ module dvbs2_rx_axi #(
         s_axi_rvalid  <= 1'b1;
         snap_rd <= ar_q == 6'h2A;
         case (ar_q)
-          6'h00: s_axi_rdata <= 32'h0001_0400;
+          6'h00: s_axi_rdata <= 32'h0001_0401;
           6'h01: s_axi_rdata <= 32'h4456_5232;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {30'd0, ctrl};
