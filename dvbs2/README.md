@@ -653,6 +653,103 @@ written before the soft reset is loaded at the reset
 With it acquisition is the same as at e = 0 (median 5 frames) for every
 tested offset up to +-2 % (`sr_offset_experiment.py --preset`).
 
+### Two receive slots: shared engines
+
+For the second DATV receive slot (`docs/rx2_design.md`) the timing, frame
+sync and carrier engines exist in two-slot versions: one engine serves both
+slots, per symbol, and per slot it does exactly what the single-slot engine
+does (bit exact per slot to the model). They are not yet used by
+`dvbs2_rx` (integration: rx2_design.md step 6).
+
+| Module | How | Per slot | Shared |
+| --- | --- | --- | --- |
+| `dvbs2_rx_timing2` | hand-written | sample buffer, coefficient bank (slot = coefficient RAM address MSB, `coef_slot`), kp/ki, integrator preset, loop state, output register | MAC pipeline, gain, TED, loop arithmetic |
+| `dvbs2_rx_framesync2` | generated from `dvbs2_rx_framesync` | context (37 registers, 501 bits), sbuf and the 6 lane memories (slot = address MSB, 256 deep: still one RAMB18 each), header pattern, PLS confirmation inputs | correlator, FSM, DSPs |
+| `dvbs2_rx_carrier2` | generated from `dvbs2_rx_carrier` | context (52 registers, 757 bits), seg (1440 words per slot: 2K x 32 + 1K x 32, 3 RAMB36), zbuf (banks 0..3 of both slots 1K x 32 + bank 4 of both 256 x 32: 1.5 tiles), header pattern, output frame counters | FSM, DSPs, CORDIC, divider, rotator (its NCO ROM), zrbuf, LLR pipeline, output FIFO (each word carries its slot) |
+| `dvbs2_rx_pls` | two instances | everything | nothing |
+
+`tools/make_rx2.py` generates the frame sync and carrier (`--check`: are
+the committed files up to date; `test_rx2.py` checks that): every register
+the single-slot FSM assigns is classified by hand as context (shadowed),
+per-symbol/per-job temporary or engine pipeline; a new register stops the
+generator until it is classified. The context swap takes one clock in the
+engine's input state (S_IN, M_IDLE), when the other slot has a symbol and
+the current one has none or was just served, so with both slots busy the
+engines alternate per symbol. Pulses for a slot (ty_v from the carrier,
+pls_v from its PLS decoder) reach that slot's context wherever it is. In
+simulation (`RX2_SCRAMBLE`) the temporaries are overwritten with random
+values at every swap, so a register wrongly taken for a temporary shows up
+as a mismatch (checked: moving `win_m` there fails `test_framesync2`).
+
+The PLS decoder is instantiated once per slot (607 LUT, 828 FF, 2 DSP, no
+BRAM each) rather than shared: its decode is clock-driven (~1420 clocks per
+frequency hypothesis, ~94k with the grid at H = 32), and the frame sync
+waits for it 3072 symbols after each tag. One shared decoder could have to
+do both slots' grid decodes (before the acquisition, or a carrier
+hypothesis below the noise level) in one window: ~190k clocks, more than
+the 153k of a 2 MBd slot; that slot's input would wait and its FIFO
+overflow, so it would no longer equal the single-slot receiver. A shared
+decoder with per-slot capture buffers and status would save ~400 LUT and
+2 DSP.
+
+Per-slot reset (`rst_s[s]`, level or pulse): the timing engine cancels the
+slot's symbol at once; the frame sync and carrier reset the slot's context
+at once if it is in the shadow, else when the engine is back at its input
+state (the symbol or header job in progress finishes first, so the units
+and pipelines are idle). A slot in reset takes no symbols, is not swapped
+in, and its output is dropped (the carrier's output FIFO keeps an epoch bit
+per slot, so words written before the reset are dropped too); the next
+word of the slot starts a frame (`m_first`). The other slot runs on
+unaffected (tested).
+
+Interfaces: per-slot inputs and outputs are 2-element arrays or 2-bit
+vectors (`modcod2`, `s_valid2`, `st_freq2`, ...). The frame sync's output
+and the carrier's LLR output are single streams with `m_slot`; the
+carrier's output (`m_llr_*`, `m_first`, `m_slot`) is what the LLR queue
+(`dvbs2_rx_llrq`) takes, with `s_modcod`/`s_pilots` from the slot's
+configuration. The carrier's per-slot `st_freq2` / `st_acquired2` feed the
+slot's PLS decoder (valid for the slot whose symbol the carrier takes).
+
+Throughput: timing 42 clocks per symbol of either slot (measured 42.1
+including the slot pick), so the two rates together are at most 2.38 MBd
+in theory; as for the single-slot receiver (input FIFO overflows at
+exactly 42 clocks per symbol, none at 44) leave a few percent: tested at
+1.67 + 0.67 MBd (42.9 clocks per symbol together) and one slot at 2.27
+MBd. Frame sync ~34 + 1 per swap; carrier ~8 per symbol plus the header
+and segment jobs. Unlike `dvbs2_rx_timing`, the two-slot timing engine
+starts a slot's symbol only when that slot's output register is free.
+
+Resources (out of context, xc7z020-2, 100 MHz, `syn/ooc2.tcl`; the
+carrier2 without the seg/zbuf packing: 5672 LUT, 7 tiles, WNS 0.41 ns):
+
+| Module | LUT | FF | BRAM tiles | DSP | WNS ns |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dvbs2_rx_timing` | 698 | 424 | 0.5 | 15 | 3.16 |
+| `dvbs2_rx_timing2` | 1025 | 726 | 1 | 15 | 2.86 |
+| `dvbs2_rx_framesync` | 1977 | 1333 | 3.5 | 8 | 1.94 |
+| `dvbs2_rx_framesync2` | 2468 | 1997 | 3.5 | 8 | 1.40 |
+| `dvbs2_rx_carrier` | 4818 | 2833 | 4 | 34 | 1.18 |
+| `dvbs2_rx_carrier2` | 5682 | 3764 | 5.5 | 34 | 0.84 |
+| `dvbs2_rx_pls` (x 2) | 607 | 828 | 0 | 2 | 3.56 |
+
+Tests (`sim/rx/test_rx2.py`, Verilator; each slot equal to the model of a
+single-slot receiver fed with its own signal, the other slot running
+another one): `test_timing2` (different signals, roll-offs, gains, stalls,
+integrator presets; a reset of either slot in the middle of its symbol; one
+slot idle), `test_framesync2` (pilots / no pilots, dropped symbols:
+flywheel, lost, re-lock; PLS stand-ins slower than the frame sync needs
+them in both slots; QPSK 1/4 without pilots with QPSK 1/2 configured; a
+slot reset; one slot idle), `test_carrier2` (the single-slot carrier cases
+paired: low SNR, gaps, segment timeout, the 1/1476 false-lock correction,
+pilots off through the PLL gears; a reset of either slot; one slot idle),
+`test_fe2_*` (input FIFOs, timing2, framesync2, carrier2 and a PLS decoder
+per slot from samples, against `rxfixed.receive()` per slot: LLRs, PLS
+decodes, AMP/ENERGY/GAIN, no overflow; the RX 1.4 regressions, null-packet
+false lock and QPSK 1/4 no-pilots start-up, one in each slot at 1.67 + 0.67
+MBd and exchanged; different MODCODs and pilots; a slot reset during a
+data frame; one slot idle with the other at 2.27 MBd; the frames decode
+with the LDPC/BCH models).
+
 ### Fishball bitstream integration
 
 `boards/fishball/hdl/system_bd.tcl` adds `dvbs2_rx` (module reference
