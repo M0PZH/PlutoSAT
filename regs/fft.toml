@@ -1,7 +1,10 @@
-# Spectrum analyser (fft/): averaged 4096-bin power spectra of rx0, rx1 or
-# one nbiq channel, computed in the PL. Registers of fft/rtl/fft_axi.sv.
-# Configuration (CTRL source and channel, NAVG, SCALE, RSHIFT) is taken when
-# an average starts; RES_CFG / RES_SCALE describe the result in RESULT.
+# Spectrum analyser (fft/): averaged power spectra (N = 4096, 2048, 1024 or
+# 512 bins) of rx0, rx1 or one nbiq channel, computed in the PL. Registers of
+# fft/rtl/fft_axi.sv. Configuration (CTRL source, channel and LEN, NAVG,
+# SCALE, RSHIFT) is taken when an average starts; RES_CFG / RES_SCALE
+# describe the result in RESULT. With CTRL.STREAM each result also goes out
+# on the core's AXI4-Stream master to an axi_dmac as one packet ([[packet]]
+# HDR0, HDR1, then the N result words).
 
 [core]
 name = "fft"
@@ -9,14 +12,54 @@ title = "Spectrum analyser"
 uio = "fft"
 size = 0x10000
 id = { offset = 0x004, value = 0x46465453 }        # "FFTS"
-version = { offset = 0x000, value = 0x00010000 }
+version = { offset = 0x000, value = 0x00010100 }
 rtl = "fft/rtl/fft_axi.sv"
 maps = ["regs"]
 
 [[const]]
 name = "N"
 value = 4096
-doc = "FFT length (bins, RESULT words)"
+doc = "Largest FFT length (bins, RESULT words; CTRL.LEN = 0, the reset value)"
+
+[[const]]
+name = "LOG2N_MIN"
+value = 9
+doc = "log2 of the smallest FFT length (512, CTRL.LEN = 3)"
+
+[[const]]
+name = "PKT_HDR_BYTES"
+value = 16
+doc = "Stream packet header (HDR0, HDR1); RESULT word j follows at byte 16 + 4 j"
+
+[[const]]
+name = "PKT_BYTES_MAX"
+value = 16400
+doc = "Largest stream packet (N = 4096): 16 + 4 N bytes, 2 + N/2 64-bit beats"
+
+[[const]]
+name = "PKT_MAGIC"
+value = 0xF5
+doc = "HDR0.MAGIC value of a stream packet"
+
+[[const]]
+name = "WIN_SUM_4096"
+value = 192555426
+doc = "Sum of the reset window over 4096 samples (2^17 = 1.0): 1469.08 x 2^17"
+
+[[const]]
+name = "WIN_SUM_2048"
+value = 96277713
+doc = "Sum of the reset window over 2048 samples (every 2nd): 734.54 x 2^17"
+
+[[const]]
+name = "WIN_SUM_1024"
+value = 48138849
+doc = "Sum of the reset window over 1024 samples (every 4th): 367.27 x 2^17"
+
+[[const]]
+name = "WIN_SUM_512"
+value = 24069419
+doc = "Sum of the reset window over 512 samples (every 8th): 183.64 x 2^17"
 
 [[const]]
 name = "NAVG_MAX"
@@ -36,23 +79,23 @@ doc = "WIN value for a gain of 1 (2^17)"
 [[const]]
 name = "SCALE_RX"
 value = 0x555400
-doc = "Scale schedule for the 12-bit ADC sources (rx0, rx1): total shift 7, no overflow"
+doc = "Scale schedule for the 12-bit ADC sources (rx0, rx1): total shift 7 at N = 4096 (12 - log2 N less for shorter N), no overflow at any N"
 
 [[const]]
 name = "SCALE_NBIQ"
 value = 0x555550
-doc = "Scale schedule for nbiq channels at their default gain 8 (12-bit full scale = 16384): total shift 10"
+doc = "Scale schedule for nbiq channels at their default gain 8 (12-bit full scale = 16384): total shift 10 at N = 4096, any N"
 
 [[const]]
 name = "SCALE_16"
 value = 0x555555
-doc = "Scale schedule for full-scale 16-bit data (nbiq): total shift 12, no overflow"
+doc = "Scale schedule for full-scale 16-bit data (nbiq): total shift 12 at N = 4096 (log2 N in general), no overflow"
 
 [[reg]]
 name = "VERSION"
 offset = 0x000
 access = "ro"
-doc = "Core version, 0x0001_0000 = 1.0"
+doc = "Core version, 0x0001_0100 = 1.1 (1.0: N = 4096 only, no stream)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -73,15 +116,19 @@ name = "CTRL"
 offset = 0x008
 access = "rw"
 reset = 0
-doc = "Control; SRC and NB_CH are taken when an average starts"
+doc = "Control; SRC, NB_CH and LEN are taken when an average starts"
   [[reg.field]]
   name = "RUN"
   bits = [0, 0]
-  doc = "Start averages back to back (DOUBLE_BUF = 0: each after DONE is cleared); 0 stops after the current one"
+  doc = "Start averages back to back (DOUBLE_BUF = 0 without STREAM: each after DONE is cleared); 0 stops after the current one"
   [[reg.field]]
   name = "IRQ_EN"
   bits = [1, 1]
   doc = "Interrupt on DONE"
+  [[reg.field]]
+  name = "STREAM"
+  bits = [2, 2]
+  doc = "Send each result on the AXI4-Stream master (one packet); RUN then no longer waits for DONE, and DONE no longer protects RESULT"
   [[reg.field]]
   name = "SRC"
   bits = [4, 5]
@@ -91,6 +138,11 @@ doc = "Control; SRC and NB_CH are taken when an average starts"
   name = "NB_CH"
   bits = [8, 10]
   doc = "nbiq channel (tap_ch) when SRC = NBIQ, 0..4"
+  [[reg.field]]
+  name = "LEN"
+  bits = [12, 13]
+  doc = "Transform length N = 4096 >> LEN"
+  enum = { N4096 = 0, N2048 = 1, N1024 = 2, N512 = 3 }
 
 [[reg]]
 name = "CMD"
@@ -104,7 +156,11 @@ doc = "Commands (write 1)"
   [[reg.field]]
   name = "ABORT"
   bits = [1, 1]
-  doc = "Reset the FFT and the sequencer, drop the average in progress, clear DONE (RUN stays: a new average starts with the current configuration)"
+  doc = "Reset the FFT and the sequencer, drop the average in progress, clear DONE (RUN stays: a new average starts with the current configuration); a stream packet in progress is completed"
+  [[reg.field]]
+  name = "STR_ABORT"
+  bits = [2, 2]
+  doc = "Drop the result waiting for the stream, or end the packet in progress at once without TLAST (only with the DMA stopped)"
 
 [[reg]]
 name = "NAVG"
@@ -126,7 +182,7 @@ doc = "FFT scale schedule"
   [[reg.field]]
   name = "SCALE"
   bits = [0, 23]
-  doc = "2 bits per radix-2 stage (shift 0..3), stage 0 in bits [1:0]; output = DFT / 2^(sum of the shifts)"
+  doc = "2 bits per radix-2 stage (shift 0..3), stage 0 in bits [1:0]; stages 0..log2 N - 1 apply (the bits above are ignored); output = DFT / 2^(sum of the shifts)"
 
 [[reg]]
 name = "RSHIFT"
@@ -156,6 +212,14 @@ doc = "Status"
   name = "CAPT"
   bits = [2, 2]
   doc = "Samples are being loaded into the FFT"
+  [[reg.field]]
+  name = "STR_WAIT"
+  bits = [3, 3]
+  doc = "A result waits for the stream (m_axis_tready low)"
+  [[reg.field]]
+  name = "STR_SEND"
+  bits = [4, 4]
+  doc = "A stream packet is being sent"
   [[reg.field]]
   name = "FRAME"
   bits = [8, 15]
@@ -194,6 +258,10 @@ doc = "Sticky error flags, write 1 to clear"
   name = "DROP"
   bits = [3, 3]
   doc = "DOUBLE_BUF: an average finished while DONE was set and was dropped"
+  [[reg.field]]
+  name = "SDROP"
+  bits = [4, 4]
+  doc = "STREAM: a result was not streamed (m_axis_tready low until the buffer was needed again)"
 
 [[reg]]
 name = "FRAMES"
@@ -232,9 +300,21 @@ doc = "Configuration of the published result"
   bits = [8, 11]
   doc = "Result right shift"
   [[reg.field]]
+  name = "LOG2N"
+  bits = [12, 15]
+  doc = "log2 of the transform length (9..12): the result has 2^LOG2N words"
+  [[reg.field]]
   name = "NAVG"
   bits = [16, 24]
   doc = "Spectra averaged (1..256)"
+  [[reg.field]]
+  name = "FFT_OVF"
+  bits = [28, 28]
+  doc = "FFT overflow in a frame of this average"
+  [[reg.field]]
+  name = "SAT"
+  bits = [29, 29]
+  doc = "A word of this result saturated"
 
 [[reg]]
 name = "RES_SCALE"
@@ -254,11 +334,31 @@ doc = "Build options"
   [[reg.field]]
   name = "LOG2N"
   bits = [0, 3]
-  doc = "log2 FFT length (12)"
+  doc = "log2 of the largest FFT length (12)"
   [[reg.field]]
   name = "DOUBLE_BUF"
   bits = [4, 4]
   doc = "Separate result buffer: averages continue while the ARM reads"
+  [[reg.field]]
+  name = "STREAM"
+  bits = [5, 5]
+  doc = "The AXI4-Stream result output exists (CTRL.STREAM)"
+  [[reg.field]]
+  name = "LOG2N_MIN"
+  bits = [8, 11]
+  doc = "log2 of the smallest FFT length (9)"
+
+[[reg]]
+name = "STR_SENT"
+offset = 0x040
+access = "ro"
+doc = "Stream packets sent since reset (wraps)"
+
+[[reg]]
+name = "STR_DROPS"
+offset = 0x044
+access = "ro"
+doc = "Results not streamed since reset (wraps; SEQ gaps in the packets)"
 
 [[window]]
 name = "WIN"
@@ -266,7 +366,7 @@ offset = 0x2000
 words = 2048
 access = "wo"
 width = 18
-doc = "Window table: w[n] = w[4095 - n] = WIN[n], unsigned, 2^17 = 1.0 (at most 2^17); write while idle. Reset: 4-term Blackman-Harris"
+doc = "Window table: w[m] = w[4095 - m] = WIN[m], unsigned, 2^17 = 1.0 (at most 2^17); write while idle. Reset: 4-term Blackman-Harris. An N-point frame uses w[n 4096 / N]"
 
 [[window]]
 name = "RESULT"
@@ -274,4 +374,59 @@ offset = 0x4000
 words = 4096
 access = "ro"
 width = 32
-doc = "Result word j = min(sum over NAVG frames of |X[k]|^2 >> RSHIFT, 2^32 - 1), k = j ^ 2048: FFT-shifted, frequency (j - 2048) fs / 4096; valid while DONE"
+doc = "Result word j < N = min(sum over NAVG frames of |X[k]|^2 >> RSHIFT, 2^32 - 1), k = j ^ N/2: FFT-shifted, frequency (j - N/2) fs / N; valid while DONE (without STREAM)"
+
+[[packet]]
+name = "HDR0"
+width = 64
+doc = "Beat 0 of a stream packet (bytes 0..7, little endian)"
+  [[packet.field]]
+  name = "MAGIC"
+  bits = [0, 7]
+  doc = "0xF5 (PKT_MAGIC)"
+  [[packet.field]]
+  name = "LOG2N"
+  bits = [8, 11]
+  doc = "log2 N: 2^LOG2N result words follow the header"
+  [[packet.field]]
+  name = "SRC"
+  bits = [12, 13]
+  doc = "Source"
+  enum = { RX0 = 0, RX1 = 1, NBIQ = 2 }
+  [[packet.field]]
+  name = "NB_CH"
+  bits = [16, 18]
+  doc = "nbiq channel"
+  [[packet.field]]
+  name = "RSHIFT"
+  bits = [20, 23]
+  doc = "Result right shift"
+  [[packet.field]]
+  name = "FFT_OVF"
+  bits = [24, 24]
+  doc = "FFT overflow in a frame of this average"
+  [[packet.field]]
+  name = "SAT"
+  bits = [25, 25]
+  doc = "A word of this result saturated"
+  [[packet.field]]
+  name = "SKIP"
+  bits = [26, 26]
+  doc = "Results were dropped since the previous packet (SEQ jumped)"
+  [[packet.field]]
+  name = "SEQ"
+  bits = [32, 63]
+  doc = "Sequence number: AVGS of this result"
+
+[[packet]]
+name = "HDR1"
+width = 64
+doc = "Beat 1 of a stream packet (bytes 8..15); RESULT words from byte 16, two per beat ({word 2m+1, word 2m}), TLAST on the last"
+  [[packet.field]]
+  name = "SCALE"
+  bits = [0, 23]
+  doc = "Scale schedule (as RES_SCALE)"
+  [[packet.field]]
+  name = "NAVG"
+  bits = [32, 40]
+  doc = "Spectra averaged (1..256)"
