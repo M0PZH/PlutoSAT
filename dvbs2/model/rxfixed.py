@@ -19,8 +19,12 @@ Bit-exact reference for rtl/dvbs2_rx_*.sv. Three streaming stages:
                           between two blocks, pilot-to-pilot frequency loop,
                           false-lock detector on the 783-symbol segment;
               pilots off: decision-directed 2nd-order PLL (data-aided on
-                          headers and dummy frames), phase set from every
-                          PLHEADER (removes the 90 degree ambiguity).
+                          headers and dummy frames, soft decisions on data),
+                          phase set from every PLHEADER (removes the 90
+                          degree ambiguity), the gains narrowing in gears
+                          after the acquisition, the NCO frequency from the
+                          PLL integrator (header estimates only right after
+                          the acquisition).
             Amplitude/noise from the known blocks, QPSK max-log LLRs
             (int8, 4 LSBs per unit LLR), 64800 per data frame.
 
@@ -623,6 +627,33 @@ FA_AVG_SH = 4
 FA_AVG_CLAMP = 4 * FA_STEP
 PLL_KP_SH = 8
 PLL_KI_SH = 16
+# Pilots off. The PLL gains (kp, ki: the registers, designed for bandwidth
+# 0.002 at high SNR) are the acquisition gains; once acquired, the loop
+# narrows in gears: from nhdr >= n on (nhdr = 2 at the acquisition, +1 per
+# header) the gains are kp >> a, ki >> b for each (n, a, b) of PLL_GEAR.
+# Only ki narrows: the phase detector's gain falls with the SNR (AGC on
+# signal + noise, decision errors: ~1/16 of the high-SNR gain at -2 dB
+# Es/N0), which also lowers the damping (zeta ~ sqrt(gain)): kp / 1, ki / 16
+# (with kp = PLL_KP_MUL x the design value) gives zeta ~ 1.4 at -2 dB
+# (kp / 4, ki / 16, i.e. bandwidth / 4 at the design damping, is zeta ~ 0.18
+# there and slipped under phase noise).
+# Each header's frequency estimate (~5e-4
+# cycles/symbol rms at 0 dB) moves the NCO only while nhdr < PLL_KICK_NHDR:
+# afterwards the PLL integrator (much better, it averages a whole frame) is
+# the frequency estimate; kicking the NCO by f/8 at every header made the
+# loop pull in a new frequency error in every frame (slips).
+PLL_GEAR = ((4, 0, 2), (6, 0, 4))
+# The default kp is twice the bandwidth-0.002 design (zeta 0.707 at high
+# SNR): more damping at low SNR, which tracks phase noise better (QPSK 1/4,
+# Wiener 0.003 rad/symbol, -2.2 dB: FER 3 % instead of 10 %; 0.006 rad/symbol,
+# -1 dB: 5 % instead of 18 %) at the same FER without phase noise.
+PLL_KP_MUL = 2
+PLL_KICK_NHDR = 4
+# Soft decisions for the decision-directed phase detector (pilots off):
+#   e = (sq * c(si) - si * c(sq)) >> PLL_SOFT_SH,  c(x) = clamp(x, +-(2^SH - 1))
+# (a limiter instead of sign(): tanh-like at low SNR, hard at high SNR;
+# per-axis RMS 4096 at the AGC target)
+PLL_SOFT_SH = 11
 STAT_SH = 3                 # amplitude/noise IIR 1/8 per known block
 SIG2_MIN = 1024
 G_LLR_FRAC = 20
@@ -637,12 +668,13 @@ def stat_consts(n):
     return round((1 << 24) / (CORDIC_K * math.sqrt(2) * n)), round((1 << 24) / (2 * n))
 
 
-def pll_gains(bw=0.002):
-    """PLL (kp, ki) for e = Im(s * conj(dec)), |s| ~ sqrt(P_TARGET)."""
+def pll_gains(bw=0.002, kp_mul=PLL_KP_MUL):
+    """PLL (kp, ki) for e = Im(s * conj(dec)), |s| ~ sqrt(P_TARGET): the loop
+    of bandwidth bw at high SNR, kp times kp_mul."""
     kp, ki = loop_gains(bw)
     unit = math.sqrt(P_TARGET) * math.sqrt(2)          # e per radian
     sc = 2 ** 32 / (2 * math.pi * unit)
-    return round(kp * sc * 2 ** PLL_KP_SH), round(ki * sc * 2 ** PLL_KI_SH)
+    return round(kp_mul * kp * sc * 2 ** PLL_KP_SH), round(ki * sc * 2 ** PLL_KI_SH)
 
 
 def neg16(v):
@@ -658,10 +690,6 @@ def descramble(i, q, r):
     if r == 2:
         return neg16(i), neg16(q)
     return neg16(q), i
-
-
-def sgn(v):
-    return 1 if v >= 0 else -1
 
 
 class Carrier:
@@ -845,11 +873,20 @@ class Carrier:
         self.Pe = 0
         self.cur = {"llr": [], "ended": False} if typ == 0 else None
 
+    def pll_shifts(self):
+        """(kp, ki) right shifts of the PLL gains in the current gear."""
+        skp = ski = 0
+        for n, a, b in PLL_GEAR:
+            if self.nhdr >= n:
+                skp, ski = a, b
+        return skp, ski
+
     def _pll(self, e):
         if self.pilots or not self.acquired:
             e = 0
-        self.fp += (e * self.ki_p) >> PLL_KI_SH
-        self.phip = (self.phip + self.fp + ((e * self.kp_p) >> PLL_KP_SH)) & 0xFFFFFFFF
+        skp, ski = self.pll_shifts()
+        self.fp += (e * (self.ki_p >> ski)) >> PLL_KI_SH
+        self.phip = (self.phip + self.fp + ((e * (self.kp_p >> skp)) >> PLL_KP_SH)) & 0xFFFFFFFF
 
     def _symbol(self, si, sq):
         p = self.p
@@ -881,9 +918,11 @@ class Carrier:
                 theta = self._block_end(self.H, self.Esum, 90, self.cur)
                 self.dth = theta
                 if not self.pilots:
-                    # resolve the decision-directed PLL's 90 degree ambiguity:
-                    # header phase, extrapolated from its centre to its end
-                    self.phip = (self.phip + (theta << 16) + ((f * 89) >> 1)) & 0xFFFFFFFF
+                    # resolve the decision-directed PLL's 90 degree ambiguity
+                    # with the header phase (not extrapolated by the header's
+                    # noisy frequency estimate: the PLL has removed the
+                    # residual frequency, so the phase is ~constant over it)
+                    self.phip = (self.phip + (theta << 16)) & 0xFFFFFFFF
                 self.log.append((self.nhdr, f, self.fhat, theta, self.A, self.E, self.G))
         elif typ == 1:
             if self.pilots and self.acquired:
@@ -905,7 +944,10 @@ class Carrier:
                 self.seg.append(s1)
             else:
                 self._llr(self.cur, s1)
-                self._pll(s1[1] * sgn(s1[0]) - s1[0] * sgn(s1[1]))
+                c = (1 << PLL_SOFT_SH) - 1
+                ci = max(-c, min(c, s1[0]))
+                cq = max(-c, min(c, s1[1]))
+                self._pll((s1[1] * ci - s1[0] * cq) >> PLL_SOFT_SH)
         self.p += 1
         if self.p == self.L[typ]:
             self.in_frame = False
@@ -980,7 +1022,8 @@ class Carrier:
         self.favg += (max(-FA_AVG_CLAMP, min(FA_AVG_CLAMP, f)) - self.favg) >> ash
         if self.nhdr > FLL_HDR_SHMAX:
             f = max(-FLL_CLAMP, min(FLL_CLAMP, f))
-        self.upd += f >> min(self.nhdr, FLL_HDR_SHMAX)
+        if self.pilots or self.nhdr < PLL_KICK_NHDR:
+            self.upd += f >> min(self.nhdr, FLL_HDR_SHMAX)
         if self.nhdr < 15:
             self.nhdr += 1
         return f
@@ -1229,6 +1272,7 @@ def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None, integ0=0
 def write_rx_pkg(path=None):
     import os
     path = path or os.path.join(m.HERE, "..", "rtl", "gen", "dvbs2_rx_pkg.sv")
+    assert PLL_SOFT_SH == 11            # the RTL clamp (SOFT_C, 12-bit ci, cq)
     ra36, re36 = stat_consts(36)
     ra90, re90 = stat_consts(90)
     mul = [round((1 << 17) / (M + 1)) for M in FLL_STAGES]
@@ -1250,6 +1294,14 @@ def write_rx_pkg(path=None):
               f"  localparam logic [15:0] TIMING_KI_DEFAULT = 16'd{ki};",
               f"  localparam logic [17:0] PLL_KP_DEFAULT = 18'd{pkp};",
               f"  localparam logic [17:0] PLL_KI_DEFAULT = 18'd{pki};",
+              "  // pilots off: PLL gears (from nhdr >= N: kp >> KP_SH, ki >> KI_SH), header",
+              "  // frequency updates while nhdr < PLL_KICK_NHDR, soft phase detector",
+              f"  localparam int PLL_NGEAR = {len(PLL_GEAR)};",
+              "  localparam logic [3:0] PLL_GEAR_N [PLL_NGEAR] = '{" + ", ".join(f"4'd{g[0]}" for g in PLL_GEAR) + "};",
+              "  localparam logic [2:0] PLL_GEAR_KP_SH [PLL_NGEAR] = '{" + ", ".join(f"3'd{g[1]}" for g in PLL_GEAR) + "};",
+              "  localparam logic [2:0] PLL_GEAR_KI_SH [PLL_NGEAR] = '{" + ", ".join(f"3'd{g[2]}" for g in PLL_GEAR) + "};",
+              f"  localparam logic [3:0] PLL_KICK_NHDR = 4'd{PLL_KICK_NHDR};",
+              f"  localparam int PLL_SOFT_SH = {PLL_SOFT_SH};",
               f"  localparam logic [31:0] FS_THRESH_DEFAULT = 32'd{fs_threshold()};",
               f"  localparam logic signed [15:0] FA_THRESH = 16'sd{FA_THRESH};",
               f"  localparam logic signed [31:0] FA_STEP = 32'sd{FA_STEP};",

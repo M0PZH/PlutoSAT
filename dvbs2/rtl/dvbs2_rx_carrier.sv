@@ -222,6 +222,12 @@ module dvbs2_rx_carrier
   logic [35:0]        Esum, Pe;
   logic signed [17:0] zi, zq, zai, zaq;
   logic               z_hdr, z_pil, z_dum;
+  // pilots off, data symbol: soft-decision phase detector (model: PLL_SOFT_SH)
+  //   e = (s1q * c(s1i) - s1i * c(s1q)) >>> SH, c = clamp to +-(2^SH - 1),
+  // the products on the squarers of M_SYM2 (zi = s1q, zq = s1i)
+  localparam logic signed [15:0] SOFT_C = 16'sd2047;
+  logic               z_soft;
+  logic signed [11:0] ci, cq;
   logic signed [17:0] pll_e;
 
   // estimators
@@ -265,7 +271,6 @@ module dvbs2_rx_carrier
   logic signed [35:0] p_ki, p_kp;
   logic signed [33:0] p_ang;
   logic signed [35:0] f_c;
-  logic signed [42:0] ff89;
   logic [49:0]        p_a;
   logic [53:0]        p_e;
   logic [39:0]        p_aa;
@@ -287,6 +292,23 @@ module dvbs2_rx_carrier
   logic signed [31:0] fa_stepk;
   logic               fa_big, fa_jump;
   logic [1:0]         fsh;
+  logic               fkick;                 // the header estimate moves the NCO
+  // pilots off: PLL gears once acquired (model: PLL_GEAR, pilots on the
+  // PLL is off); the gains are registered (nhdr changes only at headers,
+  // the next PLL update is many clocks later)
+  logic [17:0]        kp_g, ki_g;
+  always_ff @(posedge clk) begin : gear
+    logic [2:0] skp, ski;
+    skp = '0;
+    ski = '0;
+    for (int g = 0; g < PLL_NGEAR; g++)
+      if (nhdr >= PLL_GEAR_N[g]) begin
+        skp = PLL_GEAR_KP_SH[g];
+        ski = PLL_GEAR_KI_SH[g];
+      end
+    kp_g <= pll_kp >> skp;
+    ki_g <= pll_ki >> ski;
+  end
   logic               acquired;
   logic [1:0]         nconf;                 // confirmed headers (banks 0 .. nconf-1)
   logic [3:0]         big;
@@ -508,6 +530,7 @@ module dvbs2_rx_carrier
           z_hdr <= 1'b0;
           z_pil <= 1'b0;
           z_dum <= 1'b0;
+          z_soft <= 1'b0;
           pll_e <= '0;
           if (is_hdr) begin : hdr
             logic signed [17:0] a_i, a_q;
@@ -545,14 +568,18 @@ module dvbs2_rx_carrier
             lp_q    <= s1q;
             lp_g    <= G;
             oc_push <= oc_push + 15'd1;
-            pll_e <= (s1i >= 0 ? 18'(s1q) : -18'(s1q)) - (s1q >= 0 ? 18'(s1i) : -18'(s1i));
+            zi <= 18'(s1q);
+            zq <= 18'(s1i);
+            ci <= s1i > SOFT_C ? 12'(SOFT_C) : s1i < -SOFT_C ? 12'(-SOFT_C) : 12'(s1i);
+            cq <= s1q > SOFT_C ? 12'(SOFT_C) : s1q < -SOFT_C ? 12'(-SOFT_C) : 12'(s1q);
+            z_soft <= 1'b1;
             st <= M_SYM2;
           end
         end
 
         M_SYM2: begin
-          sq_zi <= 36'(36'(zi) * 36'(zi));
-          sq_zq <= 36'(36'(zq) * 36'(zq));
+          sq_zi <= 36'(36'(zi) * (z_soft ? 36'(ci) : 36'(zi)));
+          sq_zq <= 36'(36'(zq) * (z_soft ? 36'(cq) : 36'(zq)));
           if (z_hdr) begin
             zw_v <= 1'b1; zw_a <= 10'({wb, 7'(p)}); zw_d <= {s1q, s1i};
             Hi <= Hi + 24'(zi);
@@ -573,14 +600,15 @@ module dvbs2_rx_carrier
           e2 = 36'((37'(sq_zi) + 37'(sq_zq)) >> 8);
           if (z_hdr) Esum <= Esum + e2;
           if (z_pil) Pe <= Pe + e2;
+          if (z_soft) pll_e <= 18'(($signed(sq_zi) - $signed(sq_zq)) >>> PLL_SOFT_SH);
           st <= M_PLL;
         end
 
         M_PLL: begin : pll
           logic signed [17:0] e;
           e = (pilots || !acquired) ? 18'sd0 : pll_e;
-          p_ki <= 36'(e) * 36'($signed({1'b0, pll_ki}));
-          p_kp <= 36'(e) * 36'($signed({1'b0, pll_kp}));
+          p_ki <= 36'(e) * 36'($signed({1'b0, ki_g}));
+          p_kp <= 36'(e) * 36'($signed({1'b0, kp_g}));
           st <= M_PLL2;
         end
 
@@ -819,6 +847,7 @@ module dvbs2_rx_carrier
             n_acq <= n_acq + 16'd1;
             f_c <= f;
             fsh <= '0;
+            fkick <= 1'b1;
             st <= M_FLL_END2;
           end else if ((f > 36'sd4194304 || f < -36'sd4194304) &&
                        (big == REACQ_N - 4'd1 || (big == EARLY_N - 4'd1 && nhdr <= EARLY_HDRS))) begin
@@ -842,6 +871,9 @@ module dvbs2_rx_carrier
             end
             f_c <= f;
             fsh <= nhdr > 4'd3 ? 2'd3 : nhdr[1:0];
+            // pilots off: only the first headers after the acquisition
+            // (model: PLL_KICK_NHDR), then the PLL integrator is the estimate
+            fkick <= pilots || nhdr < PLL_KICK_NHDR;
             if (nhdr != 4'hF) nhdr <= nhdr + 4'd1;
             st <= M_FLL_END2;
           end
@@ -849,12 +881,11 @@ module dvbs2_rx_carrier
 
         M_FLL_END2, M_FLL_NOUPD: begin
           ff   <= f_c;
-          ff89 <= 43'(f_c) * 43'sd89;
           // update with gain 2^-fsh (0 for the acquisition update); pilots
           // off: the PLL's frequency moves into the NCO (same total), so
           // fhat does not random-walk against fp
           if (!pilots) begin
-            fhat <= fhat + (st == M_FLL_END2 ? 32'(f_c >>> fsh) : 32'd0) + fp;
+            fhat <= fhat + (st == M_FLL_END2 && fkick ? 32'(f_c >>> fsh) : 32'd0) + fp;
             fp   <= '0;
           end else if (st == M_FLL_END2) fhat <= fhat + 32'(f_c >>> fsh);
           cor_x <= 50'(Hi);
@@ -928,9 +959,9 @@ module dvbs2_rx_carrier
         end
 
         M_BLK_END: begin
-          // pilots off: the PLHEADER phase resets the PLL phase
-          // (header phase extrapolated from its centre to its end)
-          if (!pilots && blen == 7'd90) phip <= phip + {theta, 16'd0} + 32'(ff89 >>> 1);
+          // pilots off: the PLHEADER phase resets the PLL phase (not
+          // extrapolated: the PLL has removed the residual frequency)
+          if (!pilots && blen == 7'd90) phip <= phip + {theta, 16'd0};
           if (blen == 7'd90) dth <= theta;
           if (pilots) begin
             th0  <= theta;

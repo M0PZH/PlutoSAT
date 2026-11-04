@@ -192,7 +192,7 @@ ADC ─► DDC ─► timing ─► frame sync ─┬─► carrier + demap ─�
 | `dvbs2_ldpc_dec` | layered offset min-sum (offset 1 LSB), 18 lanes over the 360x360 circulants, APP 9 bit, messages 6 bit; phase A reads a check's edges, phase B writes L += R_new - R_old (circulants of one column group sharing a layer, which the DVB-S2 tables have, update in turn); stops when an iteration has no unsatisfied check and no APP sign change; ping-pong APP memories; output the Kldpc hard decisions and the channel's hard decisions of the same bits |
 | `dvbs2_bch_dec` | GF(2^16), t = 12/10/8: odd syndromes 8 bits per clock while the frame comes in, simplified inversionless Berlekamp-Massey, Chien search 8 positions per clock writing the corrected, BB-descrambled bits back into the frame buffer; ok = deg Lambda roots found; counts the pre-FEC bit errors (channel decisions vs. decoder output) |
 | `dvbs2_rx_pls` | PLS code (MODCOD, frame size, pilots) of every tagged PLHEADER, whatever MODCOD/pilots are configured: maximum likelihood over the 128 codes for an unknown phase, per frequency hypothesis (the carrier's frequency, then a grid); see [PLS decoder](#pls-decoder) |
-| `dvbs2_rx_carrier` | PL descrambling; frequency acquisition from 4 headers each confirmed by the next one being detected exactly a frame length later (staged Kay / Luise-Reggiannini with 1, 6 and 45 lags, correlations summed over the 4), re-acquisition if 2 of the next 3 or 8 later headers in a row are far off; then the NCO frequency from every PLHEADER (gain 1/4 .. 1/8); frame type (data/dummy) decided coherently from both headers and reported to the frame sync; pilots on: CORDIC phase per header/pilot block, linear phase interpolation across each data segment, pilot-to-pilot frequency loop (gain 1/4), dummy frame bodies as 36 known blocks (block-to-block frequency loop, no 1/1476 ambiguity), and the 1/1476 false lock of the pilot loop corrected from the averaged header estimates; pilots off: decision-directed PLL whose phase is reset from every header; amplitude/noise from the known blocks; max-log LLRs, 4 LSBs per unit |
+| `dvbs2_rx_carrier` | PL descrambling; frequency acquisition from 4 headers each confirmed by the next one being detected exactly a frame length later (staged Kay / Luise-Reggiannini with 1, 6 and 45 lags, correlations summed over the 4), re-acquisition if 2 of the next 3 or 8 later headers in a row are far off; then the NCO frequency from every PLHEADER (gain 1/4 .. 1/8); frame type (data/dummy) decided coherently from both headers and reported to the frame sync; pilots on: CORDIC phase per header/pilot block, linear phase interpolation across each data segment, pilot-to-pilot frequency loop (gain 1/4), dummy frame bodies as 36 known blocks (block-to-block frequency loop, no 1/1476 ambiguity), and the 1/1476 false lock of the pilot loop corrected from the averaged header estimates; pilots off: decision-directed PLL (soft decisions, data-aided on headers and dummy bodies) whose phase is reset from every header, its integral gain narrowing to 1/4 and 1/16 two and four headers after the acquisition, the NCO frequency from its integrator (header estimates only for the first two headers), see [Pilots off](#pilots-off); amplitude/noise from the known blocks; max-log LLRs, 4 LSBs per unit |
 
 `model/rxfixed.py`, `model/ldpcdec.py` and `model/bchdec.py` are the bit-exact models of this
 RTL (`model/rxmodel.py` is the earlier floating-point prototype); they
@@ -205,6 +205,7 @@ cd model && ../.venv/bin/python rxfixed.py                  # rtl/gen/dvbs2_rx_p
 ../.venv/bin/python ldpcdec.py                              # LDPC decoder tables
 ../.venv/bin/python bchdec.py                               # BCH decoder constants
 ../.venv/bin/python rxfixed_experiment.py                   # model + gr-dvbs2rx FEC, 7 channels
+../.venv/bin/python pilotless_experiment.py --pilots 0,1    # carrier FER vs Es/N0, phase noise
 cd ../sim/rx && ../../.venv/bin/python -m pytest test_rx.py # RTL vs model (Verilator, file driven)
 ```
 
@@ -241,6 +242,79 @@ rate), and the LDPC error floor; near the LDPC threshold the residual errors
 of a failed frame are in the hundreds. The BCH decoder adds ~n/8 + Kbch/4 +
 500 clocks per frame after its input, during which the LDPC output waits.
 `dvbs2-rx` keeps the frames that are BCH codewords.
+
+### Pilots off
+
+Without pilots the carrier phase between two PLHEADERs (32490 symbols)
+comes from the decision-directed PLL alone, and one 90-degree slip loses
+the frame. Up to VERSION 0x0001_0200 pilots off lost ~3 dB at QPSK 1/4
+(board, digital loopback, 1 MS/s: PER 0.13 at 0 dB, 0.63 at -1 dB; pilots
+on: 0 at -1 dB). The causes, found with `model/pilotless_experiment.py`:
+
+* Each header's frequency estimate (90 symbols: ~5e-4 cycles/symbol rms at
+  0 dB) moved the NCO by f/8 at every header, while the PLL integrator,
+  which had the frequency, was cleared into the NCO: every frame began
+  with a new ~6e-5 cycles/symbol error to pull in. At -1 dB 60 % of the
+  frames had a slip, the rms phase error was 16 degrees, and a narrower
+  loop could not pull in at all. Now the header estimates move the NCO
+  only for the first two headers after the acquisition; then the PLL
+  integrator (a frame of averaging) is the frequency estimate (still folded
+  into the NCO at each header, so the reported frequency stays meaningful).
+* Loop gain: the AGC holds signal + noise, and with decision errors the
+  phase detector's gain at -2 dB is ~1/16 of the high-SNR value the gains
+  were designed for: bandwidth and damping (zeta ~ 0.18) far below the
+  design. Now kp is twice the bandwidth-0.002 design and ki narrows to 1/4
+  and 1/16 two and four headers after the acquisition (`PLL_GEAR`): zeta
+  ~ 1.4 at -2 dB. (Narrowing kp too, i.e. the whole bandwidth, slipped
+  under phase noise.)
+* Hard decisions: a limiter at half the per-axis RMS instead of sign()
+  gives the detector twice the SNR at -2 dB.
+* The header phase reset was extrapolated to the header's end with the
+  header's own (noisy) frequency estimate (~11 degrees rms at -2 dB); the
+  PLL has removed the residual frequency, so the mean phase is used.
+
+A feed-forward 4th-power (Viterbi & Viterbi) estimator was tried and is
+worse at these SNRs: the 4th power of a symbol at -2 dB has an SNR of
+~1/740, so even a sliding 2970-symbol window slips in 4 % of the frames
+without phase noise (82 % at 0.01 rad/symbol).
+
+FER, model (carrier model fed with symbols at the AGC level and a tag on
+every header, 0.001 cycles/symbol, Wiener phase noise sigma per symbol,
+32 seeds x 6 data frames after 16 dummy frames, the LDPC decoder model;
+"ideal": the same decoder on exact AWGN LLRs). sigma = 0.001 rad/symbol is
+-76 dBc/Hz at 1 kHz at 1 MS/s, 0.003 is -66 dBc/Hz at 1 MS/s or -71 dBc/Hz
+at 333 kS/s (L(f) = sigma^2 Rs / (4 pi^2 f^2)):
+
+| QPSK 1/4, Es/N0 | -2.5 | -2.2 | -2.0 | -1.5 | -1.0 | 0 | +1 | +2 dB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ideal | 36 % | 1.0 % | 0.5 % | 0 | 0 | 0 | 0 | 0 |
+| pilots on, sigma 0 / 0.001 / 0.003 | 70 / 73 / 69 % | 0.5 / 1.0 / 1.0 % | 0.5 / 0 / 0 % | 0 | 0 | 0 | 0 | 0 |
+| pilots off, before, sigma 0 | 100 % | 98 % | 93 % | 80 % | 55 % | 18 % | 4.2 % | 0 |
+| pilots off, before, sigma 0.001 | 100 % | 94 % | 95 % | 81 % | 66 % | 18 % | 3.1 % | 0 |
+| pilots off, before, sigma 0.003 | 100 % | 98 % | 97 % | 85 % | 73 % | 26 % | 5.7 % | 0.5 % |
+| pilots off, now, sigma 0 | 63 % | 1.6 % | 0 | 0 | 0 | 0 | 0 | 0 |
+| pilots off, now, sigma 0.001 | 61 % | 1.0 % | 0 | 0 | 0 | 0 | 0 | 0 |
+| pilots off, now, sigma 0.003 | 85 % | 3.1 % | 0.5 % | 0 | 0 | 0 | 0 | 0 |
+
+| QPSK 1/2, Es/N0 | 0.5 | 1.0 | 1.5 | 2.0 | 2.5 dB |
+| --- | --- | --- | --- | --- | --- |
+| ideal | 100 % | 46 % | 0 | 0 | 0 |
+| pilots on, sigma 0 / 0.001 / 0.003 | 100 % | 90 / 90 / 96 % | 0 | 0 | 0 |
+| pilots off, before, sigma 0 / 0.001 / 0.003 | 100 % | 95 / 93 / 98 % | 1.6 / 1.0 / 1.0 % | 0.5 / 1.0 / 0 % | 0 |
+| pilots off, now, sigma 0 / 0.001 / 0.003 | 100 % | 66 / 57 / 76 % | 0 | 0 | 0 |
+
+So without pilots QPSK 1/4 now decodes as with pilots (both ~0.1-0.2 dB
+from the ideal-LLR decoder at -2.2 dB; pilots on spends 2.4 % of the
+symbols on pilots, which this table does not count), and QPSK 1/2 had
+lost less (its threshold, ~1 dB, is above where hard decisions break
+down). The RTL is bit exact to the model (`test_carrier_pilotless_pn`:
+QPSK 1/4 at 0 and -1 dB with 0.002 rad/symbol through all gears, every
+frame decoded).
+
+Heavy phase noise still costs more without pilots: at 0.006 rad/symbol
+(-60 dBc/Hz at 1 kHz at 1 MS/s) QPSK 1/4 loses 9/192 frames at -1 dB and
+2/192 at 0 dB (pilots on: none at -1.5 dB); with half the default kp it
+was 34/192 and 18/192. A larger PLL_KP is the knob for a worse LNB.
 
 ### PLS decoder
 

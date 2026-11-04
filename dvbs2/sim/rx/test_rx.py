@@ -172,6 +172,37 @@ def test_carrier(carrier_exe, name, stall, kw, drop):
                    np.asarray(want).reshape(-1, 64800)) or drop == "untag"
 
 
+@pytest.mark.parametrize("esn0,seed", [(0.0, 3), (-1.0, 4)])
+def test_carrier_pilotless_pn(carrier_exe, esn0, seed):
+    """Pilots off at low SNR with phase noise (QPSK 1/4, symbol-level
+    channel: 0.001 cycles/symbol, Wiener phase noise 0.002 rad/symbol,
+    ideal tags): the RTL equals the model through the PLL gears, and every
+    data frame decodes (LDPC decoder model)."""
+    import ldpcdec as ld
+    import pilotless_experiment as pe
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    sym, tags, found, cws, _ = pe.make_symbols(0, False, 3, esn0, 0.001, 0.002, seed, lead=8)
+    cr = fx.Carrier(1, False)
+    want = cr.run(sym, tags, found)
+    assert cr.n_acq == 1 and cr.nhdr >= fx.PLL_GEAR[-1][0] and len(want) == len(cws)
+    dec = ld.Decoder(0)
+    assert all(np.array_equal(dec.decode(llr)[0], cw) for llr, cw in zip(want, cws))
+    want = np.concatenate(want).reshape(-1, 2)
+    name = f"pn_{esn0:+.0f}"
+    fin = os.path.join(WORK, f"c_in_{name}.hex")
+    fout = os.path.join(WORK, f"c_out_{name}.hex")
+    write_tagged(fin, sym, tags, found)
+    xa, xb = m.gold_init(0)
+    log = rxsim.run(carrier_exe, modcod=1, pilots=0, xa=xa, xb=xb, kp=cr.kp_p, ki=cr.ki_p,
+                    stall=10, **{"in": fin, "out": fout})
+    assert f"acq {cr.n_acq} fa {cr.n_fa} retype {cr.n_retype}" in log
+    got = rxsim.read_hex_cols(fout, (-8, -8, 1, 1))
+    assert len(got) == len(want), (len(got), len(want))
+    bad = np.nonzero(np.any(got[:, :2] != want, axis=1))[0]
+    assert len(bad) == 0, f"{len(bad)} mismatches, first at word {bad[0]}: {got[bad[0], :2]} vs {want[bad[0]]}"
+
+
 RX_SOURCES = ["gen/dvbs2_tables_pkg.sv", "dvbs2_pl_pkg.sv", "gen/dvbs2_rx_pkg.sv", "gen/dvbs2_ldpc_dec_pkg.sv",
               "dvbs2_async_fifo.sv", "dvbs2_rx_timing.sv", "dvbs2_rx_framesync.sv", "dvbs2_rx_rot.sv",
               "dvbs2_rx_cordic.sv", "dvbs2_udiv.sv", "dvbs2_rx_carrier.sv", "dvbs2_ldpc_dec.sv",
