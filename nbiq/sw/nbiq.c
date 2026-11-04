@@ -484,9 +484,17 @@ int main(int argc, char **argv)
 				n = keep;
 			}
 			while (n) {
+				/* copy out of the uncached ring with aligned words first:
+				 * device memory takes no unaligned accesses */
+				static uint32_t tmp[4096];
 				uint32_t o = h->rp & (h->size - 1);
 				uint32_t k = n < h->size - o ? n : h->size - o;
-				emit(h, h->ring + o, k);
+				if (k > sizeof(tmp))
+					k = sizeof(tmp);
+				const volatile uint32_t *src = (const volatile uint32_t *)(h->ring + o);
+				for (uint32_t i = 0; i < k / 4; i++)
+					tmp[i] = src[i];
+				emit(h, (const uint8_t *)tmp, k);
 				h->rp += k;
 				h->total += k / 4;
 				n -= k;
