@@ -50,7 +50,12 @@ the 600 kS/s overview or a 48 kHz user channel).
 - `syn/ooc.tcl`, `syn/fft_cdc.xdc`: out-of-context synthesis and
   implementation.
 - `sw/fft_spectrum.py`: board test (UIO or /dev/mem, AXI-Lite readout,
-  numpy, dB, `--len`); not yet run on hardware.
+  numpy, dB, `--len`).
+- `sw/fft_dmatest.py SRC CH LEN NAVG COUNT`: result stream board test
+  through `axi_fft_dma` and the UIO ring (map2): header checks, SEQ gaps,
+  packets compared with RESULT. On the fishball (2026-11-04): 4096 on rx0
+  at NAVG 1 and 16, 1024 on nbiq channels 1 and 4: all headers good, no
+  gaps, no STR_DROPS, packets equal to RESULT.
 
 ## Registers
 
