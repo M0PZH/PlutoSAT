@@ -1,0 +1,36 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Wed Nov  4 07:10:24 2026
+| Host         : dev running 64-bit Ubuntu 24.04.5 LTS
+| Command      : report_design_analysis -congestion -file /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/congestion.rpt
+| Design       : system_top
+| Device       : xc7z020
+| Design State : Routed
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Report Design Analysis
+
+Table of Contents
+-----------------
+1. Placer Final Level Congestion Reporting
+2. Initial Estimated Router Congestion Reporting
+
+1. Placer Final Level Congestion Reporting
+------------------------------------------
+
++-----------+------+-------+------------+--------+---------------+----------------+-----+--------+------+------+------+-----+-------+-----+------------+
+| Direction | Type | Level | Congestion | Window | Combined LUTs | Avg LUT Inputs | LUT | LUTRAM | Flop | MUXF | RAMB | DSP | CARRY | SRL | Cell Names |
++-----------+------+-------+------------+--------+---------------+----------------+-----+--------+------+------+------+-----+-------+-----+------------+
+* No congestion windows are found above level 5
+
+
+2. Initial Estimated Router Congestion Reporting
+------------------------------------------------
+
++-----------+------+-------+------------------+--------+---------------+----------------+-----+--------+------+------+------+-----+-------+-----+------------+
+| Direction | Type | Level | Percentage Tiles | Window | Combined LUTs | Avg LUT Inputs | LUT | LUTRAM | Flop | MUXF | RAMB | DSP | CARRY | SRL | Cell Names |
++-----------+------+-------+------------------+--------+---------------+----------------+-----+--------+------+------+------+-----+-------+-----+------------+
+* No initial estimated congestion windows are found above level 5
+
+

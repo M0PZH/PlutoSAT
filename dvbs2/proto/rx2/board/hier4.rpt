@@ -1,0 +1,70 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Wed Nov  4 07:01:36 2026
+| Host         : dev running 64-bit Ubuntu 24.04.5 LTS
+| Command      : report_utilization -hierarchical -hierarchical_depth 4 -file /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier4.rpt
+| Design       : system_top
+| Device       : xc7z020clg400-2
+| Speed File   : -2
+| Design State : Routed
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Utilization Design Information
+
+Table of Contents
+-----------------
+1. Utilization by Hierarchy
+
+1. Utilization by Hierarchy
+---------------------------
+
++-----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+|           Instance          |                 Module                 | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs  | RAMB36 | RAMB18 | DSP Blocks |
++-----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+| system_top                  |                                  (top) |      40770 |      36301 |    3466 | 1003 | 37808 |    111 |     36 |        180 |
+|   (system_top)              |                                  (top) |          0 |          0 |       0 |    0 |     0 |      0 |      0 |          0 |
+|   i_system_wrapper          |                         system_wrapper |      40770 |      36301 |    3466 | 1003 | 37808 |    111 |     36 |        180 |
+|     system_i                |                                 system |      40770 |      36301 |    3466 | 1003 | 37808 |    111 |     36 |        180 |
+|       tx_upack              |                      system_tx_upack_0 |        103 |        103 |       0 |    0 |   119 |      0 |      0 |          0 |
+|         inst                |          system_tx_upack_0_util_upack2 |        103 |        103 |       0 |    0 |   119 |      0 |      0 |          0 |
+|       axi_ad9361            |                    system_axi_ad9361_0 |       3010 |       2944 |       0 |   66 |  6172 |      0 |      0 |         20 |
+|         inst                |         system_axi_ad9361_0_axi_ad9361 |       3010 |       2944 |       0 |   66 |  6172 |      0 |      0 |         20 |
+|       axi_ad9361_adc_dma    |            system_axi_ad9361_adc_dma_0 |        429 |        397 |      32 |    0 |   667 |      1 |      0 |          0 |
+|         inst                |   system_axi_ad9361_adc_dma_0_axi_dmac |        429 |        397 |      32 |    0 |   667 |      1 |      0 |          0 |
+|       axi_ad9361_dac_dma    |            system_axi_ad9361_dac_dma_0 |        478 |        450 |      28 |    0 |   700 |      1 |      0 |          0 |
+|         inst                |   system_axi_ad9361_dac_dma_0_axi_dmac |        478 |        450 |      28 |    0 |   700 |      1 |      0 |          0 |
+|       axi_dvbs2_dma         |                 system_axi_dvbs2_dma_0 |        415 |        403 |      12 |    0 |   493 |      1 |      0 |          0 |
+|         inst                |        system_axi_dvbs2_dma_0_axi_dmac |        415 |        403 |      12 |    0 |   493 |      1 |      0 |          0 |
+|       axi_dvbs2_rx_dma      |              system_axi_dvbs2_rx_dma_0 |        507 |        475 |      32 |    0 |   653 |      1 |      0 |          0 |
+|         inst                |     system_axi_dvbs2_rx_dma_0_axi_dmac |        507 |        475 |      32 |    0 |   653 |      1 |      0 |          0 |
+|       axi_gp0_interconnect  |          system_axi_gp0_interconnect_0 |        808 |        747 |       0 |   61 |   689 |      0 |      0 |          0 |
+|         s00_couplers        |               s00_couplers_imp_1HZ6LU5 |        406 |        345 |       0 |   61 |   550 |      0 |      0 |          0 |
+|         xbar                | system_axi_gp0_interconnect_imp_xbar_0 |        402 |        402 |       0 |    0 |   139 |      0 |      0 |          0 |
+|       axi_iic_main          |                  system_axi_iic_main_0 |        380 |        370 |       0 |   10 |   374 |      0 |      0 |          0 |
+|         U0                  |          system_axi_iic_main_0_axi_iic |        380 |        370 |       0 |   10 |   374 |      0 |      0 |          0 |
+|       axi_spi               |                       system_axi_spi_0 |        386 |        374 |      12 |    0 |   581 |      0 |      0 |          0 |
+|         U0                  |          system_axi_spi_0_axi_quad_spi |        386 |        374 |      12 |    0 |   581 |      0 |      0 |          0 |
+|       cpack                 |                         system_cpack_0 |        109 |        109 |       0 |    0 |   132 |      0 |      0 |          0 |
+|         inst                |             system_cpack_0_util_cpack2 |        109 |        109 |       0 |    0 |   132 |      0 |      0 |          0 |
+|       dvbs2_rx              |                      system_dvbs2_rx_0 |      23186 |      20554 |    2616 |   16 | 11844 |     89 |     12 |         70 |
+|         inst                |          system_dvbs2_rx_0_dvbs2_rx_bd |      23186 |      20554 |    2616 |   16 | 11844 |     88 |     12 |         70 |
+|       dvbs2_tx              |                      system_dvbs2_tx_0 |       1376 |       1324 |      50 |    2 |  1674 |     11 |      5 |         16 |
+|         inst                |          system_dvbs2_tx_0_dvbs2_tx_bd |       1376 |       1324 |      50 |    2 |  1674 |     11 |      5 |         16 |
+|       fft                   |                           system_fft_0 |       1111 |        913 |      44 |  154 |  2088 |      5 |     10 |          6 |
+|         inst                |                    system_fft_0_fft_bd |       1111 |        913 |      44 |  154 |  2088 |      5 |     10 |          6 |
+|       nbiq                  |                          system_nbiq_0 |       6288 |       5608 |     592 |   88 |  7027 |      2 |      9 |         16 |
+|         inst                |                  system_nbiq_0_nbiq_bd |       6288 |       5608 |     592 |   88 |  7027 |      2 |      9 |         16 |
+|       rx_awgn               |                       system_rx_awgn_0 |        953 |        918 |       0 |   35 |  1359 |      0 |      0 |          8 |
+|         inst                |            system_rx_awgn_0_rx_awgn_bd |        953 |        918 |       0 |   35 |  1359 |      0 |      0 |          8 |
+|       rx_fir_decimator      |           rx_fir_decimator_imp_1GA06XC |        628 |        196 |      24 |  408 |  1291 |      0 |      0 |         22 |
+|         fir_decimation_0    |              system_fir_decimation_0_0 |        300 |         84 |      12 |  204 |   645 |      0 |      0 |         11 |
+|         fir_decimation_1    |              system_fir_decimation_1_0 |        300 |         84 |      12 |  204 |   644 |      0 |      0 |         11 |
+|       tx_fir_interpolator   |        tx_fir_interpolator_imp_1308SRJ |        595 |        409 |      24 |  162 |  1915 |      0 |      0 |         22 |
+|         rate_gen            |                      system_rate_gen_0 |         89 |         89 |       0 |    0 |    41 |      0 |      0 |          0 |
+|         fir_interpolation_0 |           system_fir_interpolation_0_0 |        245 |        152 |      12 |   81 |   936 |      0 |      0 |         11 |
+|         fir_interpolation_1 |           system_fir_interpolation_1_0 |        245 |        152 |      12 |   81 |   936 |      0 |      0 |         11 |
++-----------------------------+----------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+* Note: The sum of lower-level cells may be larger than their parent cells total, due to cross-hierarchy LUT combining
+
+

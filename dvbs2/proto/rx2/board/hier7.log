@@ -1,0 +1,81 @@
+INFO: [Common 17-3922] A valid Vivado Design Suite BASIC license has been detected. Your current license is active and will expire on 03-nov-2027.
+#-----------------------------------------------------------
+# Vivado v2026.1 (64-bit)
+# SW Build 6511674 on Tue Jun 16 11:01:26 MDT 2026
+# IP Build 6504888 on Tue Jun 09 09:05:25 MDT 2026
+# SharedData Build 6501428 on Mon Jun 08 17:34:18 MDT 2026
+# Start of session at: Wed Nov  4 07:09:47 2026
+# Process ID         : 3421127
+# Current directory  : /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board
+# Command line       : vivado -mode batch -nojournal -log /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier7.log -source /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier7.tcl
+# Log file           : /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier7.log
+# Journal file       : 
+# Running On         : dev
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 24.04.5 LTS
+# Processor Detail   : AMD EPYC 7K62 48-Core Processor
+# CPU Frequency      : 2599.998 MHz
+# CPU Physical cores : 96
+# CPU Logical cores  : 96
+# Host memory        : 134963 MB
+# Swap memory        : 4294 MB
+# Total Virtual      : 139258 MB
+# Available Virtual  : 124308 MB
+#-----------------------------------------------------------
+source /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier7.tcl
+# set_param general.maxThreads 16
+# open_checkpoint /home/peter/plutosdr-fw/boards/fishball/hdl/fishball.runs/impl_1/system_top_routed.dcp
+Command: open_checkpoint /home/peter/plutosdr-fw/boards/fishball/hdl/fishball.runs/impl_1/system_top_routed.dcp
+
+Starting open_checkpoint Task
+
+Time (s): cpu = 00:00:00.04 ; elapsed = 00:00:00.04 . Memory (MB): peak = 1445.789 ; gain = 8.906 ; free physical = 19883 ; free virtual = 118317
+INFO: [Device 21-403] Loading part xc7z020clg400-2
+Netlist sorting complete. Time (s): cpu = 00:00:00.26 ; elapsed = 00:00:00.27 . Memory (MB): peak = 1975.488 ; gain = 0.000 ; free physical = 19513 ; free virtual = 117948
+INFO: [Netlist 29-17] Analyzing 5215 Unisim elements for replacement
+INFO: [Netlist 29-28] Unisim Transformation completed in 0 CPU seconds
+INFO: [Project 1-479] Netlist was created with Vivado 2026.1
+INFO: [Project 1-570] Preparing netlist for logic optimization
+Read ShapeDB Complete: Time (s): cpu = 00:00:00.18 ; elapsed = 00:00:00.19 . Memory (MB): peak = 2121.027 ; gain = 17.133 ; free physical = 19417 ; free virtual = 117852
+INFO: [Timing 38-478] Restoring timing data from binary archive.
+INFO: [Timing 38-479] Binary timing data restore complete.
+INFO: [Project 1-856] Restoring constraints from binary archive.
+INFO: [Constraints 18-5170] The checkpoint was created with non-default parameter values which do not match the current Vivado settings.  Mismatching parameters are:
+  general.maxThreads
+INFO: [Project 1-853] Binary constraint restore complete.
+INFO: [Designutils 20-5722] Start Reading Physical Databases.
+Reading placement.
+Read Netlist Cache: Time (s): cpu = 00:00:00.08 ; elapsed = 00:00:00.08 . Memory (MB): peak = 2849.551 ; gain = 0.000 ; free physical = 18880 ; free virtual = 117315
+Reading placer database...
+Read Device Cache: Time (s): cpu = 00:00:00.02 ; elapsed = 00:00:00.02 . Memory (MB): peak = 2849.551 ; gain = 0.000 ; free physical = 18880 ; free virtual = 117315
+Read PlaceDB: Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2849.551 ; gain = 0.000 ; free physical = 18880 ; free virtual = 117315
+Read placeStorage: Time (s): cpu = 00:00:02 ; elapsed = 00:00:02 . Memory (MB): peak = 2907.949 ; gain = 58.398 ; free physical = 18875 ; free virtual = 117310
+Read PulsedLatchDB: Time (s): cpu = 00:00:00 ; elapsed = 00:00:00 . Memory (MB): peak = 2907.949 ; gain = 0.000 ; free physical = 18875 ; free virtual = 117310
+Reading routing.
+Read RouteStorage: Time (s): cpu = 00:00:03 ; elapsed = 00:00:00.69 . Memory (MB): peak = 2926.949 ; gain = 19.000 ; free physical = 18844 ; free virtual = 117279
+Read Physdb Files: Time (s): cpu = 00:00:05 ; elapsed = 00:00:03 . Memory (MB): peak = 2926.949 ; gain = 77.398 ; free physical = 18844 ; free virtual = 117279
+Restored from archive | CPU: 5.510000 secs | Memory: 69.409912 MB |
+Finished XDEF File Restore: Time (s): cpu = 00:00:05 ; elapsed = 00:00:03 . Memory (MB): peak = 2926.949 ; gain = 77.398 ; free physical = 18844 ; free virtual = 117279
+Netlist sorting complete. Time (s): cpu = 00:00:00.02 ; elapsed = 00:00:00.02 . Memory (MB): peak = 2966.027 ; gain = 0.000 ; free physical = 18805 ; free virtual = 117240
+INFO: [Project 1-111] Unisim Transformation Summary:
+  A total of 901 instances were transformed.
+  IOBUF => IOBUF (IBUF, OBUFT): 16 instances
+  RAM16X1D => RAM32X1D (RAMD32(x2)): 13 instances
+  RAM32M => RAM32M (RAMD32(x6), RAMS32(x2)): 196 instances
+  RAM32X1D => RAM32X1D (RAMD32(x2)): 16 instances
+  RAM64M => RAM64M (RAMD64E(x4)): 660 instances
+
+INFO: [Project 1-604] Checkpoint was created with Vivado v2026.1 (64-bit) build 6511674
+WARNING: [Vivado 12-23575] Critical violations of the methodology design rules detected. Critical violations may contribute to timing failures or cause functional issues in hardware. Run report_methodology for more information.
+open_checkpoint: Time (s): cpu = 00:00:41 ; elapsed = 00:00:28 . Memory (MB): peak = 2974.062 ; gain = 1543.148 ; free physical = 18805 ; free virtual = 117241
+# report_utilization -hierarchical -hierarchical_depth 8 -file /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/hier8.rpt
+# report_utilization -slr -file /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/dummy.rpt
+WARNING: [Designutils 20-6173] The -slr option is specified, but the device has only one SLR. Reporting utilization for the full design.
+# set f [open /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/brams.txt w]
+# foreach c [get_cells -hier -filter {REF_NAME =~ RAMB*}] { puts $f "[get_property REF_NAME $c] $c" }
+# close $f
+# set f [open /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/dsps.txt w]
+# foreach c [get_cells -hier -filter {REF_NAME =~ DSP48*}] { puts $f "$c" }
+# close $f
+# report_design_analysis -congestion -file /tmp/claude-1000/-home-peter-plutosdr-fw/88841fc5-81fc-4e77-97c4-6f4e979e8a85/scratchpad/rx2/board/congestion.rpt
+INFO: [Common 17-206] Exiting Vivado at Wed Nov  4 07:10:24 2026...
