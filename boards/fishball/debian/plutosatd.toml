@@ -1,0 +1,32 @@
+# plutosatd on a fishball board (Debian); every key not set here has the
+# default of station/docs/api.md section 5. deploy.sh --station installs
+# this as /etc/plutosat/plutosatd.toml only when that file does not exist
+# yet, with ADMIN_PASSWORD replaced by a random password it prints.
+
+[http]
+# the web UI needs a secure context for WebCodecs and the camera:
+# http://localhost through an ssh tunnel (ssh -L 8080:127.0.0.1:8080 root@board),
+# or tls = "auto" and listen = "0.0.0.0:8443" for direct access
+listen = "127.0.0.1:8080"
+web_root = "/usr/share/plutosat/web"
+
+[auth]
+admin_password = "ADMIN_PASSWORD"
+
+[radio]
+# QO-100 IF with a 9750 MHz LNB
+rx_lo_hz = 744500000
+lnb_lo_hz = 9750000000
+
+[rx0]
+sym_rate = 333000
+modcod = "auto"
+auto_start = false
+
+[rx1]
+sym_rate = 333000
+modcod = "auto"
+auto_start = false
+
+[tx]
+callsign = "N0CALL"

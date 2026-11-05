@@ -35,6 +35,15 @@ fi
 unb() { if [ -e $D/$1/$2 ]; then echo $2 > $D/$1/unbind; echo "unbound $2"; fi; }
 bnd() { echo $2 > $D/$1/bind; echo "bound $2"; }
 
+# plutosatd must not touch the cores while the PL is reprogrammed (its
+# register accesses would fault): stop the service, start it again after
+SVC=0
+if command -v systemctl > /dev/null && systemctl -q is-active plutosatd 2> /dev/null; then
+  systemctl stop plutosatd && SVC=1 && echo "stopped plutosatd"
+fi
+restart_svc() { if [ $SVC = 1 ]; then systemctl start plutosatd && echo "started plutosatd"; fi; }
+trap restart_svc EXIT
+
 sync
 unb cf_axi_dds $DDS
 unb cf_axi_adc $ADC

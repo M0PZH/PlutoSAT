@@ -1,0 +1,19 @@
+[Unit]
+Description=PlutoSAT station daemon (DATV TX/RX, narrowband, spectrum, web UI)
+After=network-online.target time-sync.target
+Wants=network-online.target
+# the PL must hold the PlutoSAT design (BOOT.bin, or plutosat-pl-load);
+# plutosat-pl-load stops this service while it reprograms the PL
+ConditionPathExists=/sys/class/uio/uio0
+# a PL without the PlutoSAT cores makes every start fault: give up
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/plutosatd -c /etc/plutosat/plutosatd.toml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
