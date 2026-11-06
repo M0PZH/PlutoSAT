@@ -1,0 +1,122 @@
+# plutosdr-fw
+PlutoSDR Firmware for the [ADALM-PLUTO](https://wiki.analog.com/university/tools/pluto "PlutoSDR Wiki Page") Active Learning Module
+
+Latest binary Release : [![GitHub Release](https://img.shields.io/github/release/analogdevicesinc/plutosdr-fw.svg)](https://github.com/analogdevicesinc/plutosdr-fw/releases/latest)  [![Github Releases](https://img.shields.io/github/downloads/analogdevicesinc/plutosdr-fw/total.svg)](https://github.com/analogdevicesinc/plutosdr-fw/releases/latest)
+
+Firmware License : [![Many Licenses](https://img.shields.io/badge/license-LGPL2+-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-GPL2+-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-BSD-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-apache-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md) and many others.
+
+[Instructions from the Wiki: Building the image](https://wiki.analog.com/university/tools/pluto/building_the_image)
+
+* Build Instructions
+```bash
+ sudo apt-get install git build-essential fakeroot libncurses5-dev libssl-dev ccache
+ sudo apt-get install dfu-util u-boot-tools device-tree-compiler mtools
+ sudo apt-get install bc python3 cpio zip unzip rsync file wget
+ git clone --recursive https://github.com/analogdevicesinc/plutosdr-fw.git
+ cd plutosdr-fw
+ export VIVADO_SETTINGS=/opt/Xilinx/2025.1/Vivado/settings64.sh
+ make
+
+```
+
+Due to incompatibility between the AMD/Xilinx GCC toolchain supplied with Vivado/Vitis and Buildroot,
+this project uses the Buildroot external toolchain infrastructure with the Arm GNU toolchain
+(arm-none-linux-gnueabihf), which is downloaded and set up automatically during the build.
+
+This toolchain is used to build: Buildroot, Linux and u-boot
+
+* Repository layout
+
+     | Submodule  | Comment |
+     | ------------- | ------------- |
+     | linux | ADI Linux kernel tree |
+     | u-boot | ADI u-boot tree |
+     | hdl | ADI HDL designs used to build the FPGA bitstream |
+     | buildroot | Buildroot tree used to build the toolchain and root filesystem |
+     | br2-external | Buildroot external tree with the ADI board files (board/adi/pluto) and defconfigs |
+
+* Build targets
+
+    The default build target is `pluto`. The Epiq Solutions Sidekiq Z2 is supported via the same
+    parametrized build system:
+```bash
+ make TARGET=sidekiqz2
+```
+
+ * Updating your local repository 
+ ```bash 
+      git pull --recurse-submodules
+  ```
+   
+* Build Artifacts
+ ```bash
+      michael@HAL9000:~/devel/plutosdr-fw$ ls -AGhl build
+      total 868M
+      -rw-rw-r-- 1 michael   69 Aug  3 15:11 boot.bif
+      -rw-rw-r-- 1 michael 625K Aug  3 15:11 boot.bin
+      -rw-rw-r-- 1 michael 625K Aug  3 15:11 boot.dfu
+      -rw-rw-r-- 1 michael 754K Aug  3 15:11 boot.frm
+      -rw-rw-r-- 1 michael 778M Aug  3 15:12 legal-info-v0.39.tar.gz
+      -rw-rw-r-- 1 michael 822K Aug  3 15:10 LICENSE.html
+      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.dfu
+      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.frm
+      -rw-rw-r-- 1 michael   33 Aug  3 15:11 pluto.frm.md5
+      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.itb
+      -rw-rw-r-- 1 michael  28M Aug  3 15:11 plutosdr-fw-v0.39.zip
+      -rw-rw-r-- 1 michael 682K Aug  3 15:11 plutosdr-jtag-bootstrap-v0.39.zip
+      -rw-rw-r-- 1 michael 441K Aug  3 15:10 ps7_init.c
+      -rw-rw-r-- 1 michael 442K Aug  3 15:10 ps7_init_gpl.c
+      -rw-rw-r-- 1 michael 4,2K Aug  3 15:10 ps7_init_gpl.h
+      -rw-rw-r-- 1 michael 3,6K Aug  3 15:10 ps7_init.h
+      -rw-rw-r-- 1 michael 2,4M Aug  3 15:10 ps7_init.html
+      -rw-rw-r-- 1 michael  31K Aug  3 15:10 ps7_init.tcl
+      -rw-r--r-- 1 michael 8,3M Aug  3 15:10 rootfs.cpio.gz
+      drwxrwxr-x 2 michael 4,0K Aug  3 15:12 sbom
+      drwxrwxr-x 6 michael 4,0K Aug  3 15:11 sdk
+      -rw-rw-r-- 1 michael 943K Aug  3 15:10 system_top.bit
+      -rw-rw-r-- 1 michael 737K Aug  3 15:10 system_top.xsa
+      -rwxrwxr-x 1 michael 602K Aug  3 15:11 u-boot.elf
+      -rw-rw---- 1 michael 128K Aug  3 15:11 uboot-env.bin
+      -rw-rw---- 1 michael 129K Aug  3 15:11 uboot-env.dfu
+      -rw-rw-r-- 1 michael 6,6K Aug  3 15:11 uboot-env.txt
+      -rwxrwxr-x 1 michael 4,7M Aug  3 15:09 zImage
+      -rw-rw-r-- 1 michael  22K Aug  3 15:10 zynq-pluto-sdr.dtb
+      -rw-rw-r-- 1 michael  22K Aug  3 15:10 zynq-pluto-sdr-revb.dtb
+      -rw-rw-r-- 1 michael  24K Aug  3 15:10 zynq-pluto-sdr-revc.dtb
+
+ ```
+ 
+ * Main targets
+ 
+     | File  | Comment |
+     | ------------- | ------------- | 
+     | pluto.frm | Main PlutoSDR firmware file used with the USB Mass Storage Device |
+     | pluto.dfu | Main PlutoSDR firmware file used in DFU mode |
+     | boot.frm  | First and Second Stage Bootloader (u-boot + fsbl + uEnv) used with the USB Mass Storage Device |
+     | boot.dfu  | First and Second Stage Bootloader (u-boot + fsbl) used in DFU mode |
+     | uboot-env.dfu  | u-boot default environment used in DFU mode |
+     | plutosdr-fw-vX.XX.zip  | ZIP archive containing all of the files above |  
+     | plutosdr-jtag-bootstrap-vX.XX.zip  | ZIP archive containing u-boot and Vivado TCL used for JTAG bootstrapping |       
+ 
+  * Other intermediate targets
+
+     | File  | Comment |
+     | ------------- | ------------- |
+     | boot.bif | Boot Image Format file used to generate the Boot Image |
+     | boot.bin | Final Boot Image |
+     | pluto.frm.md5 | md5sum of the pluto.frm file |
+     | pluto.itb | u-boot Flattened Image Tree |
+     | rootfs.cpio.gz | The Root Filesystem archive |
+     | sbom | Software Bill of Materials (CycloneDX) for buildroot, linux, u-boot, hdl and the full firmware |
+     | sdk | Vivado/Vitis Build folder including the FSBL |
+     | system_top.bit | FPGA Bitstream (from XSA) |
+     | system_top.xsa | FPGA Hardware Description File exported by Vivado |
+     | u-boot.elf | u-boot ELF Binary |
+     | uboot-env.bin | u-boot default environment in binary format created from uboot-env.txt |
+     | uboot-env.txt | u-boot default environment in human readable text format |
+     | zImage | Compressed Linux Kernel Image |
+     | zynq-pluto-sdr.dtb | Device Tree Blob for Rev.A |
+     | zynq-pluto-sdr-revb.dtb | Device Tree Blob for Rev.B|     
+     | zynq-pluto-sdr-revc.dtb | Device Tree Blob for Rev.C|
+ 
+

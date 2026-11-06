@@ -1,122 +1,113 @@
-# plutosdr-fw
-PlutoSDR Firmware for the [ADALM-PLUTO](https://wiki.analog.com/university/tools/pluto "PlutoSDR Wiki Page") Active Learning Module
+# PlutoSAT
 
-Latest binary Release : [![GitHub Release](https://img.shields.io/github/release/analogdevicesinc/plutosdr-fw.svg)](https://github.com/analogdevicesinc/plutosdr-fw/releases/latest)  [![Github Releases](https://img.shields.io/github/downloads/analogdevicesinc/plutosdr-fw/total.svg)](https://github.com/analogdevicesinc/plutosdr-fw/releases/latest)
+A QO-100 (Es'hail-2) amateur satellite ground station on a single Zynq-7020 +
+AD9363 SDR board: DATV transmit and receive, the narrowband transponder, and
+a browser UI, with the signal processing in the FPGA.
 
-Firmware License : [![Many Licenses](https://img.shields.io/badge/license-LGPL2+-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-GPL2+-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-BSD-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md)  [![Many License](https://img.shields.io/badge/license-apache-blue.svg)](https://github.com/analogdevicesinc/plutosdr-fw/blob/master/LICENSE.md) and many others.
+The target board is the **fishball-sdr-7020**: xc7z020clg400-2, AD9363,
+1 GB DDR3. This repository is a fork of ADI's
+[plutosdr-fw](https://github.com/analogdevicesinc/plutosdr-fw); its original
+README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 
-[Instructions from the Wiki: Building the image](https://wiki.analog.com/university/tools/pluto/building_the_image)
+## Features
 
-* Build Instructions
-```bash
- sudo apt-get install git build-essential fakeroot libncurses5-dev libssl-dev ccache
- sudo apt-get install dfu-util u-boot-tools device-tree-compiler mtools
- sudo apt-get install bc python3 cpio zip unzip rsync file wget
- git clone --recursive https://github.com/analogdevicesinc/plutosdr-fw.git
- cd plutosdr-fw
- export VIVADO_SETTINGS=/opt/Xilinx/2025.1/Vivado/settings64.sh
- make
+**DVB-S2 transmit** (`dvbs2/`)
+- QPSK 1/4 to 9/10, normal frames, pilots on or off.
+- Symbol rates from 33.3 kS/s to 2 MS/s.
+- The browser's camera and microphone are encoded with WebCodecs (H.265, H.264 or AV1, with Opus). `plutosatd` muxes them into a constant-rate transport stream that meets TR 101 290 PSI timing.
 
-```
+**DVB-S2 receive** (`dvbs2/`)
+- Two receive slots on one RX core. Each slot has its own frequency, symbol rate (33.3 kS/s to 2 MS/s, about 2.27 MBd for both slots together), MODCOD and pilots.
+- Frames are found by a frame sync confirmed by PLS decoding, which resists false locks on repeating frames.
+- Automatic MODCOD and pilots detection from the PLHEADER.
+- LDPC (layered min-sum, shared by both slots through a DDR frame queue) and BCH decoding.
+- Low-latency playback in the browser, with audio and video synchronised.
 
-Due to incompatibility between the AMD/Xilinx GCC toolchain supplied with Vivado/Vitis and Buildroot,
-this project uses the Buildroot external toolchain infrastructure with the Arm GNU toolchain
-(arm-none-linux-gnueabihf), which is downloaded and set up automatically during the build.
+**Narrowband transponder** (`nbiq/`)
+- Five independent decimating channels: SSB/CW receivers for several users plus a background decoder.
+- FT8/FT4 decoding, both in the daemon and in the browser (WebAssembly).
 
-This toolchain is used to build: Buildroot, Linux and u-boot
+**Spectrum** (`fft/`)
+- An FFT in the FPGA (512 to 4096 points, run-time selectable).
+- Results reach memory by DMA, at 30 fps and more, for the wideband and narrowband waterfalls.
 
-* Repository layout
+**Station software** ([`station/`](station), its own repository)
+- `plutosatd`, a Rust daemon with a REST/WebSocket API.
+- The `plutosat` CLI.
+- The web UI, built on [HamUI](https://github.com/M0PZH/HamUI).
+- A native iOS client.
 
-     | Submodule  | Comment |
-     | ------------- | ------------- |
-     | linux | ADI Linux kernel tree |
-     | u-boot | ADI u-boot tree |
-     | hdl | ADI HDL designs used to build the FPGA bitstream |
-     | buildroot | Buildroot tree used to build the toolchain and root filesystem |
-     | br2-external | Buildroot external tree with the ADI board files (board/adi/pluto) and defconfigs |
+**Testing aids**
+- A receive noise source (`awgn/`).
+- AD9363 digital loopback.
+- Command-line tools (`dvbs2-tx`, `dvbs2-rx`, `dvbs2-selftest`, `nbiq`, …).
+- A bit-true Python model for every core, with simulation testbenches.
 
-* Build targets
+## Repository layout
 
-    The default build target is `pluto`. The Epiq Solutions Sidekiq Z2 is supported via the same
-    parametrized build system:
-```bash
- make TARGET=sidekiqz2
-```
+| Path | Contents |
+|---|---|
+| [`dvbs2/`](dvbs2) | DVB-S2 TX and RX cores (RTL, model, sims, C tools); design notes in [`dvbs2/README.md`](dvbs2/README.md) and [`dvbs2/docs/`](dvbs2/docs) |
+| [`nbiq/`](nbiq), [`fft/`](fft), [`awgn/`](awgn) | Narrowband channels, spectrum FFT, noise source: each with RTL, model, sims, software |
+| [`regs/`](regs) | Register maps (TOML, the single source of truth) and the generated headers |
+| [`boards/fishball/`](boards/fishball) | Board support: HDL project, device trees, u-boot/Linux configs, buildroot overrides, and deployment to a board running Debian ([`boards/fishball/debian/`](boards/fishball/debian)) |
+| [`station/`](station) | Submodule [PlutoSAT-station](https://github.com/M0PZH/PlutoSAT-station): daemon, CLI, web UI, iOS client, [API reference](station/docs/api.md) |
+| `hdl/`, `linux/`, `u-boot/`, `buildroot/`, `br2-external/` | Submodules inherited from plutosdr-fw (ADI HDL library, kernel, u-boot, buildroot) |
 
- * Updating your local repository 
- ```bash 
-      git pull --recurse-submodules
-  ```
-   
-* Build Artifacts
- ```bash
-      michael@HAL9000:~/devel/plutosdr-fw$ ls -AGhl build
-      total 868M
-      -rw-rw-r-- 1 michael   69 Aug  3 15:11 boot.bif
-      -rw-rw-r-- 1 michael 625K Aug  3 15:11 boot.bin
-      -rw-rw-r-- 1 michael 625K Aug  3 15:11 boot.dfu
-      -rw-rw-r-- 1 michael 754K Aug  3 15:11 boot.frm
-      -rw-rw-r-- 1 michael 778M Aug  3 15:12 legal-info-v0.39.tar.gz
-      -rw-rw-r-- 1 michael 822K Aug  3 15:10 LICENSE.html
-      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.dfu
-      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.frm
-      -rw-rw-r-- 1 michael   33 Aug  3 15:11 pluto.frm.md5
-      -rw-rw-r-- 1 michael  14M Aug  3 15:11 pluto.itb
-      -rw-rw-r-- 1 michael  28M Aug  3 15:11 plutosdr-fw-v0.39.zip
-      -rw-rw-r-- 1 michael 682K Aug  3 15:11 plutosdr-jtag-bootstrap-v0.39.zip
-      -rw-rw-r-- 1 michael 441K Aug  3 15:10 ps7_init.c
-      -rw-rw-r-- 1 michael 442K Aug  3 15:10 ps7_init_gpl.c
-      -rw-rw-r-- 1 michael 4,2K Aug  3 15:10 ps7_init_gpl.h
-      -rw-rw-r-- 1 michael 3,6K Aug  3 15:10 ps7_init.h
-      -rw-rw-r-- 1 michael 2,4M Aug  3 15:10 ps7_init.html
-      -rw-rw-r-- 1 michael  31K Aug  3 15:10 ps7_init.tcl
-      -rw-r--r-- 1 michael 8,3M Aug  3 15:10 rootfs.cpio.gz
-      drwxrwxr-x 2 michael 4,0K Aug  3 15:12 sbom
-      drwxrwxr-x 6 michael 4,0K Aug  3 15:11 sdk
-      -rw-rw-r-- 1 michael 943K Aug  3 15:10 system_top.bit
-      -rw-rw-r-- 1 michael 737K Aug  3 15:10 system_top.xsa
-      -rwxrwxr-x 1 michael 602K Aug  3 15:11 u-boot.elf
-      -rw-rw---- 1 michael 128K Aug  3 15:11 uboot-env.bin
-      -rw-rw---- 1 michael 129K Aug  3 15:11 uboot-env.dfu
-      -rw-rw-r-- 1 michael 6,6K Aug  3 15:11 uboot-env.txt
-      -rwxrwxr-x 1 michael 4,7M Aug  3 15:09 zImage
-      -rw-rw-r-- 1 michael  22K Aug  3 15:10 zynq-pluto-sdr.dtb
-      -rw-rw-r-- 1 michael  22K Aug  3 15:10 zynq-pluto-sdr-revb.dtb
-      -rw-rw-r-- 1 michael  24K Aug  3 15:10 zynq-pluto-sdr-revc.dtb
+## Getting started
 
- ```
- 
- * Main targets
- 
-     | File  | Comment |
-     | ------------- | ------------- | 
-     | pluto.frm | Main PlutoSDR firmware file used with the USB Mass Storage Device |
-     | pluto.dfu | Main PlutoSDR firmware file used in DFU mode |
-     | boot.frm  | First and Second Stage Bootloader (u-boot + fsbl + uEnv) used with the USB Mass Storage Device |
-     | boot.dfu  | First and Second Stage Bootloader (u-boot + fsbl) used in DFU mode |
-     | uboot-env.dfu  | u-boot default environment used in DFU mode |
-     | plutosdr-fw-vX.XX.zip  | ZIP archive containing all of the files above |  
-     | plutosdr-jtag-bootstrap-vX.XX.zip  | ZIP archive containing u-boot and Vivado TCL used for JTAG bootstrapping |       
- 
-  * Other intermediate targets
+The board keeps its own Debian system; PlutoSAT is deployed onto it over ssh.
 
-     | File  | Comment |
-     | ------------- | ------------- |
-     | boot.bif | Boot Image Format file used to generate the Boot Image |
-     | boot.bin | Final Boot Image |
-     | pluto.frm.md5 | md5sum of the pluto.frm file |
-     | pluto.itb | u-boot Flattened Image Tree |
-     | rootfs.cpio.gz | The Root Filesystem archive |
-     | sbom | Software Bill of Materials (CycloneDX) for buildroot, linux, u-boot, hdl and the full firmware |
-     | sdk | Vivado/Vitis Build folder including the FSBL |
-     | system_top.bit | FPGA Bitstream (from XSA) |
-     | system_top.xsa | FPGA Hardware Description File exported by Vivado |
-     | u-boot.elf | u-boot ELF Binary |
-     | uboot-env.bin | u-boot default environment in binary format created from uboot-env.txt |
-     | uboot-env.txt | u-boot default environment in human readable text format |
-     | zImage | Compressed Linux Kernel Image |
-     | zynq-pluto-sdr.dtb | Device Tree Blob for Rev.A |
-     | zynq-pluto-sdr-revb.dtb | Device Tree Blob for Rev.B|     
-     | zynq-pluto-sdr-revc.dtb | Device Tree Blob for Rev.C|
- 
+1. **Build the FPGA design** (Vivado 2026.1):
+   ```
+   source /opt/Xilinx/2026.1/Vivado/settings64.sh
+   ADI_IGNORE_VERSION_CHECK=1 make -C boards/fishball/hdl
+   cp boards/fishball/hdl/fishball.runs/impl_1/system_top.bit build/
+   ```
+2. **Deploy** (needs `bootgen`, `dtc`, and for the station part `cargo` with the `armv7-unknown-linux-musleabihf` target and `npm`):
+   ```
+   boards/fishball/debian/deploy.sh --boot root@board      # once: device tree and boot arguments, then reboot
+   boards/fishball/debian/deploy.sh --station root@board   # bitstream, tools, plutosatd + web UI as a systemd service
+   ```
+3. **Load the bitstream**:
+   - at every boot: `ssh root@board plutosat-pl-load`;
+   - or put it into BOOT.bin once, as described in [`boards/fishball/debian/README.md`](boards/fishball/debian/README.md).
+4. **Open the UI** through an ssh tunnel. WebCodecs and the camera need a secure context:
+   ```
+   ssh -L 8080:127.0.0.1:8080 root@board
+   ```
+   Then browse to http://localhost:8080. The admin password is printed by `deploy.sh --station` and kept in `/etc/plutosat/plutosatd.toml`.
 
+A self-test without any RF: `ssh root@board dvbs2-selftest -p` (stop the service first: `systemctl stop plutosatd`).
+
+## Documentation
+
+- [`AGENTS.md`](AGENTS.md): handover notes for developers and coding agents:
+  - build and test commands;
+  - the test board and its rules;
+  - system facts and lessons learned;
+  - open items.
+- [`station/docs/api.md`](station/docs/api.md): the station protocol (REST, WebSocket, configuration), with board measurements.
+- Component READMEs: [`dvbs2/`](dvbs2/README.md), [`nbiq/`](nbiq/README.md), [`fft/`](fft/README.md), [`awgn/`](awgn/README.md), [`regs/`](regs/README.md), [`boards/fishball/`](boards/fishball/README.md).
+
+## Status
+
+**Working:**
+- DVB-S2 TX and two-slot RX, validated in digital loopback and over a cabled RF loop;
+- narrowband receive with FT8;
+- spectrum;
+- the web UI.
+
+**Not yet done:**
+- on-air tests via QO-100;
+- an IQ transmit path for narrowband SSB/CW;
+- 8PSK and higher modulations, and short frames;
+- TX power calibration.
+
+See the open items in [`AGENTS.md`](AGENTS.md).
+
+## License
+
+The plutosdr-fw build system and the submodules keep their licenses (see
+[`LICENSE.md`](LICENSE.md) and each submodule). The station software is in its
+own repository.
