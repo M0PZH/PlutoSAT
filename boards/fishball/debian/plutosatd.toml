@@ -31,5 +31,16 @@ sym_rate = 333000
 modcod = "auto"
 auto_start = false
 
+[spectrum.display]
+# Shared browser defaults. Users can override these in their own widget settings.
+auto = false
+min_db = -110
+max_db = -40
+wf_min_db = -103
+wf_max_db = -48
+# Channel mean above the noise floor; clear occupied below threshold - hysteresis.
+occupancy_threshold_db = 3.0
+occupancy_hysteresis_db = 2.0
+
 [tx]
 callsign = "N0CALL"
