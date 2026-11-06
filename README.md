@@ -72,11 +72,10 @@ The board keeps its own Debian system; PlutoSAT is deployed onto it over ssh.
 3. **Load the bitstream**:
    - at every boot: `ssh root@board plutosat-pl-load`;
    - or put it into BOOT.bin once, as described in [`boards/fishball/debian/README.md`](boards/fishball/debian/README.md).
-4. **Open the UI** through an ssh tunnel. WebCodecs and the camera need a secure context:
-   ```
-   ssh -L 8080:127.0.0.1:8080 root@board
-   ```
-   Then browse to http://localhost:8080. The admin password is printed by `deploy.sh --station` and kept in `/etc/plutosat/plutosatd.toml`.
+4. **Open the UI** at `https://board/` (plain `http://board/` redirects there).
+   - The daemon serves HTTPS with a self-signed certificate (`tls = "auto"`), because browsers give WebCodecs and the camera only to a secure context.
+   - Accept the certificate once, or install it from `https://board/cert.crt`.
+   - The admin password is printed by `deploy.sh --station` and kept in `/etc/plutosat/plutosatd.toml`.
 
 A self-test without any RF: `ssh root@board dvbs2-selftest -p` (stop the service first: `systemctl stop plutosatd`).
 

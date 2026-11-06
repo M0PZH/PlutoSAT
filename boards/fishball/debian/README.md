@@ -24,7 +24,7 @@ What it changes:
 | `/usr/local/bin/plutosatd`, `/usr/local/bin/plutosat` (`--station`) | the station daemon and CLI (static armv7 musl builds) |
 | `/usr/share/plutosat/web`, `/usr/share/plutosat/api.md` (`--station`) | the web UI (`station/web`, `npm run build`) and the API reference |
 | `/etc/systemd/system/plutosatd.service` (`--station`) | `plutosatd -c /etc/plutosat/plutosatd.toml`, enabled, restarted on failure (at most 5 starts a minute: a PL without the PlutoSAT cores faults every start) |
-| `/etc/plutosat/plutosatd.toml` (`--station`, only if absent) | from `plutosatd.toml`: web UI on 127.0.0.1:8080 (ssh tunnel), QO-100 IF, a random admin password printed once |
+| `/etc/plutosat/plutosatd.toml` (`--station`, only if absent) | from `plutosatd.toml`: web UI on https://board/ (port 443, self-signed certificate from `tls = "auto"`, port 80 redirects), QO-100 IF, a random admin password printed once |
 
 `plutosat-pl-load` stops the plutosatd service while it reprograms the PL
 (the daemon's register accesses would fault) and starts it again after.

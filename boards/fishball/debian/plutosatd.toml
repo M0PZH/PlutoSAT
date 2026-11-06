@@ -4,10 +4,13 @@
 # yet, with ADMIN_PASSWORD replaced by a random password it prints.
 
 [http]
-# the web UI needs a secure context for WebCodecs and the camera:
-# http://localhost through an ssh tunnel (ssh -L 8080:127.0.0.1:8080 root@board),
-# or tls = "auto" and listen = "0.0.0.0:8443" for direct access
-listen = "127.0.0.1:8080"
+# HTTPS on every interface: browsers give WebCodecs and the camera only to a
+# secure context. tls = "auto" makes a self-signed certificate next to this
+# file (accept it once in the browser, or install it from /cert.crt);
+# plain HTTP on port 80 redirects to it
+listen = "0.0.0.0:443"
+tls = "auto"
+redirect_listen = "0.0.0.0:80"
 web_root = "/usr/share/plutosat/web"
 
 [auth]

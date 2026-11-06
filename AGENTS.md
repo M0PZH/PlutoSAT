@@ -95,7 +95,7 @@ As set up on 2026-11-05:
 
 ### Software on the board
 
-- **systemd `plutosatd`** (enabled): `/usr/local/bin/plutosatd -c /etc/plutosat/plutosatd.toml`, listening on 127.0.0.1:8080 (use an ssh tunnel; WebCodecs and the camera need a secure context). Installed by `boards/fishball/debian/deploy.sh --station`.
+- **systemd `plutosatd`** (enabled): `/usr/local/bin/plutosatd -c /etc/plutosat/plutosatd.toml`, serving the web UI on `https://board/` (0.0.0.0:443, `tls = "auto"` self-signed, because WebCodecs and the camera need a secure context; port 80 redirects). Installed by `boards/fishball/debian/deploy.sh --station`.
 - **`plutosat-pl-load [FILE]`:** reprograms the PL at run time from `/lib/firmware`. It stops the plutosatd service around the reload. Default `plutosat.bit.bin`; other images live alongside it, e.g. `plutosat-rx141.bit.bin`.
 - **C tools in `/usr/local/bin`** (built on the board by `deploy.sh`): `dvbs2-rx`, `dvbs2-tx`, `dvbs2-selftest`, `nbiq`, `rx-awgn`, …. The 1.x versions are in `/usr/local/bin/pre-rx20`.
 - **User trial setup** `/root/try/try.sh MIN lb|rf`: plutosatd on 127.0.0.1:18080 in digital loopback or over the cable. It stops the service while it runs and starts it again afterwards. The user also runs their own instance there (`qo100.toml`, 0.0.0.0:443 TLS): don't touch `/root/try` except try.sh/try*.toml.
