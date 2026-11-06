@@ -19,7 +19,8 @@ plutosdr-fw with:
 - **station** (submodule, repo `M0PZH/PlutoSAT-station`):
   - the Rust daemon `plutosatd` and CLI `plutosat` (`station/rust`);
   - the web UI (`station/web`, built on HamUI `M0PZH/HamUI`, pinned by commit in `station/web/package.json`);
-  - the API reference `station/docs/api.md`.
+  - the API reference `station/docs/api.md`;
+  - `station/ios/`, a native iOS client added by another contributor (2026-11-05).
 - **Board files**: `boards/fishball/` (HDL project, device tree, u-boot/Linux configs, Debian deployment).
 
 Remotes: superproject `git@github.com:M0PZH/PlutoSAT.git` (master), station
