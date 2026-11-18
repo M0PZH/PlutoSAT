@@ -55,6 +55,7 @@ Host: Ubuntu 24.04, 96 cores. Only Vivado/Vitis **2026.1** is installed
 | dvbs2 RX sims (Verilator) | `cd dvbs2/sim/rx && ../../.venv/bin/python -m pytest -q test_rx.py test_rx2.py test_llrq.py` (about 25 min for everything; `-k` to narrow it) |
 | Station Rust | `cd station/rust && PLUTOSAT_REGS=$PWD/../../regs PLUTOSAT_FW=$PWD/../.. PLUTOSAT_PYTHON=$PWD/../../dvbs2/.venv/bin/python PLUTOSAT_GOLDEN_REQUIRED=1 cargo test --workspace --release` |
 | Board binaries | `cargo build --release --target armv7-unknown-linux-musleabihf -p plutosatd -p plutosat-cli` (static, rust-lld) |
+| RADE C sources | `station/rust/crates/plutosat-rade/fetch-sources.sh` once (pinned, checksummed, into the gitignored `third_party/`; needs clang + llvm-ar to build). Without them plutosatd builds without RADE (a cargo warning; the recorder's RADE mode reports itself unavailable) and the RADE tests skip; `PLUTOSAT_RADE_REQUIRED=1` makes both an error. `deploy.sh --station` fetches them and requires them. |
 | Web | node is not on PATH in non-interactive shells: `export PATH=/home/peter/.local/share/nvm/v22.11.0/bin:$PATH`; `cd station/web && npm ci && npm test && npm run build` |
 | Web e2e | `station/web/test/e2e/{e2e,nb,spectrum,tx,stutter}.mjs` (headless Chromium via playwright-core) against `plutosatd --sim`. Use non-default ports, because other daemons may hold the defaults. |
 

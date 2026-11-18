@@ -12,7 +12,10 @@
 #           devicetree.dtb + reserved memory and the UIO nodes, - the IIO
 #           streaming DMAs (dtb-add-plutosat.py), uEnv.txt + uio_pdrv_genirq.of_id;
 #           the originals stay on the card as *.pre-plutosat. Reboot after.
-# --station: plutosatd and plutosat (cross-built here for armv7 musl), the
+# --station: plutosatd and plutosat (cross-built here for armv7 musl, with
+#           RADE: station/rust/crates/plutosat-rade/fetch-sources.sh first,
+#           pinned and checksummed, a no-op once done; PLUTOSAT_RADE_REQUIRED=0
+#           builds without RADE when that fails), the
 #           web UI (npm run build here) into /usr/share/plutosat/web, the
 #           systemd service plutosatd (enabled, restarted), and
 #           /etc/plutosat/plutosatd.toml if there is none yet (from
@@ -21,7 +24,8 @@
 # Then on the board: plutosat-pl-load (after every boot, until the
 # bitstream goes into BOOT.bin), then e.g. dvbs2-selftest.
 # Needs here: Vivado (bootgen), dtc, ssh/scp access to the board; with
-# --station also cargo (target armv7-unknown-linux-musleabihf) and npm.
+# --station also cargo (target armv7-unknown-linux-musleabihf), clang and
+# llvm-ar (RADE), curl, unzip, patch and npm.
 set -e
 TOP=$(cd "$(dirname "$0")/../../.." && pwd)
 HERE=$TOP/boards/fishball/debian
@@ -35,7 +39,7 @@ while [ $# -gt 1 ]; do
   esac
   shift
 done
-[ -n "$1" ] || { sed -n '2,24s/^# \{0,1\}//p' "$0"; exit 2; }
+[ -n "$1" ] || { sed -n '2,28s/^# \{0,1\}//p' "$0"; exit 2; }
 H=$1
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -85,6 +89,13 @@ fi
 
 if [ $STATION = 1 ]; then
   S=$TOP/station
+  # RADE (the recorder's RADE mode): the pinned C sources; without them the
+  # build goes on without RADE only when PLUTOSAT_RADE_REQUIRED=0
+  export PLUTOSAT_RADE_REQUIRED=${PLUTOSAT_RADE_REQUIRED:-1}
+  if [ -f "$S/rust/crates/plutosat-rade/fetch-sources.sh" ]; then
+    sh "$S/rust/crates/plutosat-rade/fetch-sources.sh" || [ "$PLUTOSAT_RADE_REQUIRED" = 0 ] \
+      || { echo "RADE sources could not be fetched (PLUTOSAT_RADE_REQUIRED=0 deploys without RADE)" >&2; exit 1; }
+  fi
   (cd "$S/rust" && PLUTOSAT_REGS=$TOP/regs PLUTOSAT_FW=$TOP \
     cargo build --release --target armv7-unknown-linux-musleabihf -p plutosatd -p plutosat-cli)
   (cd "$S/web" && npm ci --silent && npm run build --silent)
