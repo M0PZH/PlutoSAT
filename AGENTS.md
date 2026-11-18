@@ -34,7 +34,7 @@ the build host is not accepted. If a push fails, commit locally and say so.
 - **Commits:** commit verified work in logical stages and push without being asked. Push the station submodule first, then the superproject pointer. Never commit build outputs. Before committing, check for CJK: `git diff --cached | grep -P '[\x{4e00}-\x{9fff}]'`.
 - **Registers:** the TOML files in `regs/` are the single source of truth. After editing one, run `python3 regs/gen.py` and `python3 regs/gen.py --check`. RTL, C tools and Rust all read the generated files. The Rust build reads `regs/` via `PLUTOSAT_REGS`.
 - **Core VERSION:** bump it in the core's `*_axi.sv` read mux, in its `regs/*.toml` (value and doc string) and in the sim test that checks it. Software checks minimum versions, e.g. RX ≥ 0x0001_0200, two slots ≥ 0x0002_0000.
-- **Files the user picks up by hand** (BOOT.bin, devicetree.dtb, …) go into the repo top directory, untracked, never into a temp directory.
+- **Files the user picks up by hand** (BOOT.bin, devicetree.dtb, …) go into `build/` (ignored by git, the plutosdr-fw build directory), e.g. `build/fishball-debian-boot/`, never into the repo top directory or a temp directory.
 
 ## Build and test
 
