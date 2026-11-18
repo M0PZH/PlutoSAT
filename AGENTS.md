@@ -209,10 +209,10 @@ What worked:
 - iqtx and narrowband transmit (SSB, CW, FT8/FT4, RADE, tones), board-validated over the cable;
 - station protocol 1.15: TX key-frame buffer auto/manual, MODCOD auto by PLS hints, narrowband TX, beacon lock, the background recorder, 8PSK/short, eight nbiq channels, TX1 to the idle attenuation at start;
 - the Debian packages (`plutosatd`, `plutosat-firmware`, `plutosat-tools`, `plutosat-boot`).
+- MODCOD auto with 8PSK and short frames (RX 2.1.3): the C tools detect every code from qpsk2/3 in 0.1–0.8 s; through plutosatd (`examples/scanclient.rs`, 333 kS/s, digital loopback) 10 of 10 starts locked in 0.4–1.6 s, pilot changes in 0.36–0.56 s.
 
 **Open:**
 
-- **MODCOD auto in plutosatd with RX 2.1.3** is expected to converge for 8PSK/short (the C tools detect every code from qpsk2/3 in 0.1–0.8 s); not yet measured through the daemon (`examples/scanclient.rs`). The pilots must still alternate.
 - **Not tested on air:** QO-100 has not been received or transmitted on air.
 - **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only); a proper rx1 RF input; the beacon lock's F1A tone direction.
 - **Not started:** the buildroot firmware image with RX, FFT, plutosatd and web; RADE EOO callsign.
