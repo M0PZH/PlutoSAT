@@ -126,6 +126,7 @@ module rx_awgn (
   logic [32:0] e_in, e_out;
   logic [48:0] acc_in, acc_out;
   logic [15:0] mcnt;
+  (* max_fanout = 32 *) logic mlast;        // mcnt == 16'hFFFF, registered (fans out to ~200 flops)
   always_ff @(posedge clk) begin
     // DSP input, multiplier and output registers
     m_v0 <= out_valid[0];
@@ -139,10 +140,11 @@ module rx_awgn (
     e_in <= 33'(sqc) + 33'(sqd);
     p_done <= 1'b0;
     if (rst) begin
-      acc_in <= '0; acc_out <= '0; mcnt <= '0;
+      acc_in <= '0; acc_out <= '0; mcnt <= '0; mlast <= 1'b0;
     end else if (m_v2) begin
       mcnt <= mcnt + 16'd1;
-      if (mcnt == 16'hFFFF) begin
+      mlast <= mcnt == 16'hFFFE;
+      if (mlast) begin
         p_in <= 32'((acc_in + 49'(e_in)) >> 16);
         p_out <= 32'((acc_out + 49'(e_out)) >> 16);
         p_done <= 1'b1;
