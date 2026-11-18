@@ -206,6 +206,13 @@ now ~6.3k and timing is tight. If a later addition does not close, the
 first candidates are the BCH decoder's 8-position GF(2^16) Chien search
 (the "slimmer BCH" fallback) and the 8PSK demapper's stages.
 
+nbiq with eight channels (nbiq 2.1, +2.1k LUT, +1.5 tiles, +6 DSP) did not
+place on this base (post-opt 50.8k LUT, 95.4 %: the placer needed 8170 of
+7986 free slices), so the slimmer BCH went in (RX 2.1.1, VERSION
+0x0002_0101): the Chien search for normal frames does 4 positions per clock,
+two clocks per byte, about n/8 = 8.1k clocks more per frame (n/4 + Kbch/4 +
+500, at most ~33k clocks against a frame time of ~1M clocks at 2.27 MBd).
+
 ## 5. Software (station) changes needed
 
 See the hand-back list; summary: MODCOD tables with 8PSK and the short
