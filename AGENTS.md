@@ -192,7 +192,7 @@ What worked:
 - The board's wall clock was wrong until NTP was installed. Use the monotonic stamps (`clock.mono_us` in `/api/info`) for latency.
 - `plutosat tx` rejects 333000 S/s (not 12e6/integer); use 333333.
 
-## Status and open items (2026-11-06)
+## Status and open items (2026-11-18)
 
 **Done and on master:**
 
@@ -200,23 +200,21 @@ What worked:
 - RX 1.4.x fixes;
 - the stutter fixes;
 - the plutosatd systemd service;
-- BOOT.bin with the bitstream.
+- BOOT.bin with the bitstream;
+- station protocol 1.9–1.11 (not yet on the board): TX key-frame buffer auto/manual and the output power estimate with optional dBm calibration; MODCOD auto searches the PLS headers (pilots on/off, fallback sweep); narrowband transmit (SSB, RADE, CW, FT8/FT4, tones) in the daemon and web; RADE V1 digital voice in the browser (wasm);
+- the `iqtx` core (narrowband IQ transmit on HP0, exclusive with DVB-S2 TX through a source mux), simulated and timing-clean, **not yet on the board** (needs the DT node + its bitstream).
 
 **Open:**
 
-- **MODCOD "auto":** with a PLS core it still steps through all 22 MODCOD × pilots hypotheses in the background (the UI shows "N/22"), although only the pilots need trying. Proposed: alternate the pilots only, keep the full sweep for older cores or after hint-less passes, and show the last PLS decode in the UI.
 - **Not tested on air:** QO-100 has not been received or transmitted on air.
-- **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only) and a proper rx1 RF input.
-- **Not started:**
-  - PL zoom;
-  - TX power calibration in dBm;
-  - 8PSK and higher, short frames;
-  - key-frame budget measured by the browser (option B).
+- **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only); a proper rx1 RF input; iqtx and narrowband transmit.
+- **In progress (Nov 2026):** 8PSK and short frames (TX and RX, if the FPGA has room); a general background narrowband recorder (RADE with batch decoding, SSB, CW); QO-100 beacon lock (receive only); a theatre mode for the DATV RX view.
+- **Decided, not started:** nbiq to 8 channels (5 user + 3 background), to be assessed after 8PSK and iqtx have taken their resources; the buildroot firmware image with RX, FFT, plutosatd and web.
+- **Dropped:** PL zoom (the 48 kHz zoom FFT stays on the ARM: resolution and rate are bound by the data, and it would starve the shared PL FFT).
 - **Known limits:**
   - with sound on, the browser plays about 1.0–1.35 s behind (the audio buffer covers arrival jitter);
   - constellation updates drop to about 2.5 Hz per slot when both slots are viewed;
   - a PL reload under a running plutosatd is not detected (`plutosat-pl-load` stops the service for that reason).
 - **Housekeeping:**
-  - the buildroot firmware image (`boards/fishball/br2`) lacks the RX, FFT, plutosatd and web;
   - the 33 kS/s test stream should be re-encoded at ≤ 16.6 kbit/s;
   - the planning document (the user's Claude Doc "software and system plan", in Chinese) is behind this file.
