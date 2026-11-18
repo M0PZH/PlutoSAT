@@ -95,12 +95,12 @@ shorter FIFO, the same buffer bound or a looser one).
 ## Resources
 
 Out of context (`syn/ooc.tcl`, 32-bit AXI master, 100 MHz), eight channels:
-8406 LUT (860 as memory), 10356 FF, 8 BRAM tiles (2 RAMB36 + 12 RAMB18:
-the FIR's sample and coefficient memories, one NCO table per channel), 22
-DSP, WNS +1.52 ns (five channels, 2.0: 6.3k LUT, 7.0k FF, 6.5 tiles, 16
-DSP). Per channel about 520 LUT, 860 FF, 2 DSP and a RAMB18; the shared
-comb 1.7k LUT, FIR 1.0k, ring writer 1.0k. In the fishball build (`DW` 64):
-8.7k LUT, 10.4k FF.
+7995 LUT (508 as memory), 10350 FF, 8.5 BRAM tiles (2 RAMB36 + 13 RAMB18:
+the FIR's sample and coefficient memories, one NCO table per channel, the
+ring writer's staging buffer), 22 DSP, WNS +1.86 ns (five channels, 2.0:
+6.3k LUT, 7.0k FF, 6.5 tiles, 16 DSP). Per channel about 520 LUT, 860 FF,
+2 DSP and a RAMB18; the shared comb 1.7k LUT, FIR 1.0k, ring writer 0.6k
+(its staging buffer in distributed RAM, as up to 2.0, cost 411 LUT more).
 
 ## Files
 

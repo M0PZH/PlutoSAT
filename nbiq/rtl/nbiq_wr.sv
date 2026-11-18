@@ -3,7 +3,7 @@
 // its default 64-bit mode, 32 for S_AXI_GP).
 //
 // Each channel collects its samples ({Q, I}, 16 bits each) in a 64-entry
-// staging buffer and writes them as 64-byte bursts (16 beats at DW 32, 8 at
+// staging buffer (block RAM) and writes them as 64-byte bursts (16 beats at DW 32, 8 at
 // DW 64; lane l of a beat holds sample 2 k + l, i.e. little-endian) to
 // base + (wptr & mask); wptr (bytes, wraps at 2^32) advances when a burst's
 // response is back, so everything below it is in memory. mask + 1 is a
@@ -76,16 +76,24 @@ module nbiq_wr #(
 
   wire s_ok = s_valid && en[s_ch] && 7'(wc[s_ch] - rc[s_ch]) != 7'd64;
 
-  // one 64/L-deep buffer per lane and channel: sample n of a channel goes to
-  // lane n % L, so a beat reads all lanes at one address (bursts start at
-  // multiples of 16 samples)
+  // one 64/L-deep buffer per lane and channel, in block RAM: sample n of a
+  // channel goes to lane n % L, so a beat reads all lanes at one address
+  // (bursts start at multiples of 16 samples). The read address is that of
+  // the beat after this clock's handshake, so the registered output always
+  // holds the current beat (from W_ADDR on: beat 0). A burst's 16 samples
+  // are not written while it is read (the writes go to wc, at most 64 ahead
+  // of rc, and a full buffer takes no sample).
+  wire        w_hs   = st == W_BURST && m_axi_wvalid && m_axi_wready;
+  wire  [3:0] beat_n = beat + 4'(w_hs);
   for (genvar l = 0; l < L; l++) begin : g_lane
-    (* ram_style = "distributed" *) logic [31:0] stg [NCH * 64 / L];
+    (* ram_style = "block" *) logic [31:0] stg [NCH * 64 / L];
+    logic [31:0] stg_q;
     always_ff @(posedge clk) begin
       if (s_ok && 32'(wc[s_ch][5:0]) % L == l)
         stg[{s_ch, AW'(wc[s_ch][5:0] >> LB)}] <= s_data;
+      stg_q <= stg[{bc, AW'(32'(rb >> LB) + 32'(beat_n))}];
     end
-    assign m_axi_wdata[32 * l +: 32] = stg[{bc, AW'(32'(rb >> LB) + 32'(beat))}];
+    assign m_axi_wdata[32 * l +: 32] = stg_q;
   end
   assign m_axi_wlast = beat == 4'(BEATS - 1);
 
