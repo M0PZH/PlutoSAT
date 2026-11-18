@@ -237,7 +237,7 @@ def allocate(fouts, clk=CLK_HZ):
     if not fouts:
         return []
     k = len(fouts)
-    p = max(1, min(NPAIRS_MAX, math.floor(FIR_LOAD / CLK_HZ * clk / sum(fouts) + 1e-9) - 1))
+    p = max(1, min(NPAIRS_MAX, math.floor(FIR_LOAD * (clk / CLK_HZ) / sum(fouts) + 1e-9) - 1))
     while p > 1 and not fir_check(fouts, [p] * k, clk)[2]:
         p -= 1
     if not fir_check(fouts, [p] * k, clk)[2]:
