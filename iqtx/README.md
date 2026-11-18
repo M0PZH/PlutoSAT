@@ -22,7 +22,7 @@ core.
 | Gain | Q2.14, 1.0 = an int16 full-scale input gives a 16-bit full-scale DAC word (the AD9363 takes the top 12 bits); up to 4.0 (clips at 18 bits before the FIR) |
 | Ramp | raised cosine over 2^RLOG input samples on start and stop (default RLOG 8: 5.3 ms at 48 kS/s), from a 256-entry table |
 | Underrun | empty ring: the sample is replaced by zero (band-limited by the filters, no clicks beyond the signal's band) and counted |
-| Cost | out of context: 2.5k LUT, 1.8k FF, 10 DSP48, no BRAM (all tables in LUT ROM, buffers in LUTRAM), +2.57 ns at 100 MHz |
+| Cost | out of context: 2.5k LUT, 1.8k FF, 10 DSP48, no BRAM (all tables in LUT ROM, buffers in LUTRAM), +2.57 ns at 100 MHz. Fishball build with iqtx: 44.3k LUT (83.3 %), 135 BRAM tiles (unchanged), 165 DSP, WNS +0.147 ns |
 
 Arithmetic (bit-exact in `model/iqtx.py`):
 

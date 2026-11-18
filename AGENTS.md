@@ -157,7 +157,7 @@ These keep the board safe and shared.
   - **Combined symbol rate** of both slots: at most about 2.27 MBd; software refuses anything above 2.28 MS/s.
   - **History:** 1.4/1.4.1 PLS-confirmed frame sync (fixed the false lock on repeating frames such as a TS of null packets); 1.4.2 LDPC channel LLR clip ±61.
   - Full design notes: `dvbs2/README.md` ("Receiver", "Two receive slots"), `dvbs2/docs/rx2_design.md`.
-- **Utilisation and timing:** about 41.8k LUT (78.6 %), 135 of 140 BRAM tiles, 155 DSP; WNS +0.164 ns at 100 MHz.
+- **Utilisation and timing:** about 44.3k LUT (83.3 %), 135 of 140 BRAM tiles, 165 DSP; WNS +0.147 ns at 100 MHz (with iqtx: +2.5k LUT, +10 DSP, no BRAM).
   - BRAM is the limit. The fallback order (the user's decision): put the carrier's seg/zbuf back in LUTRAM, then the recovery items in rx2_design.md §8, then a slimmer BCH.
   - A false-path constraint for the slot-enable synchroniser (`en_a`) is still to be added.
 - **Station protocol 1.6** (`station/docs/api.md`):
