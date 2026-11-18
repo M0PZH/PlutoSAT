@@ -36,8 +36,16 @@
 // predicted from the decoded type; not ok: CHECK -> SEARCH, LOCKED -> SEARCH
 // after PLS_NBAD tags in a row (counted in cnt_lost).
 //
+// Probes (2.1.3, model FS_PROBE_K): in SEARCH a new search peak above
+// PROBE_K nm (from symbol DELAY on) is tagged for the PLS decoder only (m_probe: not
+// the carrier, no state change) when no decode is pending (pw_on), so that
+// a hypothesis of the wrong frame length (8PSK or short frames received with
+// a QPSK normal-frame one) still gets real headers decoded; the next tag is
+// a check >= LEN_Z - W symbols later, so every probe and tag is decoded.
+//
 // Symbols leave DELAY symbols late, m_sof on the first header symbol of each
-// frame found (m_dummy: dummy frame). 6 correlator lanes: ~34 clocks/symbol.
+// frame found (m_dummy: dummy frame), m_probe on that of a probe. 6
+// correlator lanes: ~34 clocks/symbol.
 
 module dvbs2_rx_framesync
   import dvbs2_pl_pkg::*;
@@ -47,7 +55,8 @@ module dvbs2_rx_framesync
   parameter int MAXMISS = 3,
   parameter int NCHECK  = 2,
   parameter int PLS_AT  = 3072,              // model: FS_PLS_AT
-  parameter int PLS_NBAD = 3                 // model: FS_PLS_NBAD
+  parameter int PLS_NBAD = 3,                // model: FS_PLS_NBAD
+  parameter int PROBE_SH = 3                 // model: FS_PROBE_K = 2^PROBE_SH
 ) (
   input  logic               clk,
   input  logic               rst,
@@ -69,6 +78,7 @@ module dvbs2_rx_framesync
   output logic               m_sof,
   output logic               m_dummy,
   output logic               m_found,       // with m_sof: detected (not flywheel)
+  output logic               m_probe,       // first symbol of a probe (PLS decoder only)
 
   input  logic               ty_v,
   input  logic               ty_dummy,
@@ -161,6 +171,9 @@ module dvbs2_rx_framesync
   logic [35:0] nm10;
   logic        pend_v, pend_c, pend_f;
   logic [31:0] pend_hs;
+  logic        best_new;                     // this symbol is a new search peak
+  logic        prb_v;                        // a probe pending (its first symbol: n[7:0] = prb_hs)
+  logic [7:0]  prb_hs;
   logic        nchk;                         // CHECK: headers found so far (NCHECK = 2)
   logic        chk_alt;                      // CHECK at the dummy length of a search peak
   logic [32:0] csum;                         // CHECK: sum of the metrics found
@@ -195,6 +208,7 @@ module dvbs2_rx_framesync
       pk <= '0;
       nm <= '0;
       pend_v <= 1'b0;
+      prb_v <= 1'b0;
       have_last <= 1'b0;
       ty_p <= 1'b0;
       pr_v <= 1'b0;
@@ -333,6 +347,7 @@ module dvbs2_rx_framesync
             ty_p <= 1'b0;
             if (fst != SEARCH && have_last) pred <= last_n + flen(ty_pc, len_d);
           end
+          best_new <= fst == SEARCH && (!best_v || md > best_m);
           if (fst == SEARCH && (!best_v || md > best_m)) begin
             best_v <= 1'b1; best_m <= md; best_n <= n;
           end
@@ -342,7 +357,7 @@ module dvbs2_rx_framesync
 
         S_DEC2: begin                                // search: dummy candidate
           if (fst == SEARCH && mz > best_m) begin
-            best_m <= mz; best_n <= n;
+            best_m <= mz; best_n <= n; best_new <= 1'b1;
           end
           thresh_q <= thresh;
           thr  <= (pk >> 2) > thresh ? (pk >> 2) : thresh;
@@ -370,6 +385,12 @@ module dvbs2_rx_framesync
             chk_alt <= 1'b0;
             pred <= best_n + len_d;
             win_v <= 1'b0;
+          end
+          // probe: a new search peak, no decode pending (the next tag is a
+          // check of this peak or a later one, >= LEN_Z - W symbols on)
+          if (fst == SEARCH && best_new && !(n < 32'(DELAY)) && !pw_on && 35'(best_m) > (35'(nm) << PROBE_SH)) begin
+            prb_v <= 1'b1; prb_hs <= 8'(n - 32'd89);
+            pr_v <= 1'b0; pw_on <= 1'b1; pw_cnt <= 12'(PLS_AT);
           end
           st <= S_DEC4;
         end
@@ -467,7 +488,9 @@ module dvbs2_rx_framesync
             m_sof   <= pend_v && (pend_hs == o);
             m_dummy <= pend_c;
             m_found <= pend_f;
+            m_probe <= prb_v && (prb_hs == o[7:0]);
             if (pend_v && pend_hs == o) pend_v <= 1'b0;
+            if (prb_v && prb_hs == o[7:0]) prb_v <= 1'b0;
             n <= n + 32'd1;
             if (pw_on && pw_cnt != '0) pw_cnt <= pw_cnt - 12'd1;
             st <= S_IN;

@@ -208,18 +208,18 @@ FS_CONTEXT = [
     "n", "pi_", "pq", "fst", "best_v", "best_m", "best_n", "win_v", "win_m", "win_n", "win_c",
     "cwin_m", "cwin_c", "pred", "miss", "pk", "nm", "pend_v", "pend_hs", "pend_c", "pend_f", "nchk",
     "chk_alt", "csum", "have_last", "last_n", "ty_p", "ty_pc", "pr_v", "pr_ok", "pr_dummy", "pw_on",
-    "pw_cnt", "nbad", "cnt_found", "cnt_flywheel", "cnt_lost", "nodz",
+    "pw_cnt", "nbad", "cnt_found", "cnt_flywheel", "cnt_lost", "nodz", "prb_v", "prb_hs",
 ]
 # written and read within one symbol (S_IN .. S_OUT)
 FS_TEMP = [
     "ci", "cq", "p1", "p2", "p3", "p4", "pdi", "pdq", "t", "Ad_i", "Ad_q", "Az_i", "Az_q",
-    "sqd_i", "sqd_q", "sqz_i", "sqz_q", "md", "mz", "thresh_q", "thr", "nm4", "nm10", "inwin",
+    "sqd_i", "sqd_q", "sqz_i", "sqz_q", "md", "mz", "thresh_q", "thr", "nm4", "nm10", "inwin", "best_new",
     "ad_i", "ad_q", "az_i", "az_q", "rd_ok", "rd_nd", "rd_nz",
 ]
 # the engine itself: state, correlator pipeline, memory writes, output register
 # (which carries its slot)
 FS_TRANSIENT = ["st", "iss", "rd_v", "d_we", "d_wdata", "sbuf", "m_valid", "m_i", "m_q", "m_sof", "m_dummy",
-                "m_found", "m_slot"]
+                "m_found", "m_probe", "m_slot"]
 
 # pulse inputs: the source's text, which the generator reuses for the other slot
 FS_PULSES = """      if (ty_v) begin
@@ -282,6 +282,7 @@ def make_framesync2():
   input  logic signed [15:0] s_q2 [2],
 """)
     s.rep("""  output logic               m_found,       // with m_sof: detected (not flywheel)
+  output logic               m_probe,       // first symbol of a probe (PLS decoder only)
 
   input  logic               ty_v,
   input  logic               ty_dummy,
@@ -298,6 +299,7 @@ def make_framesync2():
   output logic [15:0]        cnt_lost
 );
 """, """  output logic               m_found,       // with m_sof: detected (not flywheel)
+  output logic               m_probe,       // first symbol of a probe (PLS decoder only)
   output logic               m_slot,
 
   input  logic [1:0]         ty_v2,          // per slot (the carrier reports one at a time)

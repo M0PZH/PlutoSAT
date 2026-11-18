@@ -4,7 +4,8 @@
 // to confirm its headers (dec_busy: it waits for a decode that is not done
 // when it needs it).
 //
-// The 90 header symbols (s_sof on the first) are stored as 6-bit values;
+// The 90 header symbols (s_sof or s_probe on the first) are stored as 6-bit
+// values (block RAM pmem, with the rotation table);
 // then, for each frequency hypothesis (the carrier's frequency if it has
 // acquired, then the grid h * step, h = -H..H):
 //   rotation : 90 symbols, 4 clocks each (one multiplier): stripped of the
@@ -15,11 +16,15 @@
 //   metrics  : 8 per pass (second multiplier, overlapping the next pass):
 //              T = S +- (P1 +- P2), M = Ti^2 + Tq^2; running best / second
 //              best of the hypothesis, then the best hypothesis
-// ~1420 clocks per hypothesis (~94k with H = 32 and the carrier
+// ~1422 clocks per hypothesis (~94k with H = 32 and the carrier
 // hypothesis); a header that starts while a decode runs is skipped
 // (st_skipped). The carrier hypothesis alone decides when it gives the
 // configured PLS code or the dummy code with a metric > 2^8. Confident:
-// best > 2 x second (another code, same hypothesis) and best > 2^8.
+// best > 2 x second (another code, same hypothesis) and best > 2^8; for a
+// probe (s_probe: a frame sync search peak, decoded for the status only), or
+// a code other than the configured and the dummy (0) one, also best > 3/64
+// Er, Er = sum(ri^2 + rq^2) of the 90 stored 6-bit symbols (2.1.3: false tags
+// on data passed the first two tests 2 % of the time; model pls_confident()).
 // Widths: r 6, x 8, y 7, S and P 12, T 14 bits (no overflow), M = (Ti^2 +
 // Tq^2) >> 8, 18 bits.
 //
@@ -45,6 +50,7 @@ module dvbs2_rx_pls
   input  logic signed [15:0] s_i,
   input  logic signed [15:0] s_q,
   input  logic               s_sof,
+  input  logic               s_probe,        // first symbol of a probe (decoded like s_sof)
   input  logic [31:0]        fhat,           // carrier frequency, turns * 2^32
   input  logic               acquired,
 
@@ -59,12 +65,14 @@ module dvbs2_rx_pls
   output logic [17:0]        res_second,
   output logic [15:0]        res_freq,       // hypothesis, turns * 2^16
   output logic               res_valid,      // a decode since reset
+  output logic               res_probe,      // of a probe
   output logic [15:0]        st_count,
   output logic [6:0]         data_code,
   output logic               data_conf,
   output logic               data_car,
   output logic               data_grid,
   output logic               data_valid,
+  output logic               data_probe,
   output logic [15:0]        st_data,
   output logic [15:0]        st_diff_modcod,
   output logic [15:0]        st_diff_pilots,
@@ -79,7 +87,6 @@ module dvbs2_rx_pls
   // 64-phase table {-256 sin, 256 sin, 256 cos}: dvbs2_rx_pkg::PLS_TAB
 
   // ---------------------------------------------------------------- header capture
-  (* ram_style = "distributed" *) logic [11:0] rbuf [128];    // {q, i}, 6 bit each
   logic        col, busy, go;
   assign dec_busy = busy;
   logic [6:0]  ck;
@@ -89,6 +96,8 @@ module dvbs2_rx_pls
   logic        cpil, csh;
   logic [5:0]  ch;
   logic [9:0]  cstep;
+  logic        cprb;                         // the stored header is a probe
+  wire  [17:0] er;                           // its energy sum(ri^2 + rq^2)
 
   // sat6(v >> 9)
   function automatic logic [5:0] q6(input logic signed [15:0] v);
@@ -96,12 +105,37 @@ module dvbs2_rx_pls
     else                q6 = v[14:9];
   endfunction
 
-  // one port: written while collecting, read while decoding (busy)
+  // The stored header ({q, i}, 6 bit each, at 0..89) and the rotation table
+  // PLS_TAB (at 128..191) in one block RAM (simple dual port, registered
+  // read; the LUTs are scarcer): written while collecting, read while
+  // decoding (busy), the symbol and its table entry in two clocks of the
+  // rotation's 4-clock slot.
   logic        rb_we;
   logic [6:0]  rb_wa, rk;
   logic [11:0] rb_wd;
-  wire  [6:0]  rb_a = busy ? rk : rb_wa;
-  always_ff @(posedge clk) if (rb_we) rbuf[rb_a] <= rb_wd;
+  (* ram_style = "block" *) logic [29:0] pmem [256];
+  initial for (int i = 0; i < 64; i++) pmem[128 + i] = dvbs2_rx_pkg::PLS_TAB[i];
+  logic [7:0]  pm_ra;
+  logic [29:0] pm_q;
+  always_ff @(posedge clk) begin
+    if (rb_we) pmem[{1'b0, rb_wa}] <= 30'(rb_wd);
+    pm_q <= pmem[pm_ra];
+  end
+
+  // header energy, accumulated as the symbols are written (DSPs: the LUTs are
+  // scarcer); done before the decode starts (go is a clock after the last write)
+  (* use_dsp = "yes" *) logic signed [11:0] e_pi, e_pq;
+  (* use_dsp = "yes" *) logic [17:0] e_acc;
+  logic e_v;
+  always_ff @(posedge clk) begin
+    e_v <= rb_we && !busy;
+    e_pi <= $signed(rb_wd[5:0]) * $signed(rb_wd[5:0]);
+    e_pq <= $signed(rb_wd[11:6]) * $signed(rb_wd[11:6]);
+    // cleared as the first symbol is written (its products are added a clock later)
+    if (rb_we && !busy && rb_wa == 7'd0) e_acc <= '0;
+    else if (e_v) e_acc <= e_acc + 18'(e_pi) + 18'(e_pq);
+  end
+  assign er = e_acc;
 
   always_ff @(posedge clk) begin
     go <= 1'b0;
@@ -110,19 +144,20 @@ module dvbs2_rx_pls
       col <= 1'b0;
       st_skipped <= '0;
     end else if (s_v) begin
-      if (s_sof && busy) begin
+      if ((s_sof || s_probe) && busy) begin
         col <= 1'b0;
         st_skipped <= st_skipped + 16'd1;
-      end else if (s_sof || col) begin
+      end else if (s_sof || s_probe || col) begin
         logic [6:0] k;
-        k = s_sof ? 7'd0 : ck;
+        k = (s_sof || s_probe) ? 7'd0 : ck;
         rb_we <= 1'b1;
         rb_wa <= k;
         rb_wd <= {q6(s_q), q6(s_i)};
         ck <= k + 7'd1;
         col <= k != 7'd89;
         go  <= k == 7'd89;          // (busy rises after the write)
-        if (s_sof) begin
+        if (s_sof || s_probe) begin
+          cprb  <= s_probe && !s_sof;
           f_car <= fhat[31:16];
           acq_l <= acquired;
           cmc   <= modcod;
@@ -147,6 +182,7 @@ module dvbs2_rx_pls
 
   // rotation
   logic [1:0]  sub;
+  logic [11:0] r_h;                          // the next symbol (read at sub 2)
   logic [15:0] phi;
   logic signed [7:0] xi_r, xq_r;
   logic signed [9:0] c_r, s_r, ns_r;
@@ -172,6 +208,8 @@ module dvbs2_rx_pls
   logic [5:0]        pj;
   wire  [5:0]        y_a = y_we ? y_wa : pj;          // one port
   always_ff @(posedge clk) if (y_we) ybuf[y_a] <= y_wd;
+
+  assign pm_ra = (sub == 2'd3) ? {2'b10, 6'((phi + 16'd512) >> 10)} : {1'b0, rk};
 
   // passes
   logic [3:0]  pq;
@@ -210,6 +248,11 @@ module dvbs2_rx_pls
   wire [6:0] cfg_code = {cmc, csh, cpil};
   // confident: best > 2 second and best > 2^16 (M < 2^25.1)
   wire       gconf = 19'(gbest) > {gsecond, 1'b0} && gbest > 18'h100;
+  // ... and best > 3/64 Er, unless a tag's decode of the configured or the dummy code
+  // (best 2^6 > 3 Er as the sign of a DSP's 3 Er - best 2^6)
+  (* use_dsp = "yes" *) wire signed [25:0] e_d = $signed(26'(er) * 26'sd3) - $signed({2'b0, gbest, 6'd0});
+  wire       gstrong = e_d[25];
+  wire       conf_w = gconf && (gstrong || (!cprb && (gcode == cfg_code || gcode == 7'd0)));
   // grid frequency: -H steps at the start, then +1 step per hypothesis
   wire [15:0] fg_next = (st == D_INIT) ? fg - 16'(cstep) : fg + 16'(cstep);
 
@@ -331,13 +374,15 @@ module dvbs2_rx_pls
             hcar  <= acq_l;
             f     <= acq_l ? f_car : fg;
             gleft <= acq_l ? 7'({ch, 1'b0}) + 7'd1 : 7'({ch, 1'b0});
-            if (!acq_l) fg <= fg_next;
+            // the grid's second hypothesis (fg_next steps down in D_INIT: up to
+            // 2.1.2 the grid was -(H+1), -H .. H-2, -H twice, without H-1 and H)
+            if (!acq_l) fg <= fg + 16'(cstep);
             st <= D_HYP;
           end
         end
 
         D_HYP: begin
-          rk <= '0; sub <= '0; phi <= '0; x_v <= 1'b0;
+          rk <= '0; sub <= 2'd2; phi <= '0; x_v <= 1'b0;     // (sub 2, 3: the first symbol's reads)
           Si <= '0; Sq <= '0;
           lbest <= '0; lsecond <= '0; lcode <= '0;
           st <= D_ROT;
@@ -346,7 +391,9 @@ module dvbs2_rx_pls
         D_ROT: begin
           // slot of 4 clocks per symbol: products xi c, xq s (I), xq c,
           // xi (-s) (Q) of the symbol in x_r; the next symbol is fetched at sub 0
+          // (read from pmem at sub 2, its table entry at sub 3)
           sub <= sub + 2'd1;
+          if (sub == 2'd3) r_h <= pm_q[11:0];
           if (x_v) begin
             i_v <= 1'b1;
             i_k <= k_r;
@@ -368,13 +415,13 @@ module dvbs2_rx_pls
               logic [11:0] r;
               logic signed [7:0] ri, rq, xi, xq;
               logic [29:0] t;
-              r  = rbuf[rk];
+              r  = r_h;
               ri = 8'($signed(r[5:0]));
               rq = 8'($signed(r[11:6]));
               if (!rk[0]) begin xi = ri + rq; xq = rq - ri; end
               else        begin xi = rq - ri; xq = -ri - rq; end
               if (H0[7'd89 - rk]) begin xi = -xi; xq = -xq; end
-              t = dvbs2_rx_pkg::PLS_TAB[6'((phi + 16'd512) >> 10)];
+              t = pm_q;
               xi_r <= xi; xq_r <= xq;
               c_r <= $signed(t[9:0]); s_r <= $signed(t[19:10]); ns_r <= $signed(t[29:20]);
               k_r <= rk;
@@ -423,15 +470,16 @@ module dvbs2_rx_pls
 
         D_DONE: begin : done
           logic conf;
-          conf = gconf;
+          conf = conf_w;
           busy <= 1'b0;
           res_v <= 1'b1;
           res_valid <= 1'b1;
           res_code <= gcode; res_conf <= conf; res_car <= gcar; res_grid <= used_grid;
-          res_best <= gbest; res_second <= gsecond; res_freq <= gfreq;
+          res_best <= gbest; res_second <= gsecond; res_freq <= gfreq; res_probe <= cprb;
           st_count <= st_count + 16'd1;
           if (conf && gcode[6:2] != 5'd0) begin
             data_code <= gcode; data_conf <= conf; data_car <= gcar; data_grid <= used_grid;
+            data_probe <= cprb;
             data_valid <= 1'b1;
             st_data <= st_data + 16'd1;
             if (gcode[6:1] != {cmc, csh}) st_diff_modcod <= st_diff_modcod + 16'd1;
@@ -450,6 +498,6 @@ module dvbs2_rx_pls
   always_ff @(posedge clk)
     for (int b = 0; b < 32; b++)
       if (rst || seen_clr[b]) st_seen[b] <= 1'b0;
-      else if (st == D_DONE && gconf && !gcode[1] && gcode[6:2] == 5'(b)) st_seen[b] <= 1'b1;
+      else if (st == D_DONE && conf_w && !gcode[1] && gcode[6:2] == 5'(b)) st_seen[b] <= 1'b1;
 
 endmodule

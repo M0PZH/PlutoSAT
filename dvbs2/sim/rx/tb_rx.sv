@@ -58,7 +58,7 @@ module tb_rx;
   logic [15:0] st_ldpc_frames [2], st_ldpc_failed [2], st_bch_corrected [2], st_bch_failed [2];
   logic [1:0] st_pls_v;
   logic [6:0] st_pls_code [2], st_pls_dcode [2];
-  logic [3:0] st_pls_flags [2], st_pls_dflags [2];
+  logic [4:0] st_pls_flags [2], st_pls_dflags [2];
   logic [17:0] st_pls_best [2], st_pls_second [2];
   logic [31:0] st_pls_seen [2];
   logic [15:0] st_pls_freq [2], st_pls_count [2], st_pls_dcount [2], st_pls_diff_modcod [2], st_pls_diff_pilots [2];

@@ -1,6 +1,7 @@
 // File-driven testbench for dvbs2_rx_pls.
-//   +in=<file> "iiii qqqq sof fhat(hex) acquired", one symbol every +period= clocks
-//   +out=<file> one line per decode: "code conf car grid best second freq"
+//   +in=<file> "iiii qqqq sof fhat(hex) acquired" (sof 1: a tag, 2: a probe), one
+//   symbol every +period= clocks
+//   +out=<file> one line per decode: "code conf car grid best second freq probe"
 //   +modcod= +pilots= +short= +h= +step=
 // At the end: "tb_rx_pls: count .. data .. dcode .. diff .. .. seen .. .. grids .. skipped .."
 `timescale 1ns/1ps
@@ -12,11 +13,11 @@ module tb_rx_pls;
   logic pilots, short_fr;
   logic [5:0] cfg_h;
   logic [9:0] cfg_step;
-  logic s_v = 0, s_sof = 0, acquired = 0;
+  logic s_v = 0, s_sof = 0, s_probe = 0, acquired = 0;
   logic signed [15:0] s_i, s_q;
   logic [31:0] fhat = 0;
   logic [31:0] seen_clr = 0;
-  logic res_v, res_conf, res_car, res_grid, res_valid;
+  logic res_v, res_conf, res_car, res_grid, res_valid, res_probe, data_probe;
   logic [6:0] res_code, data_code;
   logic [17:0] res_best, res_second;
   logic [31:0] st_seen;
@@ -58,7 +59,7 @@ module tb_rx_pls;
       if (ph == 0) begin
         rc = $fscanf(fi, "%h %h %d %h %d", vi, vq, a, fh, c);
         if (rc == 5) begin
-          s_v <= 1; s_i <= vi; s_q <= vq; s_sof <= a[0]; fhat <= fh; acquired <= c[0]; n_in++;
+          s_v <= 1; s_i <= vi; s_q <= vq; s_sof <= a == 1; s_probe <= a == 2; fhat <= fh; acquired <= c[0]; n_in++;
         end else eof <= 1;
       end
       ph = (ph + 1 == period) ? 0 : ph + 1;
@@ -68,8 +69,8 @@ module tb_rx_pls;
   int idle = 0;
   always @(posedge clk) begin
     if (res_v) begin
-      $fdisplay(fo, "%02h %0d %0d %0d %05h %05h %04h", res_code, res_conf, res_car, res_grid,
-                res_best, res_second, res_freq);
+      $fdisplay(fo, "%02h %0d %0d %0d %05h %05h %04h %0d", res_code, res_conf, res_car, res_grid,
+                res_best, res_second, res_freq, res_probe);
       n_out++;
     end
     if (dut.busy || !eof) idle = 0;

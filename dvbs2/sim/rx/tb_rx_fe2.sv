@@ -60,7 +60,7 @@ module tb_rx_fe2;
     .m_valid(t_valid), .m_ready(t_ready), .m_i(t_i), .m_q(t_q), .agc_gain, .loop_integ);
 
   // ---------------------------------------------------------------- frame sync
-  logic y_valid, y_ready, y_sof, y_dummy, y_found, y_slot;
+  logic y_valid, y_ready, y_sof, y_dummy, y_found, y_probe, y_slot;
   logic signed [15:0] y_i, y_q;
   logic [1:0] ty_v2, pls_v2, pls_conf2, pls_busy2;
   logic ty_dummy;
@@ -71,7 +71,7 @@ module tb_rx_fe2;
     .clk, .rst, .rst_s, .modcod2, .pilots2, .short_fr2, .thresh2,
     .s_valid2(t_valid), .s_ready2(t_ready), .s_i2(t_i), .s_q2(t_q),
     .m_valid(y_valid), .m_ready(y_ready), .m_i(y_i), .m_q(y_q), .m_sof(y_sof), .m_dummy(y_dummy),
-    .m_found(y_found), .m_slot(y_slot), .ty_v2, .ty_dummy, .pls_v2, .pls_conf2, .pls_code2, .pls_busy2,
+    .m_found(y_found), .m_probe(y_probe), .m_slot(y_slot), .ty_v2, .ty_dummy, .pls_v2, .pls_conf2, .pls_code2, .pls_busy2,
     .fs_state2, .cnt_found2, .cnt_flywheel2, .cnt_lost2);
 
   // ---------------------------------------------------------------- carrier
@@ -107,7 +107,7 @@ module tb_rx_fe2;
   for (genvar s = 0; s < 2; s++) begin : g_pls
     dvbs2_rx_pls u_pls (
       .clk, .rst(srst[s]), .modcod(modcod2[s]), .pilots(pilots2[s]), .short_fr(short_fr2[s]), .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
-      .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof),
+      .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof), .s_probe(y_probe),
       .fhat(st_freq2[s]), .acquired(st_acquired2[s]), .seen_clr(32'd0),
       .res_v(pls_v2[s]), .res_code(pls_code2[s]), .res_conf(pls_conf2[s]), .res_car(p_car[s]),
       .res_grid(p_grid[s]), .res_best(p_best[s]), .res_second(p_second[s]), .res_freq(p_freq[s]),

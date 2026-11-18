@@ -69,8 +69,9 @@ def test_framesync_x(fs_exe, name, modcod, short, pilots, stall):
     log = rxsim.run(fs_exe, modcod=modcod, pilots=int(pilots), short=int(short), thresh=fs.T, stall=stall,
                     **{"in": fin, "out": fout})
     print(log, fs.events)
-    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1))
+    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1, 1))
     assert len(got) == nout
+    assert np.array_equal(got[:, 4], fs.probe[:nout])
     got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
     bad = np.nonzero(got_tag != tags[:nout])[0]
     assert len(bad) == 0, f"tag mismatch at {bad[:5]}"
@@ -201,3 +202,32 @@ def test_core2_short(rx_exe):
     out, log = core_run(rx_exe, "short", [dict(x=xa_, rate_idx=0, modcod=1, short=True, pilots=True, period=30),
                                            dict(x=xb_, rate_idx=5, modcod=13, short=True, pilots=False, period=75)])
     assert all(all_decoded(out[0]["dec"], bba)) and all(all_decoded(out[1]["dec"], bbb))
+
+
+def detect_signal(modcod, short, pilots, esn0, seed, nframes):
+    """Data frames only (random FECFRAME bits) through the ADC and DDC as on
+    the board, the receiver started at a random symbol of the first frame."""
+    import plsdetect_experiment as pe
+    ph, starts, _ = pe.stream_phases(modcod, short, pilots, nframes + 1, seed)
+    s0 = int(np.random.default_rng(seed + 77).integers(0, starts[1]))
+    return pe.channel_adc(m.phases_to_iq(ph[s0:]), esn0, 0.0, seed)
+
+
+def test_core2_detect(rx_exe):
+    """MODCOD detection with a QPSK normal-frame hypothesis (RX 2.1.3; board
+    finding with 2.1 .. 2.1.2: 8PSK and short-frame codes were named only by
+    PLS decodes of data, at random). Slot 0 is told QPSK 2/3 pilots and gets
+    8PSK 2/3 short frames with pilots, slot 1 is told QPSK 2/3 without pilots
+    and gets 8PSK 3/5 normal frames without pilots, both through the ADC and
+    DDC. The frame sync's probes and every decode (with the energy rule) equal
+    the model; each slot's true code is decoded confidently from a probe, and
+    no other data code confidently."""
+    xa_ = detect_signal(13, True, True, 7.0, 100, 12)
+    xb_ = detect_signal(12, False, False, 6.0, 101, 3)
+    out, log = core_run(rx_exe, "detect", [dict(x=xa_, rate_idx=5, modcod=6, pilots=True, period=40),
+                                            dict(x=xb_, rate_idx=5, modcod=6, pilots=False, period=75)])
+    for s, true in enumerate((fx.pls_code(13, 1, 1), fx.pls_code(12, 0, 0))):
+        res = out[s]["r"]["pls"].results
+        print(s, [(d["code"], d["conf"], d["probe"], d["best"]) for d in res])
+        assert any(d["conf"] and d["probe"] and d["code"] == true for d in res)
+        assert all(d["code"] in (0, true) for d in res if d["conf"])

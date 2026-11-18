@@ -96,9 +96,10 @@ def test_framesync(framesync_exe, stall, pilots, esn0, drop, tx):
     log = rxsim.run(framesync_exe, modcod=4, pilots=int(pilots), thresh=fs.T, stall=stall,
                     **{"in": fin, "out": fout})
     print(log, fs.events)
-    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1))
+    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1, 1))
     assert len(got) == nout
     assert np.array_equal(got[:, :2], sym[:nout])
+    assert np.array_equal(got[:, 4], fs.probe[:nout]), (np.nonzero(got[:, 4])[0], np.nonzero(fs.probe)[0])
     want_tag = tags[:nout]
     got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
     bad = np.nonzero(got_tag != want_tag)[0]
@@ -126,8 +127,8 @@ class PlsStandIn:
         self.pls.results = []
         self.k = -1
 
-    def step(self, si, sq, t, found):
-        if t:
+    def step(self, si, sq, t, found, probe=0):
+        if t or probe:
             self.k = 0
         elif self.k >= 0:
             self.k += 1
@@ -160,9 +161,10 @@ def test_framesync_pls(framesync_exe, name, code, conf, stall):
     log = rxsim.run(framesync_exe, modcod=4, pilots=1, thresh=fs.T, stall=stall, plsbusy=150000,
                     plscode=code, plsconf=conf, **{"in": fin, "out": fout})
     print(log, fs.events)
-    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1))
+    got = rxsim.read_hex_cols(fout, (-16, -16, 1, 1, 1))
     assert len(got) == nout
     assert np.array_equal(got[:, :2], sym[:nout])
+    assert np.array_equal(got[:, 4], fs.probe[:nout])
     got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
     bad = np.nonzero(got_tag != tags[:nout])[0]
     assert len(bad) == 0, f"tag mismatch at {bad[:5]}: {got_tag[bad[:5]]} vs {tags[:nout][bad[:5]]}"
@@ -855,7 +857,7 @@ def rx_axi_exe():
 AXI_SLOT_ARGS = {"ddccoef", "rrccoef", "modcod", "pilots", "xa", "xb", "finc", "dec", "ntaps", "shift", "cicr",
                  "cicshift", "tkp", "tki", "tinteg0", "thresh", "pkp", "pki", "maxit", "plscfg"}
 SLOT_BANK = 0x100                       # register map v2: slot s at 0x100 s, shared at 0x200
-VERSION = 0x0002_0102
+VERSION = 0x0002_0103
 
 
 def axi_args(slot, **kw):
@@ -1000,7 +1002,7 @@ def pls_word(d, n):
     if d is None:
         return n << 16
     return (n << 16) | (1 << 15) | (int(d["grid"]) << 14) | (int(d["carrier_hyp"]) << 13) | \
-        (int(d["conf"]) << 12) | (d["short"] << 9) | (d["pilots"] << 8) | d["modcod"]
+        (int(d["conf"]) << 12) | (int(d["probe"]) << 10) | (d["short"] << 9) | (d["pilots"] << 8) | d["modcod"]
 
 
 def check_pls_regs(regs, lines, pls, modcod, pilots, slot=0):
@@ -1338,9 +1340,9 @@ class _PlsRec(fx.PlsDecoder):
         super().__init__(*a, **kw)
         self.rec = []
 
-    def step(self, si, sq, t, fhat, acquired):
-        self.rec.append((si, sq, int(t != 0), fhat & 0xFFFFFFFF, int(acquired)))
-        super().step(si, sq, t, fhat, acquired)
+    def step(self, si, sq, t, fhat, acquired, probe=0):
+        self.rec.append((si, sq, 1 if t else 2 if probe else 0, fhat & 0xFFFFFFFF, int(acquired)))
+        super().step(si, sq, t, fhat, acquired, probe)
 
 
 def pls_run(x, rx_modcod, rx_pilots, H=fx.PLS_H_DEFAULT, step=fx.PLS_STEP_DEFAULT):
@@ -1400,7 +1402,7 @@ def test_pls(pls_exe, name, tx, rx, esn0, cfo, lead, nfr, period, H):
     log = rxsim.run(pls_exe, modcod=rx[0], pilots=int(rx[1]), period=period, h=H, **{"in": fin, "out": fout})
     print(log)
     got = [tuple(int(v, 16) for v in l.split()) for l in open(fout)]
-    want = [pls_line(d) for d in p.results]
+    want = [pls_line(d) + (int(d["probe"]),) for d in p.results]
     print("model", want, "acq", cr.n_acq, "fhat", cr.fhat / 2 ** 32)
     true_code = fx.pls_code(tx[0] + 1, 0, tx[1])
     if name == "skip":
@@ -1415,11 +1417,14 @@ def test_pls(pls_exe, name, tx, rx, esn0, cfo, lead, nfr, period, H):
     assert re.search(f"count {st['count']} data {st['data_count']} dcode {dcode} dvalid {int(dcode != '..')} "
                      f"diff {st['diff_modcod']} {st['diff_pilots']} seen {st['seen']:08x} skipped 0", log)
     conf = [d for d in p.results if d["conf"]]
-    data = [k for k, d in enumerate(p.results) if d["conf"] and d["code"] == true_code]
+    # tag decodes only (probes come in between)
+    data = [k for k, d in enumerate([d for d in p.results if not d["probe"]])
+            if d["conf"] and d["code"] == true_code]
+    # no confident decode of another code (2.1.3: the energy rule; before, the
+    # data the frame sync tags with the wrong pilots decoded confidently as random codes)
+    assert all(d["code"] in (0, true_code) for d in conf), [(d["code"], d["best"], d["er"]) for d in conf]
     if name == "pilots_untold":
-        assert not data
         return
-    assert all(d["code"] in (0, true_code) for d in conf), [d["code"] for d in conf]
     assert data and data[0] <= (lead if lead else 1), data
     if name == "lowsnr":
         assert any(d["carrier_hyp"] and not d["grid"] for d in p.results)

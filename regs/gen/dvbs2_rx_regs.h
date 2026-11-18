@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00020102u
+#define DVBS2_RX_VERSION_VALUE 0x00020103u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -37,7 +37,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0002_0102 = 2.1.2: the BCH Chien search 4 positions per clock (fewer LUTs, about n/8 more clocks per frame); 0x0002_0101 = 2.1.1: pilots off, the carrier's PLL is not driven by the PLHEADERs (no false lock at k / frame length), and with QPSK a lock detector and a frequency search after the acquisition (CARRIER_ACQ.FALSE_LOCK counts its steps) (2.1: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD.SHORT, HDR.SHORT); 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)) */
+/* VERSION (ro): Core version, 0x0002_0103 = 2.1.3: MODCOD detection with any hypothesis: the frame sync probes its search peaks (PLS_LAST/PLS_DATA.PROBE), so 8PSK and short-frame headers are decoded with a QPSK normal-frame hypothesis, and a decode of another code than the configured one is confident only above 3/64 of the header window's energy (no confident decodes of data tagged as a header); 0x0002_0102 = 2.1.2: the BCH Chien search 4 positions per clock (fewer LUTs, about n/8 more clocks per frame); 0x0002_0101 = 2.1.1: pilots off, the carrier's PLL is not driven by the PLHEADERs (no false lock at k / frame length), and with QPSK a lock detector and a frequency search after the acquisition (CARRIER_ACQ.FALSE_LOCK counts its steps) (2.1: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD.SHORT, HDR.SHORT); 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)) */
 #define DVBS2_RX_VERSION 0x200
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -459,7 +459,11 @@
 #define DVBS2_RX_SLOT_PLS_LAST_SHORT_SHIFT 9
 #define DVBS2_RX_SLOT_PLS_LAST_SHORT_WIDTH 1
 #define DVBS2_RX_SLOT_PLS_LAST_SHORT_MASK 0x00000200u
-/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
+/*   [10] PROBE: From 0x0002_0103: the decode of a frame sync probe (a search peak decoded for detection only; the frame sync does not use it), not of a tagged header */
+#define DVBS2_RX_SLOT_PLS_LAST_PROBE_SHIFT 10
+#define DVBS2_RX_SLOT_PLS_LAST_PROBE_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_LAST_PROBE_MASK 0x00000400u
+/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8; from 0x0002_0103, for a probe's decode or a code other than the configured one and the dummy code (0), also best x 64 > 3 x the header window's energy (sum of the squared 6-bit symbol values): data tagged as a header passed the first two tests ~2 % of the time, this one ~1e-8 */
 #define DVBS2_RX_SLOT_PLS_LAST_CONF_SHIFT 12
 #define DVBS2_RX_SLOT_PLS_LAST_CONF_WIDTH 1
 #define DVBS2_RX_SLOT_PLS_LAST_CONF_MASK 0x00001000u
@@ -494,7 +498,11 @@
 #define DVBS2_RX_SLOT_PLS_DATA_SHORT_SHIFT 9
 #define DVBS2_RX_SLOT_PLS_DATA_SHORT_WIDTH 1
 #define DVBS2_RX_SLOT_PLS_DATA_SHORT_MASK 0x00000200u
-/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8 */
+/*   [10] PROBE: From 0x0002_0103: the decode of a frame sync probe (a search peak decoded for detection only; the frame sync does not use it), not of a tagged header */
+#define DVBS2_RX_SLOT_PLS_DATA_PROBE_SHIFT 10
+#define DVBS2_RX_SLOT_PLS_DATA_PROBE_WIDTH 1
+#define DVBS2_RX_SLOT_PLS_DATA_PROBE_MASK 0x00000400u
+/*   [12] CONF: Confident: best > 2 x the best other code at the same frequency and best > 2^8; from 0x0002_0103, for a probe's decode or a code other than the configured one and the dummy code (0), also best x 64 > 3 x the header window's energy (sum of the squared 6-bit symbol values): data tagged as a header passed the first two tests ~2 % of the time, this one ~1e-8 */
 #define DVBS2_RX_SLOT_PLS_DATA_CONF_SHIFT 12
 #define DVBS2_RX_SLOT_PLS_DATA_CONF_WIDTH 1
 #define DVBS2_RX_SLOT_PLS_DATA_CONF_MASK 0x00001000u

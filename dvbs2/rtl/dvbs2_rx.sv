@@ -126,13 +126,13 @@ module dvbs2_rx #(
   // PLS decoders (dvbs2_rx_pls), per slot: the last decode, the last confident data decode, counters
   output logic [1:0]         st_pls_v,       // pulse: a decode
   output logic [6:0]         st_pls_code [2],  // {MODCOD, short frame, pilots}
-  output logic [3:0]         st_pls_flags [2], // {valid, grid searched, carrier hypothesis, confident}
+  output logic [4:0]         st_pls_flags [2], // {probe, valid, grid searched, carrier hypothesis, confident}
   output logic [17:0]        st_pls_best [2],
   output logic [17:0]        st_pls_second [2],
   output logic [15:0]        st_pls_freq [2],  // turns * 2^16 per symbol
   output logic [15:0]        st_pls_count [2],
   output logic [6:0]         st_pls_dcode [2],
-  output logic [3:0]         st_pls_dflags [2],
+  output logic [4:0]         st_pls_dflags [2],
   output logic [15:0]        st_pls_dcount [2],
   output logic [15:0]        st_pls_diff_modcod [2],
   output logic [15:0]        st_pls_diff_pilots [2],
@@ -213,7 +213,7 @@ module dvbs2_rx #(
   assign snap_t_q = t_q;
 
   // ---------------------------------------------------------------- frame sync
-  logic               y_valid, y_ready, y_sof, y_dummy, y_found, y_slot;
+  logic               y_valid, y_ready, y_sof, y_dummy, y_found, y_probe, y_slot;
   logic signed [15:0] y_i, y_q;
   logic [1:0]         ty_v2, pls_busy2;               // carrier / PLS decoders -> frame sync
   logic               ty_dummy;
@@ -227,7 +227,7 @@ module dvbs2_rx #(
     .clk, .rst, .rst_s, .modcod2(modcod), .pilots2(pilots), .short_fr2(short_fr), .thresh2(fs_thresh),
     .s_valid2(t_valid), .s_ready2(t_ready), .s_i2(t_i), .s_q2(t_q),
     .m_valid(y_valid), .m_ready(y_ready), .m_i(y_i), .m_q(y_q), .m_sof(y_sof), .m_dummy(y_dummy),
-    .m_found(y_found), .m_slot(y_slot), .ty_v2, .ty_dummy,
+    .m_found(y_found), .m_probe(y_probe), .m_slot(y_slot), .ty_v2, .ty_dummy,
     .pls_v2(st_pls_v), .pls_conf2, .pls_code2(st_pls_code), .pls_busy2,
     .fs_state2(st_fs_state), .cnt_found2(st_fs_found), .cnt_flywheel2(st_fs_flywheel), .cnt_lost2(st_fs_lost));
 
@@ -259,11 +259,12 @@ module dvbs2_rx #(
     dvbs2_rx_pls u_pls (
       .clk, .rst(srst[s]), .modcod(modcod[s]), .pilots(pilots[s]), .short_fr(short_fr[s]),
       .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
-      .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof),
+      .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof), .s_probe(y_probe),
       .fhat(st_freq[s]), .acquired(c_acquired[s]), .seen_clr(pls_seen_clr[s]),
       .res_v(st_pls_v[s]), .res_code(st_pls_code[s]), .res_conf(st_pls_flags[s][0]),
       .res_car(st_pls_flags[s][1]), .res_grid(st_pls_flags[s][2]), .res_best(st_pls_best[s]),
       .res_second(st_pls_second[s]), .res_freq(st_pls_freq[s]), .res_valid(st_pls_flags[s][3]),
+      .res_probe(st_pls_flags[s][4]), .data_probe(st_pls_dflags[s][4]),
       .st_count(st_pls_count[s]),
       .data_code(st_pls_dcode[s]), .data_conf(st_pls_dflags[s][0]), .data_car(st_pls_dflags[s][1]),
       .data_grid(st_pls_dflags[s][2]), .data_valid(st_pls_dflags[s][3]), .st_data(st_pls_dcount[s]),

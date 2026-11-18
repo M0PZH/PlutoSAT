@@ -1,9 +1,9 @@
 // File-driven testbench for dvbs2_rx_framesync.
-//   +in=<file> symbols "iiii qqqq"; +out=<file> "iiii qqqq sof dummy"
+//   +in=<file> symbols "iiii qqqq"; +out=<file> "iiii qqqq sof dummy probe"
 //   +modcod= +pilots= +short= +thresh= +stall=<percent>
 //   +plsbusy=<clocks> (0: no PLS decoder) +plscode= +plsconf=: a PLS decoder
 //   stand-in that is busy for that many clocks after the 90th symbol of each
-//   tagged header, then reports that code
+//   tagged header or probe, then reports that code
 `timescale 1ns/1ps
 module tb_rx_framesync;
   logic clk = 0, rst = 1;
@@ -16,7 +16,7 @@ module tb_rx_framesync;
   logic signed [15:0] s_i, s_q;
   logic m_valid, m_ready = 0;
   logic signed [15:0] m_i, m_q;
-  logic m_sof, m_dummy, m_found;
+  logic m_sof, m_dummy, m_found, m_probe;
   logic ty_v = 0, ty_dummy = 0;
   logic pls_v = 0, pls_conf = 0, pls_busy = 0;
   logic [6:0] pls_code = '0;
@@ -67,7 +67,7 @@ module tb_rx_framesync;
   always @(posedge clk) begin
     pls_v <= 0;
     if (pls_clk != 0 && m_valid && m_ready) begin
-      if (m_sof) pls_k = 0;
+      if (m_sof || m_probe) pls_k = 0;
       else if (pls_k >= 0) pls_k++;
       if (pls_k == 89) begin
         pls_k = -1;
@@ -89,7 +89,7 @@ module tb_rx_framesync;
   always @(posedge clk) begin
     m_ready <= ($urandom % 100) >= stall;
     if (m_valid && m_ready) begin
-      $fdisplay(fo, "%04h %04h %0d %0d", m_i, m_q, m_sof, m_dummy);
+      $fdisplay(fo, "%04h %04h %0d %0d %0d", m_i, m_q, m_sof, m_dummy, m_probe);
       n_out++;
       idle = 0;
     end else idle++;

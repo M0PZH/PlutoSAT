@@ -1,7 +1,7 @@
 // File-driven testbench for dvbs2_rx_framesync2 (run by sim/rx/test_rx2.py):
 // two slots from their own files.
 //   +in0= +in1=   symbols "iiii qqqq"
-//   +out0= +out1= "iiii qqqq sof dummy"; a line "reset" where the slot was reset
+//   +out0= +out1= "iiii qqqq sof dummy probe"; a line "reset" where the slot was reset
 //   +modcod0= +pilots0= +thresh0= (and slot 1), +stall0= +stall1= percent
 //   (per-slot input gaps; the output backpressure uses slot 0's)
 //   +plsbusy0= +plscode0= +plsconf0= (and slot 1): a PLS decoder stand-in per
@@ -19,7 +19,7 @@ module tb_rx_framesync2;
   logic [31:0] thresh2 [2];
   logic [1:0] s_valid2 = 0, s_ready2;
   logic signed [15:0] s_i2 [2], s_q2 [2];
-  logic m_valid, m_ready = 0, m_sof, m_dummy, m_found, m_slot;
+  logic m_valid, m_ready = 0, m_sof, m_dummy, m_found, m_probe, m_slot;
   logic signed [15:0] m_i, m_q;
   logic [1:0] ty_v2 = 0;
   logic ty_dummy = 0;
@@ -91,7 +91,7 @@ module tb_rx_framesync2;
         pls_k[s] = -1;
       end else begin
         if (pls_clk[s] != 0 && m_valid && m_ready && m_slot == s[0]) begin
-          if (m_sof) pls_k[s] = 0;
+          if (m_sof || m_probe) pls_k[s] = 0;
           else if (pls_k[s] >= 0) pls_k[s]++;
           if (pls_k[s] == 89) begin
             pls_k[s] = -1;
@@ -118,7 +118,7 @@ module tb_rx_framesync2;
     if (dut.pls_hold && dut.st == 0) holds++;
     m_ready <= ($urandom % 100) >= stall[0];
     if (m_valid && m_ready) begin
-      $fdisplay(fo[m_slot], "%04h %04h %0d %0d", m_i, m_q, m_sof, m_dummy);
+      $fdisplay(fo[m_slot], "%04h %04h %0d %0d %0d", m_i, m_q, m_sof, m_dummy, m_probe);
       n_out[m_slot]++;
       idle = 0;
     end else idle++;

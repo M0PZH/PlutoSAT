@@ -23,7 +23,9 @@
 // adds 0x100 s to the 1.x offsets; VERSION, ID and SCRATCH read the same in
 // every bank. The slot's settings are static while it runs: change them with
 // the slot disabled or in its soft reset.
-//   0x200 VERSION     RO  0x0002_0102: the BCH Chien search 4 positions per clock
+//   0x200 VERSION     RO  0x0002_0103: MODCOD detection with a hypothesis of another
+//                         frame length (frame sync probes, the PLS energy rule)
+//                         (0x0002_0102: the BCH Chien search 4 positions per clock)
 //                         (0x0002_0101: pilots off, the carrier's PLL is not driven by the
 //                         headers, and a lock detector with a frequency search after the
 //                         acquisition (QPSK) (0x0002_0100: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD
@@ -129,9 +131,12 @@
 //   +0xB4 BCH_BITERR  RO  bit errors corrected by BCH (post-LDPC errors), wraps
 //   PLS decoder of the slot (dvbs2_rx_pls.sv, model/rxfixed.py pls_decode()): the PLS
 //   code of every PLHEADER the frame sync tags, whatever MODCOD/pilots are configured
-//   (detection; also the frame sync's header confirmation). Confident: best > 2 x
-//   second and best > 2^8.
+//   (detection; also the frame sync's header confirmation), and from 0x0002_0103
+//   the frame sync's search-peak probes. Confident: best > 2 x second and best >
+//   2^8, and for a probe or a code other than the configured / dummy one best >
+//   3/64 of the header window's energy.
 //   +0xB8 PLS_LAST    RO  the last decode: [4:0] MODCOD, [8] pilots, [9] short frame,
+//                         [10] a probe's decode (0x0002_0103),
 //                         [12] confident, [13] from the carrier's frequency, [14] the
 //                         frequency grid was searched, [15] valid (a decode since reset),
 //                         [31:16] decodes (wraps)
@@ -222,7 +227,7 @@ module dvbs2_rx_axi #(
   output logic        m_axi_rready
 );
 
-  localparam logic [31:0] VERSION = 32'h0002_0102;
+  localparam logic [31:0] VERSION = 32'h0002_0103;
   wire clk = s_axi_aclk;
 
   // ---------------------------------------------------------------- registers
@@ -442,7 +447,7 @@ module dvbs2_rx_axi #(
   logic [15:0] st_acq [2], st_fa [2], st_retype [2];
   logic [1:0]  pls_v;
   logic [6:0]  pls_code [2], pls_dcode [2];
-  logic [3:0]  pls_flags [2], pls_dflags [2];
+  logic [4:0]  pls_flags [2], pls_dflags [2];
   logic [17:0] pls_best [2], pls_second [2];
   logic [31:0] pls_seen [2];
   logic [15:0] pls_freq [2], pls_count [2], pls_dcount [2], pls_diff_m [2], pls_diff_p [2], pls_skipped [2];
@@ -482,9 +487,9 @@ module dvbs2_rx_axi #(
     .m_axi_arburst, .m_axi_arcache, .m_axi_arvalid, .m_axi_arready, .m_axi_rdata, .m_axi_rresp,
     .m_axi_rlast, .m_axi_rvalid, .m_axi_rready);
 
-  // {MODCOD, short, pilots} + {valid, grid, carrier, confident} -> PLS_LAST / PLS_DATA fields
-  function automatic logic [15:0] pls_word(input logic [6:0] c, input logic [3:0] fl);
-    pls_word = {fl, 2'd0, c[1], c[0], 3'd0, c[6:2]};
+  // {MODCOD, short, pilots} + {probe, valid, grid, carrier, confident} -> PLS_LAST / PLS_DATA fields
+  function automatic logic [15:0] pls_word(input logic [6:0] c, input logic [4:0] fl);
+    pls_word = {fl[3:0], 1'b0, fl[4], c[1], c[0], 3'd0, c[6:2]};
   endfunction
 
   // ---------------------------------------------------------------- constellation snapshot

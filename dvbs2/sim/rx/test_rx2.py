@@ -198,15 +198,15 @@ def test_framesync2(framesync2_exe, name, kws, stall, rst_at):
             plus.update({f"plsbusy{s}": busy, f"plscode{s}": code, f"plsconf{s}": conf})
         if rst_at[s] is not None:
             plus[f"rst{s}at"] = rst_at[s]
-        want.append((sym[:nout], tags, fs.events))
+        want.append((sym[:nout], tags, fs.events, fs.probe[:nout]))
     log = rxsim.run(framesync2_exe, **plus)
     print(log)
     for s in range(2):
-        segs = read_segments(plus[f"out{s}"], (-16, -16, 1, 1))
+        segs = read_segments(plus[f"out{s}"], (-16, -16, 1, 1, 1))
         if want[s] is None:
             assert len(segs) == 1 and len(segs[0]) == 0
             continue
-        sym, tags, ev = want[s]
+        sym, tags, ev, probe = want[s]
         print(f"slot {s} events", ev)
         assert len(segs) == (1 if rst_at[s] is None else 2)
         for k, got in enumerate(segs):
@@ -216,6 +216,7 @@ def test_framesync2(framesync2_exe, name, kws, stall, rst_at):
             got_tag = np.where(got[:, 2] == 1, 1 + got[:, 3], 0)
             bad = np.nonzero(got_tag != tags[:n])[0]
             assert len(bad) == 0, f"slot {s}: tag mismatch at {bad[:5]}: {got_tag[bad[:5]]} vs {tags[bad[:5]]}"
+            assert np.array_equal(got[:, 4], probe[:n]), f"slot {s}: probes"
         kinds = [e[0] for e in ev]
         assert kinds.count("found") >= 2
     if name == "pls_wait":
