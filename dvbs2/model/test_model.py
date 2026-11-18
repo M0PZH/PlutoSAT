@@ -153,7 +153,9 @@ def test_rx_falselock_null_ts():
         nwrong = next(k for k, c in enumerate(cl) if c[2])
         assert 1 <= nwrong <= 2 and all(ok for _, _, ok in cl[nwrong:]) and len(cl) - nwrong >= 3, cl
         assert [e[0] for e in r["fs"].events].count("pls_drop") == nwrong
-        assert sum(1 for d in r["pls"].results if d["conf"] and d["modcod"] == 11) == len(cl) - nwrong
+        # (tags; the frame sync's probes decode headers too, 2.1.3)
+        assert sum(1 for d in r["pls"].results if d["conf"] and d["modcod"] == 11 and not d["probe"]) == \
+            len(cl) - nwrong
 
 
 def test_rx_start_np14():
@@ -221,3 +223,55 @@ def test_rx_falselock_cycle():
     out = rf.gr_ldpc_decode_llr(np.array(cr.frames), 0)
     dec = [any(np.array_equal(out[j * kb:(j + 1) * kb], b) for b in bb) for j in range(len(out) // kb)]
     assert len(dec) >= 3 and all(dec)
+
+
+@pytest.mark.parametrize("modcod,short,pilots,esn0,within", [(13, 1, 1, 7.0, 70000), (12, 0, 0, 6.0, 70000),
+                                                             (6, 1, 0, 3.5, 70000), (17, 0, 1, 11.0, 70000),
+                                                             (1, 1, 1, -2.0, 100000)])
+def test_rx_detect_other_length(modcod, short, pilots, esn0, within):
+    """Board finding (RX 2.1 .. 2.1.2, MODCOD auto / `dvbs2-rx --detect`):
+    with a QPSK normal-frame hypothesis configured, 8PSK and short frames were
+    not identified. The frame sync checks its search peaks at the configured
+    frame length, so it tagged data, never a real header, and the PLS decodes
+    of the data passed the confidence test ~2 % of the time, naming random
+    codes. Now the frame sync probes its search peaks (FS_PROBE_K) and a
+    decode of another code is confident only above 3/64 of the window's
+    energy. Through the ADC and DDC (the board's front end), QPSK 2/3 normal
+    with the signal's pilots configured: the true code is decoded confidently
+    within ~2 QPSK normal frames of symbols from the start (~3 for QPSK 1/4
+    short frames at -2 dB) (the AGC settling
+    from above leaves a stale search peak for the first one), and no other
+    data code is decoded confidently; without the probes the true code is not
+    decoded at all."""
+    import plsdetect_experiment as pe
+    true = (modcod << 2) | (short << 1) | pilots
+    r = pe.run(modcod, short, pilots, esn0, 100, cfg=(6, pilots, 0), nframes=12 if short else 5, chain="adc")
+    assert r["first"] is not None and r["first"] < within, r["first"]
+    assert all(d["code"] in (0, true) for d in r["dec"] if d["conf"]), r["dec"]
+    if (modcod, short) != (6, 0):
+        r0 = pe.run(modcod, short, pilots, esn0, 100, cfg=(6, pilots, 0), nframes=12 if short else 5, chain="adc",
+                    probe_k=0)
+        assert r0["first"] is None
+
+
+def test_pls_energy_rule():
+    """PLS decodes of data windows (what the frame sync tags with a hypothesis
+    of the wrong frame length), 8PSK and QPSK at high SNR through the
+    receiver's AGC: best > 2 x second and best > 2^8 (the rule up to RX 2.1.2)
+    passed ~2 % of them, the energy rule (best > 3/64 Er) none; real headers
+    of QPSK 1/4 short frames at -2.4 dB pass it."""
+    import plsdetect_experiment as pe
+    import rxfixed as fx
+    old = new = n = 0
+    hdr = []
+    for mc, sh, p, e, s, nf in [(13, 0, 1, 20.0, 1, 3), (17, 1, 0, 25.0, 2, 10), (11, 0, 1, 15.0, 3, 3)]:
+        for real, code, best, second, other, er2, _ in pe.pls_windows(mc, sh, p, e, s, nframes=nf, ndata=600):
+            if real:
+                continue
+            n += 1
+            old += fx.pls_confident(best, second)
+            new += fx.pls_confident(best, second, code, None, er2 // 2)
+    assert n > 1500 and old > 0.01 * n and new == 0, (n, old, new)
+    w = pe.pls_windows(1, 1, 1, -2.4, 7, nframes=16, ndata=0)
+    ok = [fx.pls_confident(b, s2, c, None, er2 // 2) for real, c, b, s2, _, er2, _ in w]
+    assert len(ok) >= 10 and sum(ok) >= len(ok) - 1, ok

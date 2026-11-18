@@ -438,6 +438,24 @@ FS_PLS_AT = 3072
 FS_PLS_NBAD = 3
 FS_CHK1 = 4
 FS_CHK2 = 10
+# Probes (2.1.3): in SEARCH, a new search peak above max(threshold,
+# FS_PROBE_K x the mean metric) is tagged for the PLS decoder only (not the
+# carrier, not the frame sync's states), if no tag's or probe's decode is
+# pending (FS_PLS_AT): the next tag after a probe is a check of that peak or
+# of a later one, >= L_DUMMY - FS_W symbols on, so every probe and tag is
+# decoded. The CHECK tags are positioned by the configured frame length;
+# with a hypothesis of another length (MODCOD auto and `dvbs2-rx --detect`
+# start with a QPSK normal-frame one) the checks land on data, and the real
+# headers of 8PSK or short frames were never tagged. The search peak of a
+# stretch of signal is its header (with the configured pilots, the header of
+# any QPSK / 8PSK code correlates with the configured one at 0.64..1 of its
+# amplitude, 8PSK 8/9 and 9/10 at ~0.3-0.4), so its decode names the code.
+# The probe decodes are status only (PLS_LAST / PLS_DATA, PROBE flag); they
+# are confident by the energy rule only (see pls_confident). FS_PROBE_K = 8:
+# the 8PSK 8/9, 9/10 headers at their thresholds are ~10-14 x the mean metric
+# with a QPSK hypothesis; 16 missed them, 4 probed data more often (each probe
+# blocks the next for FS_PLS_AT symbols).
+FS_PROBE_K = 8
 L_DUMMY = 90 + 36 * 90
 
 
@@ -494,6 +512,7 @@ class FrameSync:
         self.L = [frame_len(pilots, modcod, short), L_DUMMY]
         self.T = fs_threshold() if thresh is None else thresh
         self.code = pls_code(modcod, int(short), pilots)
+        self.probe_k = FS_PROBE_K
 
     def pls_ok(self, d):
         """(ok, dummy) of a PLS decode: confident, and the configured code or
@@ -522,7 +541,9 @@ class FrameSync:
         n = len(sym)
         tags = np.zeros(n, np.int8)
         found = np.zeros(n, np.int8)
+        probe = np.zeros(n, np.int8)
         self.found = found
+        self.probe = probe
         self.st = self.SEARCH
         best = None           # (m, n, c)
         self.pred = 0
@@ -548,7 +569,7 @@ class FrameSync:
         for k in range(n):
             if k == pls_at:
                 pls_at = None
-                if len(pls.results) > pls_n:
+                if pls is not None and len(pls.results) > pls_n:
                     ok, dummy = self.pls_ok(pls.results[-1])
                     if ok and self.st != self.SEARCH and self.have_last:
                         self.pred = self.last_n + self.L[int(dummy)]
@@ -586,6 +607,12 @@ class FrameSync:
                 # cycles with the frame, a frame length apart each time, which
                 # the carrier takes for confirmed headers, and keeps the search
                 # from ever reaching the real header
+                # probe: a new search peak, no decode pending (FS_PROBE_K)
+                if (best[1] == k and k > 88 and pls_at is None and self.probe_k
+                        and best[0] > max(self.T, self.probe_k * self.nm)):
+                    probe[k - 89] = 1
+                    pls_at, pls_n = k + FS_PLS_AT, len(pls.results) if pls is not None else 0
+                    self.events.append(("probe", k - 89, best[2], best[0]))
                 if k == best[1] + L_DUMMY - FS_W and not nodz:
                     self.st = self.CHECK
                     self.nchk = 0
@@ -622,8 +649,7 @@ class FrameSync:
                         ok = win[0] > max(self.T, pk >> 2)
                     if ok:
                         tags[win[1] - 89] = 1 + win[2]
-                        if pls is not None:
-                            pls_at, pls_n = k + FS_PLS_AT, len(pls.results)
+                        pls_at, pls_n = k + FS_PLS_AT, len(pls.results) if pls is not None else 0
                         found[win[1] - 89] = 1
                         self.events.append(("found", win[1] - 89, win[2], win[0]))
                         if self.st == self.CHECK:
@@ -652,15 +678,14 @@ class FrameSync:
                             self.events.append(("lost", k))
                         else:
                             tags[self.pred - 89] = 1 + win[2]
-                            if pls is not None:
-                                pls_at, pls_n = k + FS_PLS_AT, len(pls.results)
+                            pls_at, pls_n = k + FS_PLS_AT, len(pls.results) if pls is not None else 0
                             self.events.append(("flywheel", self.pred - 89, win[2], win[0]))
                             self.last_n, self.have_last = self.pred, True
                             self.pred = self.pred + self.L[win[2]]
                     win = None
             if carrier is not None and k >= FS_DELAY:
                 o = k - FS_DELAY
-                carrier.step(int(sym[o][0]), int(sym[o][1]), int(tags[o]), int(found[o]))
+                carrier.step(int(sym[o][0]), int(sym[o][1]), int(tags[o]), int(found[o]), int(probe[o]))
         return tags, max(0, n - FS_DELAY)
 
 
@@ -1060,10 +1085,11 @@ class Carrier:
             self.step(int(sym[k][0]), int(sym[k][1]), int(tags[k]), 0 if found is None else int(found[k]))
         return self.frames
 
-    def step(self, si, sq, t, found=0):
+    def step(self, si, sq, t, found=0, probe=0):
         if self.pls is not None:
-            # the decoder taps the carrier's input (state before this symbol)
-            self.pls.step(si, sq, t, self.fhat, self.acquired)
+            # the decoder taps the carrier's input (state before this symbol);
+            # probe: a frame sync search peak for the decoder only
+            self.pls.step(si, sq, t, self.fhat, self.acquired, probe)
         self.upd = 0
         if t:
             # confirmed: the next header detected a frame length later; the
@@ -1366,11 +1392,27 @@ class Carrier:
 # hypothesis, q, b6, a4, b5), second = the largest metric of another code
 # at the same hypothesis (another code at another frequency gets ~1/2 of a
 # noiseless header's metric, at the same frequency <= 0.18), confident =
-# best > 2 x second and best > 2^8. The carrier hypothesis ends the
-# decode when its code is the configured or the dummy one and best > 2^8.
-# At low SNR a wrong code at a wrong grid frequency can win with a large
-# metric (3e-4 of the headers at -2.4 dB with H = 32): such errors look
-# confident, so a detection should want a few equal decodes in a row.
+# best > 2 x second and best > 2^8, and for a code other than the configured
+# and the dummy one also best > 3/64 x Er, Er = sum(ri^2 + rq^2) of the 90
+# stored symbols (the header window's energy; see below). The carrier
+# hypothesis ends the decode when its code is the configured or the dummy
+# one and best > 2^8. At low SNR a wrong code at a wrong grid frequency can
+# win with a large metric (3e-4 of the headers at -2.4 dB with H = 32): such
+# errors look confident, so a detection should want a few equal decodes in a
+# row.
+#
+# The energy rule (2.1.3): symbols that are not a header (a frame sync tag on
+# data, e.g. with a hypothesis of the wrong frame length) decode as the best
+# of 128 x 65 random correlations, and the best-to-second test alone passed
+# 2 % of them (board, QPSK 2/3 configured, 8PSK and short frames sent: random
+# MODCODs named confidently with metrics 160-320, a real header ~1950). With
+# the AGC, Er is ~11.7k for headers and data alike; best / Er on data windows
+# (35k windows, QPSK and 8PSK, -2.4..30 dB): 99.9 % below 0.0285, the largest
+# 0.035, the tail falling ~26 x per 0.005 (so ~1e-8 above 3/64 = 0.047); real
+# headers (QPSK 1/4 short pilots, 592 per point) below 3/64: 6.9 % at -3 dB,
+# 1.4 % at -2.4 dB, 0.7 % at -2 dB, 0.2 % at -1 dB, none from 0 dB. Being a
+# ratio, it also holds while the AGC settles (data metrics scale with the
+# gain squared, as Er does).
 
 PLS_RB = 9                  # header symbols: sat6(s >> 9)
 PLS_PHB = 6                 # rotation phases 2^6
@@ -1379,6 +1421,8 @@ PLS_STEP_DEFAULT = 262      # 0.004 turns/symbol * 2^16
 PLS_CONF_SH = 1             # confident: best > second << 1 ...
 PLS_MIN_SH = 8              # ... and best > 2^8 (AGC level: a header at -3 dB Es/N0
                             # gives >= ~300, noise alone the largest of 128 x 65 <= ~220)
+PLS_E_NUM = 3               # another code than the configured / dummy one: also
+PLS_E_SH = 6                # best << 6 > 3 x Er (best > 3/64 of the window energy)
 PLS_SOF = 26
 PLS_C = [round(256 * math.cos(2 * math.pi * n / (1 << PLS_PHB))) for n in range(1 << PLS_PHB)]
 PLS_S = [round(256 * math.sin(2 * math.pi * n / (1 << PLS_PHB))) for n in range(1 << PLS_PHB)]
@@ -1471,12 +1515,25 @@ def pls_select(mets):
     return int(row[c]), h * 128 + c, int(np.delete(row, c).max())
 
 
-def pls_confident(best, second):
-    return best > (second << PLS_CONF_SH) and best > (1 << PLS_MIN_SH)
+def pls_confident(best, second, code=None, cfg_code=None, er=None, probe=False):
+    """Confident decode; with er (the window energy), a probe's decode, or
+    a tag's decode of a code other than cfg_code and the dummy code (0), also
+    needs best > 3/64 er."""
+    ok = best > (second << PLS_CONF_SH) and best > (1 << PLS_MIN_SH)
+    if er is not None and (probe or (code != cfg_code and code != 0)):
+        ok = ok and (best << PLS_E_SH) > PLS_E_NUM * er
+    return ok
 
 
-def pls_decode(r, fhat=0, acquired=False, cfg_code=None, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT):
-    """Decode one stored header r (90 x 2, 6-bit values). Returns a dict."""
+def pls_energy(r):
+    """Er = sum(ri^2 + rq^2) of the stored header (90 x 2, 6-bit values)."""
+    r = np.asarray(r, np.int64)
+    return int((r * r).sum())
+
+
+def pls_decode(r, fhat=0, acquired=False, cfg_code=None, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT, probe=False):
+    """Decode one stored header r (90 x 2, 6-bit values); probe: a frame
+    sync search peak (see FrameSync). Returns a dict."""
     hyps = []
     if acquired:
         hyps.append((fhat >> 16) & 0xFFFF)
@@ -1498,8 +1555,9 @@ def pls_decode(r, fhat=0, acquired=False, cfg_code=None, H=PLS_H_DEFAULT, step=P
     c = int(_PLS_CODES[bi % 128])
     f = used[bi // 128]
     return dict(code=c, modcod=c >> 2, short=(c >> 1) & 1, pilots=c & 1, best=best, second=second,
-                conf=pls_confident(best, second), freq=f - 65536 if f >= 32768 else f,
-                carrier_hyp=acquired and bi < 128, grid=grid_used, nhyp=len(used))
+                conf=pls_confident(best, second, c, cfg_code, pls_energy(r), probe), freq=f - 65536 if f >= 32768 else f,
+                carrier_hyp=acquired and bi < 128, grid=grid_used, nhyp=len(used), er=pls_energy(r),
+                probe=bool(probe))
 
 
 class PlsDecoder:
@@ -1511,15 +1569,18 @@ class PlsDecoder:
         self.buf = None
         self.results = []
 
-    def step(self, si, sq, t, fhat, acquired):
-        if t:
+    def step(self, si, sq, t, fhat, acquired, probe=0):
+        """t: a header tag; probe: a frame sync search peak (decoded the
+        same way, confident only by the energy rule)."""
+        if t or probe:
             self.buf = []
             self.f0, self.acq = fhat, acquired
+            self.probe = bool(probe) and not t
         if self.buf is not None:
             self.buf.append((pls_quant(si), pls_quant(sq)))
             if len(self.buf) == 90:
                 d = pls_decode(self.buf, self.f0, self.acq, pls_code(self.cfg[0], self.cfg[2], self.cfg[1]),
-                               self.H, self.step_)
+                               self.H, self.step_, self.probe)
                 self.results.append(d)
                 self.buf = None
 
