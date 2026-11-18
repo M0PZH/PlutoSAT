@@ -224,6 +224,15 @@ ad_ip_parameter axi_ad9361 CONFIG.ADC_INIT_DELAY 30
 # mode gives a test tone; DMA transmit is unaffected) and no TDD (FDD only)
 ad_ip_parameter axi_ad9361 CONFIG.DAC_DDS_DISABLE 1
 ad_ip_parameter axi_ad9361 CONFIG.TDD_DISABLE 1
+# no ADC DC filters and no ADC/DAC IQ correction (our cores take the sample
+# ports; the driver only programs them as identity: IQCOR_ENB with unity
+# coefficients, the DC filter off): ~1.0k LUT, ~2.8k FF and all 20 of the
+# core's DSPs (OOC). The channels themselves stay (data format, the PN
+# monitors and generators the driver's interface tuning uses, the DAC data
+# source select that dvbs2-tx / iqtx / plutosatd write).
+ad_ip_parameter axi_ad9361 CONFIG.ADC_DCFILTER_DISABLE 1
+ad_ip_parameter axi_ad9361 CONFIG.ADC_IQCORRECTION_DISABLE 1
+ad_ip_parameter axi_ad9361 CONFIG.DAC_IQCORRECTION_DISABLE 1
 
 # no PL FIR interpolator/decimator (the Pluto's x8 filters for IIO rates
 # below 2.08 MS/s): the AD9363 runs at a fixed 12 MS/s, nbiq provides the
@@ -231,7 +240,7 @@ ad_ip_parameter axi_ad9361 CONFIG.TDD_DISABLE 1
 # No IIO streaming either (axi_ad9361_adc_dma + util_cpack2,
 # axi_ad9361_dac_dma + util_upack2 are gone): the ad9361-phy, cf-ad9361-lpc
 # and cf-ad9361-dds-core-lpc drivers probe without DMAs (no "dmas" in the
-# device tree), so LO, gains, rates and the core's IQ/DC correction stay.
+# device tree), so LO, gains and rates stay.
 
 # Self-test noise source (awgn/): between the AD9363 receive data and all of
 # its users (dvbs2_rx, nbiq, fft). Adds programmable
