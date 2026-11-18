@@ -198,9 +198,13 @@ for 8PSK data symbols without pilots only; demapper: stages a, b, c before
 the multiplier, the output FIFO's room checks one word lower); the BCH's
 Chien start multiplier takes registered operands. Result above.
 
-Whole design, estimate from the OOC deltas: ~41.8k + 2.1k = ~43.9k LUT
-(82.5 %), BRAM unchanged (135 of 140), DSP 155 + 5 = 160. No BRAM
-fallback needed. Full build: section 6.
+Full build (2026-11-18, master with the iqtx core + this work, Vivado
+2026.1): 46921 LUT (88.2 %; master with iqtx: 44.3k, 83.3 %), 134 of 140
+BRAM tiles (135: the TX FECFRAME buffer is one tile smaller), 170 DSP (165),
+WNS +0.057 ns, WHS +0.036 ns. No BRAM fallback needed; the LUT margin is
+now ~6.3k and timing is tight. If a later addition does not close, the
+first candidates are the BCH decoder's 8-position GF(2^16) Chien search
+(the "slimmer BCH" fallback) and the 8PSK demapper's stages.
 
 ## 5. Software (station) changes needed
 
