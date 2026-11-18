@@ -23,7 +23,9 @@
  * It selects IQ TX as the DAC source (TX_SRC 1; this waits until the DVB-S2
  * output is silent), plays, stops (ramp down) and gives the DAC back to
  * DVB-S2 TX (TX_SRC 0). The TX LO, attenuation etc. are set elsewhere
- * (IIO, plutosat). Map 0 of the "iqtx" UIO device: registers; map 1: the
+ * (IIO, plutosat); like dvbs2-tx it makes the AD9361 core's DAC channel 0
+ * take its data from the PL (DAC_DDS_SEL = 2, through debugfs
+ * direct_reg_access). Map 0 of the "iqtx" UIO device: registers; map 1: the
  * ring buffer (all of it is used).
  */
 #define _GNU_SOURCE
@@ -99,9 +101,19 @@ static int read_file(const char *path, char *buf, size_t n)
 	return 0;
 }
 
-static int find_uio(const char *name)
+static int write_file(const char *path, const char *val)
 {
-	DIR *d = opendir("/sys/class/uio");
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return -1;
+	int ok = fputs(val, f) >= 0;
+	return (fclose(f) == 0 && ok) ? 0 : -1;
+}
+
+/* /sys/<dir>/<prefix>N whose "name" file equals name: N, or -1 */
+static int find_by_name(const char *dir, const char *prefix, const char *name)
+{
+	DIR *d = opendir(dir);
 	struct dirent *e;
 	char path[512], buf[128];
 	int found = -1;
@@ -109,16 +121,29 @@ static int find_uio(const char *name)
 	if (!d)
 		return -1;
 	while ((e = readdir(d))) {
-		if (strncmp(e->d_name, "uio", 3))
+		if (strncmp(e->d_name, prefix, strlen(prefix)))
 			continue;
-		snprintf(path, sizeof(path), "/sys/class/uio/%s/name", e->d_name);
+		snprintf(path, sizeof(path), "%s/%s/name", dir, e->d_name);
 		if (!read_file(path, buf, sizeof(buf)) && !strcmp(buf, name)) {
-			found = atoi(e->d_name + 3);
+			found = atoi(e->d_name + strlen(prefix));
 			break;
 		}
 	}
 	closedir(d);
 	return found;
+}
+
+/* AD9361 core: DAC channel 0 (TX1 I/Q) takes its data from the PL input */
+static void dac_select_pl(void)
+{
+	char path[256];
+	int dds = find_by_name("/sys/bus/iio/devices", "iio:device", "cf-ad9361-dds-core-lpc");
+	if (dds >= 0) {
+		snprintf(path, sizeof(path), "/sys/kernel/debug/iio/iio:device%d/direct_reg_access", dds);
+		if (!write_file(path, "0x418 0x2") && !write_file(path, "0x458 0x2"))
+			return;
+	}
+	fprintf(stderr, "iqtx: warning: cannot select the DAC data source (cf-ad9361-dds-core-lpc, debugfs)\n");
 }
 
 static void *uio_map(int uio, int fd, int map, uint32_t *phys, size_t *size)
@@ -242,7 +267,7 @@ int main(int argc, char **argv)
 		gain = 0xFFFF;
 	int32_t finc = (int32_t)llround(offset / FS * 4294967296.0);
 
-	int uio = find_uio("iqtx");
+	int uio = find_by_name("/sys/class/uio", "uio", "iqtx");
 	if (uio < 0)
 		die("no UIO device \"iqtx\" (device tree, uio_pdrv_genirq.of_id=generic-uio)");
 	char path[64];
@@ -285,6 +310,7 @@ int main(int argc, char **argv)
 		wr(R_TX_SRC, SRC_DVBS2);
 		die("IQ TX does not become the DAC source: DVB-S2 TX still transmitting?");
 	}
+	dac_select_pl();
 	wr(R_RATE, R);
 	wr(R_GAIN, gain);
 	wr(R_FINC, (uint32_t)finc);

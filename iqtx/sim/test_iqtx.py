@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 import pytest
+from scipy import signal as sig
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RTL = os.path.join(HERE, "..", "rtl")
@@ -362,7 +363,7 @@ def test_mux(exe, tmp_path):
 # ---------------------------------------------------------------- model checks
 def spectrum(zi, zq):
     x = (zi + 1j * zq).astype(complex)
-    w = np.blackman(len(x))
+    w = sig.windows.blackmanharris(len(x))
     s = np.fft.fftshift(np.abs(np.fft.fft(x * w)) ** 2)
     f = np.fft.fftshift(np.fft.fftfreq(len(x), 1 / FS))
     return f, 10 * np.log10(s / s.max() + 1e-30)
@@ -393,8 +394,8 @@ def test_passband(rate):
 
 @pytest.mark.parametrize("rate,frac", [(8, 0.39), (8, -0.2), (50, 0.39), (50, -0.05), (400, 0.39)])
 def test_images(rate, frac):
-    """A tone in the passband: every other spectral component below -60 dBc
-    (images, CIC, NCO, quantisation)."""
+    """A tone in the passband: every other spectral component below -70 dBc
+    (images, CIC, NCO, quantisation): the NCO phase spurs (-72 dBc) are the worst."""
     fs = FS / (5 * rate)
     n = 2 ** 16 // (5 * rate) + 40
     f0 = frac * fs
@@ -406,7 +407,7 @@ def test_images(rate, frac):
     f, s = spectrum(zi, zq)
     fc = f0 + finc / 2 ** 32 * FS
     far = np.abs(f - fc) > 6 * FS / 2 ** 16
-    assert s[far].max() < -60, (s[far].max(), f[far][np.argmax(s[far])])
+    assert s[far].max() < -70, (s[far].max(), f[far][np.argmax(s[far])])
 
 
 def test_nco_accuracy():
@@ -420,7 +421,7 @@ def test_nco_accuracy():
     assert abs(fhat - 1234567.0) < 0.01
     f, s = spectrum(zi, zq)
     far = np.abs(f - finc / 2 ** 32 * FS) > 6 * FS / n
-    assert s[far].max() < -65
+    assert s[far].max() < -70
 
 
 def test_ramp_tables():
