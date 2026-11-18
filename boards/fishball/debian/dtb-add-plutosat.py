@@ -13,12 +13,21 @@
     and the ADC and DDS core nodes lose "dmas", "dma-names" and
     adi,axi-{decimation,interpolation}-core-available (their drivers then
     probe without an IIO buffer)
+  - no PL nodes the PlutoSAT bitstream does not have: mwipcore@43c00000
+    always (it hung a boot with the PL loaded by BOOT.bin); with
+    --pl-ranges FILE also every other node in the PL address windows
+    (0x40000000..0xBFFFFFFF) whose address lies outside the bitstream's
+    AXI address map (FILE: "BASE HIGH NAME" lines, e.g. the plutosat-boot
+    package's pl-axi.txt, made from system_bd.tcl / the XSA)
 
 Everything else stays as it is. A blob patched by an earlier version gets
 what it lacks (e.g. the fft buffer, the DMA removal, the LLR queue buffer).
 Needs dtc.
 
-  dtb-add-plutosat.py IN.dtb OUT.dtb
+  dtb-add-plutosat.py [--pl-ranges FILE] IN.dtb OUT.dtb
+
+Exit status: 0 OUT written, 3 IN already has everything (OUT not written),
+1 error.
 """
 import re
 import subprocess
@@ -85,6 +94,11 @@ RX_REG_NEW = "reg = <0x7c510000 0x10000 0x7c490000 0x10000 0x3ef00000 0x100000 0
 
 # IIO streaming nodes / properties that go
 DMA_NODES = ["dma@7c400000", "dma@7c420000"]
+# PL nodes of other designs that are never in the PlutoSAT PL
+FOREIGN_NODES = ["mwipcore@43c00000"]
+# the M_AXI_GP0 / GP1 windows: a node here is a PL node
+PL_WINDOW = (0x40000000, 0xC0000000)
+
 CORE_PROPS = {
     "cf-ad9361-lpc@79020000": ["dmas", "dma-names", "adi,axi-decimation-core-available"],
     "cf-ad9361-dds-core-lpc@79024000": ["dmas", "dma-names", "adi,axi-interpolation-core-available"],
@@ -109,7 +123,29 @@ def node_span(dts, name, depth):
     return m.start(), dts.index(close, m.end() - 1) + len(close) - 1
 
 
-def main(src, dst):
+def read_ranges(path):
+    """(base, high, name) of the bitstream's AXI slaves."""
+    out = []
+    for line in open(path):
+        f = line.split("#")[0].split()
+        if f:
+            out.append((int(f[0], 16), int(f[1], 16), f[2] if len(f) > 2 else "?"))
+    if not out:
+        sys.exit(f"{path}: no address ranges")
+    return out
+
+
+def pl_nodes(dts):
+    """(name@addr, address, depth) of the nodes in the PL windows."""
+    out = []
+    for m in re.finditer(r"\n(\t+)([\w,.+-]+@([0-9a-fA-F]+)) \{\n", dts):
+        a = int(m.group(3), 16)
+        if PL_WINDOW[0] <= a < PL_WINDOW[1]:
+            out.append((m.group(2), a, len(m.group(1))))
+    return out
+
+
+def main(src, dst, ranges=None):
     dts = subprocess.run(["dtc", "-q", "-I", "dtb", "-O", "dts", src], check=True,
                          capture_output=True, text=True).stdout
     done = []
@@ -118,6 +154,18 @@ def main(src, dst):
     if not m:
         sys.exit("no interrupt-controller@f8f01000 with a phandle")
     gic = m.group(1)
+
+    def in_pl(a):
+        return ranges is None or any(lo <= a <= hi for lo, hi, _ in ranges)
+
+    # no PL nodes the bitstream does not have, no IIO DMAs (first: they may
+    # hold GIC SPIs the UIO nodes need, as dma@7c420000 holds 56)
+    for name, a, depth in pl_nodes(dts):
+        if name in FOREIGN_NODES or name in DMA_NODES or not in_pl(a):
+            span = node_span(dts, name, depth)
+            if span:
+                dts = dts[:span[0]] + dts[span[1]:]
+                done.append(f"-{name}")
 
     # reserved memory
     if "reserved-memory {" not in dts:
@@ -139,7 +187,8 @@ def main(src, dst):
         done.append(name)
 
     # UIO nodes; interrupts of the nodes to add must be free
-    missing = [(n, t) for n, t in uio_nodes(gic) if f"{n} {{" not in dts]
+    missing = [(n, t) for n, t in uio_nodes(gic)
+               if f"{n} {{" not in dts and in_pl(int(n.split("@")[1], 16))]
     used = {int(v, 16) for v in re.findall(r"interrupts = <0x00 (0x[0-9a-f]+) ", dts)}
     ours = {int(v, 16) for _, t in missing for v in re.findall(r"interrupts = <0x00 (0x[0-9a-f]+) ", t)}
     if used & ours:
@@ -180,12 +229,18 @@ def main(src, dst):
         dts = dts[:span[0]] + body + dts[span[1]:]
 
     if not done:
-        sys.exit(f"{src} already has all the PlutoSAT changes")
+        print(f"{src} already has all the PlutoSAT changes", file=sys.stderr)
+        sys.exit(3)
     subprocess.run(["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", dst, "-"], input=dts, check=True, text=True)
     print("changed: " + " ".join(done))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    ranges = None
+    if args[:1] == ["--pl-ranges"] and len(args) > 1:
+        ranges = read_ranges(args[1])
+        args = args[2:]
+    if len(args) != 2:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])
+    main(args[0], args[1], ranges)
