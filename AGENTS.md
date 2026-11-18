@@ -14,6 +14,7 @@ plutosdr-fw with:
 - **PL cores** (SystemVerilog, each with a bit-true Python model):
   - `dvbs2/`: DVB-S2 TX and RX;
   - `nbiq/`: narrowband IQ channels;
+  - `iqtx/`: narrowband IQ transmitter (memory -> DAC) and the TX source mux;
   - `fft/`: spectrum FFT with result DMA;
   - `awgn/`: receive noise source for self-tests.
 - **station** (submodule, repo `M0PZH/PlutoSAT-station`):
@@ -130,14 +131,14 @@ These keep the board safe and shared.
   | M_GP0 | registers |
   | S_GP0 | DVB-S2 RX DMA |
   | S_GP1 | DVB-S2 TX DMA |
-  | HP0 | reserved for a future IQ TX path |
+  | HP0 | `iqtx` ring reader (1 MB @ 0x3E700000) |
   | HP1 | RX LLR queue |
   | HP2 | nbiq |
   | HP3 | FFT result DMA (`axi_fft_dma` 0x7C4A0000) |
 
   The HP ports run 64-bit. The ADI FIR and the IIO streaming DMAs are removed.
 - **Register bases:**
-  - `dvbs2_tx` 0x7C500000, `dvbs2_rx` 0x7C510000, `nbiq` 0x7C520000, `rx_awgn` 0x7C530000, `fft` 0x7C540000;
+  - `dvbs2_tx` 0x7C500000, `dvbs2_rx` 0x7C510000, `nbiq` 0x7C520000, `rx_awgn` 0x7C530000, `fft` 0x7C540000, `iqtx` 0x7C550000;
   - TX DMA 0x7C480000, RX DMA 0x7C490000;
   - `axi_ad9361` 0x79020000, I2C 0x41600000, SPI 0x7C430000.
 - **Reserved DDR:**
@@ -149,6 +150,7 @@ These keep the board safe and shared.
   | 0x3EB00000 | 4 MB | nbiq |
   | 0x3EA00000 | 1 MB | FFT |
   | 0x3E800000 | 2 MB | RX LLR queue (UIO map3 of `dvbs2-rx`) |
+  | 0x3E700000 | 1 MB | iqtx ring (UIO map1 of `iqtx`) |
 - **RX core 2.0** (VERSION 0x0002_0000): two DATV slots.
   - **Register map:** slot bank s at 0x100·s keeps the 1.x offsets; the shared bank is at 0x200 (CTRL 0x210 with slot enables [9:8], SNAP, LLRQ_*).
   - **`LLRQ_BASE` (0x2E0) resets to 0**, which means nothing is decoded: software must write the reserved region's address (plutosatd and dvbs2-rx do).
@@ -206,7 +208,6 @@ What worked:
 - **Not tested on air:** QO-100 has not been received or transmitted on air.
 - **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only) and a proper rx1 RF input.
 - **Not started:**
-  - IQ TX path (HP0) for narrowband SSB/CW/FT8;
   - PL zoom;
   - TX power calibration in dBm;
   - 8PSK and higher, short frames;

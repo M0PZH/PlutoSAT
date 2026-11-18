@@ -4,9 +4,10 @@
   - reserved-memory (no-map) for the DMA buffers at the top of RAM:
       dvbs2-tx 16 MB @ 0x3F000000, dvbs2-rx 1 MB @ 0x3EF00000,
       nbiq 4 MB @ 0x3EB00000, fft 1 MB @ 0x3EA00000, and the DVB-S2
-      receiver's LDPC LLR frame queue 2 MB @ 0x3E800000 (PL only, S_AXI_HP1)
+      receiver's LDPC LLR frame queue 2 MB @ 0x3E800000 (PL only, S_AXI_HP1),
+      iqtx 1 MB @ 0x3E700000 (the IQ transmitter's ring, read via S_AXI_HP0)
   - generic-uio nodes under fpga-axi@0 for dvbs2-tx, dvbs2-rx, nbiq,
-    rx-awgn and fft (the same as boards/fishball/linux/zynq-fishball-sdr-7020.dts)
+    rx-awgn, fft and iqtx (the same as boards/fishball/linux/zynq-fishball-sdr-7020.dts)
   - no IIO streaming: the PlutoSAT PL has no axi_ad9361 ADC/DAC DMAs and no
     FIR decimator/interpolator, so the dma@7c400000 / dma@7c420000 nodes go,
     and the ADC and DDS core nodes lose "dmas", "dma-names" and
@@ -29,6 +30,7 @@ BUFFERS = [   # name, reg; in this order below the reserved-memory properties
     ("nbiq-buffer@3eb00000", "0x3eb00000 0x400000"),
     ("fft-buffer@3ea00000", "0x3ea00000 0x100000"),
     ("dvbs2-llr-buffer@3e800000", "0x3e800000 0x200000"),
+    ("iqtx-buffer@3e700000", "0x3e700000 0x100000"),
 ]
 
 UIO = """
@@ -63,6 +65,13 @@ UIO = """
 			reg = <0x7c540000 0x10000 0x7c4a0000 0x10000 0x3ea00000 0x100000>;
 			interrupt-parent = <{gic}>;
 			interrupts = <0x00 0x24 0x04>;
+		}};
+
+		iqtx@7c550000 {{
+			compatible = "generic-uio";
+			reg = <0x7c550000 0x10000 0x3e700000 0x100000>;
+			interrupt-parent = <{gic}>;
+			interrupts = <0x00 0x38 0x04>;
 		}};
 """
 

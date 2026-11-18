@@ -27,6 +27,10 @@ README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 - Five independent decimating channels: SSB/CW receivers for several users plus a background decoder.
 - FT8/FT4 decoding, both in the daemon and in the browser (WebAssembly).
 
+**Narrowband transmitter** (`iqtx/`)
+- Low-rate complex baseband from memory (6 to 300 kS/s), interpolated to 12 MS/s with clean start/stop ramps and a fine NCO: SSB, CW, FT8/FT4 and test tones made in software.
+- Shares TX1 with the DVB-S2 transmitter through a glitch-free source switch.
+
 **Spectrum** (`fft/`)
 - An FFT in the FPGA (512 to 4096 points, run-time selectable).
 - Results reach memory by DMA, at 30 fps and more, for the wideband and narrowband waterfalls.
@@ -40,7 +44,7 @@ README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 **Testing aids**
 - A receive noise source (`awgn/`).
 - AD9363 digital loopback.
-- Command-line tools (`dvbs2-tx`, `dvbs2-rx`, `dvbs2-selftest`, `nbiq`, …).
+- Command-line tools (`dvbs2-tx`, `dvbs2-rx`, `dvbs2-selftest`, `nbiq`, `iqtx`, …).
 - A bit-true Python model for every core, with simulation testbenches.
 
 ## Repository layout
@@ -48,7 +52,7 @@ README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 | Path | Contents |
 |---|---|
 | [`dvbs2/`](dvbs2) | DVB-S2 TX and RX cores (RTL, model, sims, C tools); design notes in [`dvbs2/README.md`](dvbs2/README.md) and [`dvbs2/docs/`](dvbs2/docs) |
-| [`nbiq/`](nbiq), [`fft/`](fft), [`awgn/`](awgn) | Narrowband channels, spectrum FFT, noise source: each with RTL, model, sims, software |
+| [`nbiq/`](nbiq), [`iqtx/`](iqtx), [`fft/`](fft), [`awgn/`](awgn) | Narrowband channels, narrowband transmitter, spectrum FFT, noise source: each with RTL, model, sims, software |
 | [`regs/`](regs) | Register maps (TOML, the single source of truth) and the generated headers |
 | [`boards/fishball/`](boards/fishball) | Board support: HDL project, device trees, u-boot/Linux configs, buildroot overrides, and deployment to a board running Debian ([`boards/fishball/debian/`](boards/fishball/debian)) |
 | [`station/`](station) | Submodule [PlutoSAT-station](https://github.com/M0PZH/PlutoSAT-station): daemon, CLI, web UI, iOS client, [API reference](station/docs/api.md) |
@@ -87,7 +91,7 @@ A self-test without any RF: `ssh root@board dvbs2-selftest -p` (stop the service
   - system facts and lessons learned;
   - open items.
 - [`station/docs/api.md`](station/docs/api.md): the station protocol (REST, WebSocket, configuration), with board measurements.
-- Component READMEs: [`dvbs2/`](dvbs2/README.md), [`nbiq/`](nbiq/README.md), [`fft/`](fft/README.md), [`awgn/`](awgn/README.md), [`regs/`](regs/README.md), [`boards/fishball/`](boards/fishball/README.md).
+- Component READMEs: [`dvbs2/`](dvbs2/README.md), [`nbiq/`](nbiq/README.md), [`iqtx/`](iqtx/README.md), [`fft/`](fft/README.md), [`awgn/`](awgn/README.md), [`regs/`](regs/README.md), [`boards/fishball/`](boards/fishball/README.md).
 
 ## Status
 

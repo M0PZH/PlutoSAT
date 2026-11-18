@@ -13,7 +13,8 @@ Zynq-7020 (xc7z020clg400-2) + AD9363 (LVDS, 2R2T), 1 GB DDR3.
 The AD9363 runs at a fixed 12 MS/s. Its samples go through `axi_ad9361`
 (digital interface, IQ/DC correction) and `rx_awgn` (self-test noise
 source) to the PlutoSAT cores only: `dvbs2_rx`, `nbiq`, `fft`. The transmit
-side is `dvbs2_tx` on DAC channel 0. There is no PL FIR
+side is `dvbs2_tx` or `iqtx` on DAC channel 0 (one at a time, the TX source
+mux in `iqtx`). There is no PL FIR
 decimator/interpolator and no IIO streaming (no `axi_ad9361_adc_dma` /
 `util_cpack2`, no `axi_ad9361_dac_dma` / `util_upack2`). The AD9363 itself
 stays fully under Linux control: LO, gains, AGC, rates and RF bandwidth
@@ -29,7 +30,7 @@ drivers create no IIO buffer then); the devicetrees in `linux/` and from
 |---|---|---|
 | M_AXI_GP0 | all AXI-Lite registers (`axi_ad9361`, the PlutoSAT cores, their DMAs, SPI, I2C) | 32 |
 | M_AXI_GP1 | spare | |
-| S_AXI_HP0 | reserved: future IQ transmit DMA (memory -> DAC, up to 12 MS/s IQ, narrow- or wideband) | 64 |
+| S_AXI_HP0 | `iqtx` ring reader (read only, 64-byte bursts), 1 MB @ 0x3E700000 | 64 |
 | S_AXI_HP1 | DVB-S2 RX LDPC LLR frame queue `dvbs2_rx` `m_axi` (DDR rings, 2 MB @ 0x3E800000, up to ~20 MB/s read + write; used when LLRQ_CTRL enables it) | 64 |
 | S_AXI_HP2 | `nbiq` ring writer (`DW` 64), 5 channels into 4 MB @ 0x3EB00000 | 64 |
 | S_AXI_HP3 | FFT result DMA `axi_fft_dma` (stream -> memory, 0x7C4A0000, 1 MB @ 0x3EA00000) | 64 |
@@ -43,16 +44,15 @@ fishball Debian, leaves all four at the 64-bit default. A 32-bit master
 on an HP port would need those registers changed at run time.
 
 PL interrupts in use: ps-7 fft, ps-8 nbiq, ps-9 DVB-S2 RX DMA, ps-10 DVB-S2 TX
-DMA, ps-11 SPI, ps-13 FFT DMA, ps-15 I2C. Free: ps-0 to ps-6, ps-12, ps-14.
+DMA, ps-11 SPI, ps-12 iqtx, ps-13 FFT DMA, ps-15 I2C. Free: ps-0 to ps-6, ps-14.
 
-### Future IQ transmit
+### Transmit path
 
-`dvbs2_tx` selects DAC channel 0's data with CTRL bit 2 ("DAC select"):
-its own output, or `dac_in_i/q`. Today `dac_in_i/q` are tied to zero (they
-used to come from `util_upack2`). An IQ transmit core (memory -> DAC, up to
-12 MS/s) plugs in there: its DMA on S_AXI_HP0, its samples into
-`dvbs2_tx/dac_in_i/q`. Those inputs are in the `l_clk` domain, one sample per
-`dac_valid`. Alternatively it gets a mux of its own between
-`dvbs2_tx/dac_out_i/q` and `axi_ad9361/dac_data_i0/q0`. In both cases
-`axi_ad9361` DAC channel 0 must take its data from the PL input
-(`DAC_DDS_SEL` = 2, which `dvbs2-tx` sets through `direct_reg_access`).
+`dvbs2_tx`'s output (zeros unless its CTRL bit 2 "DAC select" is set; its
+`dac_in_i/q` are tied to zero) goes to `iqtx` (`iqtx/`), whose TX source
+mux (register `TX_SRC`: DVB-S2 TX, the reset default; IQ TX; off) drives
+`axi_ad9361/dac_data_i0/q0`, in the `l_clk` domain, one sample per
+`dac_valid`. The mux switches only while both sources are silent. In all
+cases `axi_ad9361` DAC channel 0 must take its data from the PL input
+(`DAC_DDS_SEL` = 2, which `dvbs2-tx` and `iqtx` set through
+`direct_reg_access`).

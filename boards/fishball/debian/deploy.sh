@@ -7,7 +7,7 @@
 # Always:   build/system_top.bit -> /lib/firmware/plutosat.bit.bin (the one
 #           before kept as plutosat.bit.bin.prev),
 #           plutosat-pl-load (run-time FPGA load), and the tools built on the
-#           board from dvbs2/sw, nbiq/sw, awgn/sw into /usr/local/bin.
+#           board from dvbs2/sw, nbiq/sw, awgn/sw, iqtx/sw into /usr/local/bin.
 # --boot:   once per board (and again when dtb-add-plutosat.py changes):
 #           devicetree.dtb + reserved memory and the UIO nodes, - the IIO
 #           streaming DMAs (dtb-add-plutosat.py), uEnv.txt + uio_pdrv_genirq.of_id;
@@ -52,11 +52,11 @@ scp -q "$HERE/pl-load.sh" "$H:/usr/local/sbin/plutosat-pl-load"
 ssh_ chmod 755 /usr/local/sbin/plutosat-pl-load
 
 # tools, built on the board (its glibc)
-tar czf "$TMP/src.tgz" -C "$TOP" dvbs2/sw nbiq/sw awgn/sw
+tar czf "$TMP/src.tgz" -C "$TOP" dvbs2/sw nbiq/sw awgn/sw iqtx/sw
 scp -q "$TMP/src.tgz" "$H:/tmp/plutosat-src.tgz"
 ssh_ 'set -e; command -v gcc >/dev/null || apt-get install -y gcc make;
   rm -rf /tmp/plutosat-src && mkdir /tmp/plutosat-src && tar xzf /tmp/plutosat-src.tgz -C /tmp/plutosat-src 2>/dev/null;
-  for d in dvbs2/sw nbiq/sw awgn/sw; do
+  for d in dvbs2/sw nbiq/sw awgn/sw iqtx/sw; do
     make -s -C /tmp/plutosat-src/$d clean; make -s -C /tmp/plutosat-src/$d CFLAGS=-O2 all;
     make -s -C /tmp/plutosat-src/$d DESTDIR=/tmp/plutosat-inst install;
   done;

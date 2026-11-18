@@ -28,6 +28,8 @@ AWGN_DIR := $(abspath $(ADI_HDL_DIR)/../awgn)
 M_DEPS += $(wildcard $(AWGN_DIR)/rtl/*.sv) $(wildcard $(AWGN_DIR)/ip/*.v)
 FFT_DIR := $(abspath $(ADI_HDL_DIR)/../fft)
 M_DEPS += $(wildcard $(FFT_DIR)/rtl/*.sv) $(wildcard $(FFT_DIR)/rtl/gen/*) $(wildcard $(FFT_DIR)/ip/*)
+IQTX_DIR := $(abspath $(ADI_HDL_DIR)/../iqtx)
+M_DEPS += $(wildcard $(IQTX_DIR)/rtl/*.sv) $(wildcard $(IQTX_DIR)/rtl/gen/*) $(IQTX_DIR)/ip/iqtx_bd.v
 LIB_DEPS += axi_dmac
 
 include $(ADI_HDL_DIR)/projects/scripts/project-xilinx.mk

@@ -158,3 +158,22 @@ set_max_delay -datapath_only 10.0 \
 set_max_delay -datapath_only 10.0 \
   -from [get_cells -hier -filter "NAME =~ ${awgn_i}/h_in_reg* || NAME =~ ${awgn_i}/h_out_reg*"] \
   -to   [get_cells -hier -filter "NAME =~ ${awgn_i}/r_in_reg* || NAME =~ ${awgn_i}/r_out_reg*"]
+
+# IQ transmitter: sys_cpu_clk -> AD9361 l_clk sample FIFO, the TX source
+# request, idle flag and active source / DVB-S2 silence / underrun toggle back
+set iqtx_i [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi}]
+set iqtx_cdc [get_cells -hier -filter "NAME =~ ${iqtx_i}/u_cdc"]
+set_max_delay -datapath_only 5.0 \
+  -from [get_cells -hier -filter "NAME =~ ${iqtx_cdc}/wgray_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${iqtx_cdc}/wgray_r1_reg*"]
+set_max_delay -datapath_only 5.0 \
+  -from [get_cells -hier -filter "NAME =~ ${iqtx_cdc}/rgray_r_reg*"] \
+  -to   [get_cells -hier -filter "NAME =~ ${iqtx_cdc}/rgray_w1_reg*"]
+set_max_delay -datapath_only 5.0 \
+  -from [get_cells -hier -filter "NAME =~ ${iqtx_cdc}/mem_reg*"]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/rst_s_reg[0]}]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/req_s_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/idle_s_reg[0]}]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/act_s_reg*}]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/dsil_s_reg[0]}]
+set_false_path -to [get_cells -hier -filter {NAME =~ */iqtx/*/i_iqtx_axi/unf_s_reg[0]}]

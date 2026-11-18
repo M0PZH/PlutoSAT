@@ -148,7 +148,8 @@
 /* DVB-S2 transmitter and receiver (dvbs2/): registers, their axi_dmac and
  * uncached buffers at the top of RAM (16 MB TX, 1 MB RX; 4 MB for nbiq,
  * 1 MB for the FFT result DMA, 2 MB for the receiver's LDPC LLR frame
- * queue, which only the PL uses: dvbs2_rx_llrq on S_AXI_HP1), exported to
+ * queue, which only the PL uses: dvbs2_rx_llrq on S_AXI_HP1; 1 MB for the
+ * IQ transmitter's ring, iqtx on S_AXI_HP0), exported to
  * user space (dvbs2-tx, dvbs2-rx) through one UIO device each. Needs
  * uio_pdrv_genirq.of_id=generic-uio on the command line. */
 / {
@@ -179,6 +180,11 @@
 
 		dvbs2_llr_buffer: dvbs2-llr-buffer@3e800000 {
 			reg = <0x3e800000 0x00200000>;
+			no-map;
+		};
+
+		iqtx_buffer: iqtx-buffer@3e700000 {
+			reg = <0x3e700000 0x00100000>;
 			no-map;
 		};
 	};
@@ -222,6 +228,16 @@
 		      <0x3ea00000 0x00100000>;  /* DMA buffer */
 		interrupt-parent = <&intc>;
 		interrupts = <0 36 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/* narrowband IQ transmitter (iqtx/): registers and its sample ring
+	 * (read by the PL through S_AXI_HP0) */
+	iqtx@7c550000 {
+		compatible = "generic-uio";
+		reg = <0x7c550000 0x10000>,     /* iqtx registers */
+		      <0x3e700000 0x00100000>;  /* ring buffer */
+		interrupt-parent = <&intc>;
+		interrupts = <0 56 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
 	/* self-test noise source on the receive data (awgn/) */

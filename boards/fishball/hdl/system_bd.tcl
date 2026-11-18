@@ -9,7 +9,7 @@
 ##
 ## PS-PL AXI ports (boards/fishball/README.md, "AXI ports"):
 ##   M_AXI_GP0  all AXI-Lite registers        M_AXI_GP1  spare
-##   S_AXI_HP0  reserved: future IQ transmit DMA (memory -> DAC)
+##   S_AXI_HP0  IQ transmitter's ring reader (iqtx m_axi, 64-bit, read only)
 ##   S_AXI_HP1  DATV receiver's LDPC LLR frame queue (dvbs2_rx m_axi, 64-bit)
 ##   S_AXI_HP2  nbiq ring writer (64-bit)
 ##   S_AXI_HP3  FFT result DMA (64-bit)
@@ -289,14 +289,9 @@ ad_cpu_interconnect 0x7C430000 axi_spi
 
 ad_cpu_interrupt ps-11 mb-11 axi_spi/ip2intc_irpt
 
-# DVB-S2 transmitter (dvbs2/), fed by its own DMA (S_AXI_GP1), selectable
-# onto DAC channel 0 by CTRL bit 2 ("DAC select": dvbs2_tx or dac_in_i/q).
-#
-# Future IQ transmit (memory -> DAC, up to 12 MS/s, narrow- or wideband):
-# its DMA goes on S_AXI_HP0 (64-bit, reserved), its sample stream into
-# dvbs2_tx/dac_in_i/q (dac_clk domain, one sample per dac_valid) instead
-# of the zeros below, or into a separate mux after dvbs2_tx
-# (dac_out_i/q -> axi_ad9361/dac_data_i0/q0).
+# DVB-S2 transmitter (dvbs2/), fed by its own DMA (S_AXI_GP1); its output
+# (zeros unless its CTRL bit 2 "DAC select" is set) goes through the TX source
+# mux in iqtx (below) to DAC channel 0.
 
 set dvbs2_dir [file normalize [file join $ad_hdl_dir .. dvbs2]]
 add_files -norecurse [concat \
@@ -315,8 +310,6 @@ ad_connect axi_ad9361/l_clk          dvbs2_tx/dac_clk
 ad_connect axi_ad9361/dac_valid_i0   dvbs2_tx/dac_valid
 ad_connect GND                       dvbs2_tx/dac_in_i
 ad_connect GND                       dvbs2_tx/dac_in_q
-ad_connect dvbs2_tx/dac_out_i        axi_ad9361/dac_data_i0
-ad_connect dvbs2_tx/dac_out_q        axi_ad9361/dac_data_q0
 
 ad_ip_instance axi_dmac axi_dvbs2_dma
 ad_ip_parameter axi_dvbs2_dma CONFIG.DMA_TYPE_SRC 0
@@ -491,3 +484,35 @@ ad_cpu_interconnect 0x7C4A0000 axi_fft_dma
 ad_cpu_interrupt ps-13 mb-13 axi_fft_dma/irq
 
 ad_cpu_interconnect 0x7C530000 rx_awgn
+
+# Narrowband IQ transmitter (iqtx/): complex baseband from a DDR ring (1 MB
+# iqtx-buffer @ 0x3E700000 in the device tree), read through S_AXI_HP0
+# (64-bit) -> FIR x5 -> CIC -> NCO; and the TX source mux (register TX_SRC:
+# DVB-S2 TX, reset default / IQ TX / off) in front of DAC channel 0.
+
+set iqtx_dir [file normalize [file join $ad_hdl_dir .. iqtx]]
+add_files -norecurse [concat \
+  [glob [file join $iqtx_dir rtl *.sv]] \
+  [glob [file join $iqtx_dir rtl gen *.mem]] \
+  [list [file join $iqtx_dir ip iqtx_bd.v]]]
+update_compile_order -fileset sources_1
+create_bd_cell -type module -reference iqtx_bd iqtx
+
+ad_connect axi_ad9361/l_clk          iqtx/dac_clk
+ad_connect axi_ad9361/dac_valid_i0   iqtx/dac_valid
+ad_connect dvbs2_tx/dac_out_i        iqtx/dvb_i
+ad_connect dvbs2_tx/dac_out_q        iqtx/dvb_q
+ad_connect iqtx/dac_out_i            axi_ad9361/dac_data_i0
+ad_connect iqtx/dac_out_q            axi_ad9361/dac_data_q0
+
+ad_ip_parameter sys_ps7 CONFIG.PCW_USE_S_AXI_HP0 {1}
+ad_ip_parameter sys_ps7 CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64}
+ad_connect sys_cpu_clk sys_ps7/S_AXI_HP0_ACLK
+ad_connect iqtx/m_axi sys_ps7/S_AXI_HP0
+create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
+                    [get_bd_addr_spaces iqtx/m_axi] \
+                    [get_bd_addr_segs sys_ps7/S_AXI_HP0/HP0_DDR_LOWOCM] \
+                    SEG_sys_ps7_HP0_DDR_LOWOCM
+
+ad_cpu_interconnect 0x7C550000 iqtx
+ad_cpu_interrupt ps-12 mb-12 iqtx/irq
