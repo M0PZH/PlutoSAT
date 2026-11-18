@@ -17,10 +17,12 @@
 //   SQ    S_2k = S_k^2
 //   BM    simplified inversionless Berlekamp-Massey, t steps (~30 clocks each)
 //   CI    Chien start terms Lambda_j alpha^(-j(n-1)) (13 clocks)
-//   CH    Chien search 8 positions/clock (short: 1), corrections and BB descrambling
+//   CH    Chien search 4 positions/clock (short: 1), corrections and BB descrambling
 //         written back into the buffer
 //   OUT   Kbch/8 bytes, one per 2 clocks
-// Not ready during SQ..OUT (about n/8 + Kbch/4 + 500 clocks per frame).
+// Not ready during SQ..OUT (about n/4 + Kbch/4 + 500 clocks per frame; the
+// Chien search did 8 positions per clock up to RX 2.1.1, 4 since RX 2.1.2 to
+// save LUTs).
 
 module dvbs2_bch_dec
   import dvbs2_bch_pkg::*;
@@ -113,6 +115,7 @@ module dvbs2_bch_dec
   logic        ch_v;                         // CH: byte k-1 read, its mask in ch_mask
   logic [7:0]  ch_mask;
   logic [2:0]  cb;                           // short frames: position in the byte
+  logic        ch_h;                         // normal frames: second half of the byte
   logic [7:0]  cmask;
   logic [15:0] ch_k;
   logic [14:0] prbs;
@@ -247,6 +250,7 @@ module dvbs2_bch_dec
             k <= '0;
             ch_v <= 1'b0;
             cb <= '0;
+            ch_h <= 1'b0;
             roots <= '0;
             prbs <= 15'b100101010000000;
             st <= B_CH;
@@ -276,18 +280,25 @@ module dvbs2_bch_dec
               k <= k + 16'd1;
             end
           end else if (k != nb) begin : ch
-            logic [7:0] mk;
-            for (int i = 0; i < 8; i++) begin
+            // normal frame: 4 positions per clock, the byte's first half
+            // (bits 7..4) then its second (bits 3..0), written after it
+            logic [3:0] mk;
+            for (int i = 0; i < 4; i++) begin
               logic [15:0] v;
               v = lam[0];
               for (int jj = 0; jj < 12; jj++) v = v ^ gmul(term[jj], BCH_CH_MUL[jj][i], 1'b0);
-              mk[7 - i] = (v == 16'd0);
+              mk[3 - i] = (v == 16'd0);
             end
-            for (int jj = 0; jj < 12; jj++) term[jj] <= gmul(term[jj], BCH_CH_MUL[jj][8], 1'b0);
-            ch_mask <= mk;
-            ch_k <= k;
-            ch_v <= 1'b1;
-            k <= k + 16'd1;
+            for (int jj = 0; jj < 12; jj++) term[jj] <= gmul(term[jj], BCH_CH_MUL[jj][4], 1'b0);
+            ch_h <= !ch_h;
+            ch_v <= 1'b0;
+            if (!ch_h) cmask[7:4] <= mk;
+            else begin
+              ch_mask <= {cmask[7:4], mk};
+              ch_k <= k;
+              ch_v <= 1'b1;
+              k <= k + 16'd1;
+            end
           end else begin
             ch_v <= 1'b0;
             st <= B_CHEND;

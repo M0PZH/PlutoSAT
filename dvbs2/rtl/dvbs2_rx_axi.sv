@@ -23,7 +23,8 @@
 // adds 0x100 s to the 1.x offsets; VERSION, ID and SCRATCH read the same in
 // every bank. The slot's settings are static while it runs: change them with
 // the slot disabled or in its soft reset.
-//   0x200 VERSION     RO  0x0002_0101: pilots off, the carrier's PLL is not driven by the
+//   0x200 VERSION     RO  0x0002_0102: the BCH Chien search 4 positions per clock
+//                         (0x0002_0101: pilots off, the carrier's PLL is not driven by the
 //                         headers, and a lock detector with a frequency search after the
 //                         acquisition (QPSK) (0x0002_0100: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD
 //                         [9], packet header [38]); 0x0002_0000: two receive slots, register map v2, the DDR LLR
@@ -39,7 +40,7 @@
 //                         sync checks every search peak at the data length; 0x0001_0200:
 //                         PLS decoder and TIMING_INTEG preset; 0x0001_0100: neither,
 //                         0xB8.. read 0, a TIMING_INTEG write is ignored; 0x0001_0000: no
-//                         CIC, DDC_CIC reads 0)))
+//                         CIC, DDC_CIC reads 0))))
 //   0x204 ID          RO  "DVR2" (0x44565232)
 //   0x208 SCRATCH     RW
 //   0x210 CTRL        RW  [1] soft reset of the whole receiver (both slots, the decoders,
@@ -221,7 +222,7 @@ module dvbs2_rx_axi #(
   output logic        m_axi_rready
 );
 
-  localparam logic [31:0] VERSION = 32'h0002_0101;
+  localparam logic [31:0] VERSION = 32'h0002_0102;
   wire clk = s_axi_aclk;
 
   // ---------------------------------------------------------------- registers

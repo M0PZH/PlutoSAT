@@ -9,7 +9,7 @@ coefficient of x^(n-1).
              S_2j = S_j^2
   error locator: simplified inversionless Berlekamp-Massey (t steps)
   Chien search: position k (degree n-1-k) is an error if
-             Lambda(alpha^-(n-1-k)) = 0 (8 positions per clock in the RTL for
+             Lambda(alpha^-(n-1-k)) = 0 (4 positions per clock in the RTL for
              normal frames, 1 per clock for short ones)
   success: deg Lambda (L) <= t and exactly L roots among the n positions.
 
@@ -167,7 +167,8 @@ def write_rtl_pkg(path=None):
         lines.append(",\n".join("    '{" + ", ".join(f"16'h{apow((2 * jj + 1) * k, sh):04X}" for k in range(9)) + "}"
                                 for jj in range(12)))
         lines.append("  };")
-    # Chien, 8 positions per clock: term_j a^(ji), i = 0..7, step a^(8j)
+    # Chien: term_j a^(ji), i = 0..8 (the RTL uses i = 0..3 and steps a^(4j):
+    # 4 positions per clock)
     lines.append("  localparam logic [15:0] BCH_CH_MUL [12][9] = '{")
     lines.append(",\n".join("    '{" + ", ".join(f"16'h{apow(j * i):04X}" for i in range(9)) + "}"
                             for j in range(1, 13)))

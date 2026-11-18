@@ -6,7 +6,7 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00020101u
+#define DVBS2_RX_VERSION_VALUE 0x00020102u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
@@ -37,7 +37,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0002_0101 = 2.1.1: pilots off, the carrier's PLL is not driven by the PLHEADERs (no false lock at k / frame length), and with QPSK a lock detector and a frequency search after the acquisition (CARRIER_ACQ.FALSE_LOCK counts its steps) (2.1: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD.SHORT, HDR.SHORT); 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)) */
+/* VERSION (ro): Core version, 0x0002_0102 = 2.1.2: the BCH Chien search 4 positions per clock (fewer LUTs, about n/8 more clocks per frame); 0x0002_0101 = 2.1.1: pilots off, the carrier's PLL is not driven by the PLHEADERs (no false lock at k / frame length), and with QPSK a lock detector and a frequency search after the acquisition (CARRIER_ACQ.FALSE_LOCK counts its steps) (2.1: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD.SHORT, HDR.SHORT); 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)) */
 #define DVBS2_RX_VERSION 0x200
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
