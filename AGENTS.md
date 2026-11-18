@@ -66,7 +66,7 @@ Notes:
 
 ## The test board (pluto2)
 
-`ssh root@pluto2.cbg-1.relu.network` (LAN 10.66.3.169), Debian 12 on the SD card, kernel 5.15.
+`ssh -o HostKeyAlias=pluto2.cbg-1.relu.network root@10.66.3.168` (DHCP on the LAN; it was 10.66.3.169, and the name `pluto2.cbg-1.relu.network` stopped resolving from the build host in Nov 2026 — the host keys are pluto2's), Debian 12 on the SD card, kernel 5.15.
 
 ### Hardware setup
 
