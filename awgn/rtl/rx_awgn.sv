@@ -71,6 +71,7 @@ module rx_awgn (
   logic [3:0]  v0, v1, v2, v3, v4;
   logic signed [15:0] x0 [4], x1 [4], x2 [4], x3 [4], x4 [4];
   logic signed [20:0] ri, rq;
+  logic        hi_i, lo_i, hi_q, lo_q;      // ri / rq beyond 16 bits (registered with them)
   logic signed [32:0] pai, paq, pai2, paq2;
   logic signed [30:0] pni, pnq, pni2, pnq2;
   logic signed [34:0] si, sq;
@@ -81,9 +82,12 @@ module rx_awgn (
   assign g17 = {1'b0, gain};
   assign n18 = {1'b0, nscale};
 
-  function automatic logic signed [15:0] sat16(input logic signed [20:0] r);
-    if (r > 21'sd32767) return 16'sd32767;
-    if (r < -21'sd32768) return -16'sd32768;
+  // sat16(r) = 32767 if r > 32767, -32768 if r < -32768, else r[15:0]; the
+  // comparisons are made in the shift stage (from si / sq) and registered,
+  // so the output stage is a mux (timing at 250 MHz with a full device)
+  function automatic logic signed [15:0] sat16f(input logic signed [20:0] r, input logic hi, input logic lo);
+    if (hi) return 16'sd32767;
+    if (lo) return -16'sd32768;
     return 16'(r);
   endfunction
 
@@ -107,10 +111,14 @@ module rx_awgn (
     v4 <= v3; x4 <= x3;
     ri <= 21'(si >>> 14);
     rq <= 21'(sq >>> 14);
+    hi_i <= $signed(21'(si >>> 14)) > 21'sd32767;
+    lo_i <= $signed(21'(si >>> 14)) < -21'sd32768;
+    hi_q <= $signed(21'(sq >>> 14)) > 21'sd32767;
+    lo_q <= $signed(21'(sq >>> 14)) < -21'sd32768;
     // saturate, out
     out_valid <= v4;
-    out_i0 <= en_q ? sat16(ri) : x4[0];
-    out_q0 <= en_q ? sat16(rq) : x4[1];
+    out_i0 <= en_q ? sat16f(ri, hi_i, lo_i) : x4[0];
+    out_q0 <= en_q ? sat16f(rq, hi_q, lo_q) : x4[1];
     out_i1 <= x4[2];
     out_q1 <= x4[3];
   end

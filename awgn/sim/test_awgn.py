@@ -48,15 +48,17 @@ def run(exe, tmp_path, x, cmds):
     return regs, o
 
 
-def signal(n, seed):
+def signal(n, seed, amp=2048):
     rng = np.random.default_rng(seed)
-    return [rng.integers(-2048, 2048, n) for _ in range(4)]
+    return [rng.integers(-amp, amp, n) for _ in range(4)]
 
 
-@pytest.mark.parametrize("gain,nscale", [(16384, 20000), (4096, 131071), (20000, 1)])
-def test_bit_exact(exe, tmp_path, gain, nscale):
+# (65535, 131071) with full-scale input: most rx0 outputs saturate, both ways
+@pytest.mark.parametrize("gain,nscale,amp", [(16384, 20000, 2048), (4096, 131071, 2048), (20000, 1, 2048),
+                                             (65535, 131071, 32768)])
+def test_bit_exact(exe, tmp_path, gain, nscale, amp):
     n = 70000
-    x = signal(n, gain)
+    x = signal(n, gain, amp)
     regs, o = run(exe, tmp_path, x, [f"W c {gain:x}", f"W 10 {nscale:x}", "W 8 1", "D 20",
                                     f"A {n}", "E", "R 14", "R 18", "R 1c"])
     assert len(o) == n
@@ -70,6 +72,9 @@ def test_bit_exact(exe, tmp_path, gain, nscale):
     else:
         pytest.fail("no alignment between RTL and model noise")
     assert np.array_equal(awgn.apply(x[1], gq[o[:, 0] - d], gain, nscale), o[:, 2])
+    if amp > 2048:
+        for c in (1, 2):
+            assert (o[:, c] == 32767).sum() > n // 8 and (o[:, c] == -32768).sum() > n // 8
     assert np.array_equal(o[:, 3], x[2]) and np.array_equal(o[:, 4], x[3]), "rx1 must pass unchanged"
     # power meters: the first full window (2^16 samples)
     p_in, p_out, cnt = regs
