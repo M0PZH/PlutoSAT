@@ -18,13 +18,15 @@ Bit-exact reference for rtl/dvbs2_rx_*.sv. Three streaming stages:
                           CORDIC, linear phase interpolation over the data
                           between two blocks, pilot-to-pilot frequency loop,
                           false-lock detector on the 783-symbol segment;
-              pilots off: decision-directed 2nd-order PLL (data-aided on
-                          headers and dummy frames, soft decisions on data),
-                          phase set from every PLHEADER (removes the 90
-                          degree ambiguity), the gains narrowing in gears
-                          after the acquisition, the NCO frequency from the
-                          PLL integrator (header estimates only right after
-                          the acquisition).
+              pilots off: decision-directed 2nd-order PLL (soft
+                          decisions on data, data-aided on dummy frames of a
+                          coherently decided type, nothing from the
+                          headers), phase set from every PLHEADER (removes
+                          the 90 degree ambiguity), the gains narrowing in
+                          gears after the acquisition, the NCO frequency from
+                          the PLL integrator (header estimates only for the
+                          acquisition); QPSK: a lock detector on the data
+                          and a frequency search after the acquisition.
             Amplitude/noise from the known blocks, QPSK max-log LLRs
             (int8, 4 LSBs per unit LLR), 64800 per data frame.
 
@@ -736,6 +738,45 @@ PLL_KICK_NHDR = 2
 # (a limiter instead of sign(): tanh-like at low SNR, hard at high SNR;
 # per-axis RMS 4096 at the AGC target)
 PLL_SOFT_SH = 11
+# Pilots off, what drives the PLL besides the data symbols (VERSION
+# 0x0002_0101). The PLHEADER symbols do not (PLL_HDR_DA False): the header
+# phase resets the PLL phase at the header's end anyway, and a data-aided
+# error on the header, measured before that reset, is a phase step to the PI
+# loop: after a 90 degree slip in the frame before (or while the loop is not
+# yet locked) the 90 header symbols kicked the integrator by up to ~1.5e-4
+# cycles/symbol at -1 dB, and the loop settled where every header saw the
+# same phase, i.e. at k / (frame length) cycles/symbol (QPSK 1/4: k x 30.8 Hz
+# at 1 MS/s; the board's failed starts tracked -643, -309, -1208 Hz). A dummy
+# frame's known body drives it only when the frame's type was decided
+# coherently (PLL_DUMMY_COH): the frame of the acquisition header has the
+# frame sync's type, and a data frame taken for a dummy one fed the loop
+# 3240 data symbols as if they were the known (1+j)/sqrt2.
+PLL_HDR_DA = False
+PLL_DUMMY_COH = True
+# Pilots off, QPSK: lock detector and frequency search. The acquisition
+# estimate from 4 headers has ~2.6e-4 cycles/symbol rms at -1 dB (~3e-4 at -2
+# dB: 360 known symbols), while the decision-directed loop pulls in only
+# ~1.5-2e-4 within a frame there (wider gains slip at -2 dB). Per data
+# frame the carrier accumulates, over the data symbols s after the PLL,
+#   D = sum(|Im s^2| >> LK_PSH) - (|Re s^2| >> LK_PSH),  N = the same with +
+# (s^2 of locked QPSK is +-j|s|^2; D has mean 0 for noise and for a loop that
+# is not locked, and is invariant to 90 degree slips). Locked: D > N >>
+# LK_SH (model, -2 dB: D/N 0.024..0.037 locked, |D/N| <= 0.009 not locked).
+# Decided at each header with N >= LK_NMIN. After the acquisition (f0) the
+# carrier searches: a frame not locked moves the NCO to the next hypothesis
+# f0 + k LK_STEP, k = 1, -1, 2, -2, 3, -3, 4, -4 (fp cleared, gears back to
+# the start), the first locked frame ends the search; after LK_NHYP
+# hypotheses it acquires again. Locked, LK_LOSE frames in a row not locked
+# start the search again around the current frequency. QPSK only (8PSK s^2
+# has no such mean: 8PSK keeps the search off).
+LK_SEARCH = True
+LK_PSH = 20
+LK_SH = 6
+LK_NMIN = 1 << 17
+LK_STEP_SH = 20
+LK_STEP = 1 << LK_STEP_SH   # 2^-12 cycles/symbol (2.44e-4)
+LK_NHYP = 9
+LK_LOSE = 4
 STAT_SH = 3                 # amplitude/noise IIR 1/8 per known block
 SIG2_MIN = 1024
 G_LLR_FRAC = 20
@@ -877,12 +918,19 @@ class Carrier:
         self.big = 0                # headers in a row beyond FLL_CLAMP
         self.favg = 0               # average header frequency estimate
         self.navg = 0               # headers in it (saturates at 16)
-        self.n_fa = 0               # 1/1476 steps
+        self.n_fa = 0               # 1/1476 steps (pilots off: frequency search steps)
         self.n_acq = 0              # acquisitions
         self.n_dummy = 0            # dummy body blocks used
         self.dth = 0
         self.log = []
         self.pls = None             # PlsDecoder fed with the input symbols (detection, header confirmation)
+        self.tcoh = False           # the frame's type was decided coherently (acquired at its header)
+        self.srch = False           # pilots off, QPSK: frequency search after the acquisition
+        self.hyp = 0                # ... hypothesis (0: the acquisition's f0)
+        self.f0 = 0
+        self.lk_d = self.lk_n = 0   # lock detector accumulators
+        self.lk_bad = 0             # locked: frames in a row not locked
+        self.acq_now = False        # this header made the acquisition
 
     # ---- output ------------------------------------------------------------
     def _llr(self, buf, y):
@@ -1087,7 +1135,7 @@ class Carrier:
             self.Ha[0] += ai
             self.Ha[1] += aq
             self.Esum += (zi * zi + zq * zq) >> 8
-            self._pll(zq)
+            self._pll(zq if PLL_HDR_DA else 0)
             if p == 89:
                 self._header_type()
                 typ = self.typ
@@ -1098,6 +1146,7 @@ class Carrier:
                     # same error and fhat random-walks, fp following it
                     self.upd += self.fp
                     self.fp = 0
+                    self._lock()
                 theta = self._block_end(self.H, self.Esum, 90, self.cur)
                 self.dth = theta
                 if not self.pilots:
@@ -1110,7 +1159,10 @@ class Carrier:
         elif typ == 1:
             if self.pilots and self.acquired:
                 self._dummy_block(s1, p)
-            self._pll(s1[1] - s1[0])               # dummy body: (1+j)/sqrt2
+            if self.tcoh or not PLL_DUMMY_COH:
+                self._pll(s1[1] - s1[0])           # dummy body: (1+j)/sqrt2
+            else:
+                self._pll(0)
         else:
             j = self._body_pos(p - 90)
             if j < 0:
@@ -1130,6 +1182,11 @@ class Carrier:
                 if self.psk8:
                     self._pll(psk8_pll_error(s1[0], s1[1]))
                 else:
+                    if self.acquired:
+                        a = abs((s1[0] + s1[1]) * (s1[0] - s1[1])) >> LK_PSH     # |Re s^2|
+                        b = abs(2 * s1[0] * s1[1]) >> LK_PSH                     # |Im s^2|
+                        self.lk_d += b - a
+                        self.lk_n += b + a
                     c = (1 << PLL_SOFT_SH) - 1
                     ci = max(-c, min(c, s1[0]))
                     cq = max(-c, min(c, s1[1]))
@@ -1163,6 +1220,7 @@ class Carrier:
         """Once the frequency is acquired, the frame type (data / dummy) is
         decided by coherent correlation with both headers, and reported to
         the frame sync (which decided it from differentials)."""
+        self.tcoh = self.acquired
         if self.acquired and self.Ha[0] ** 2 + self.Ha[1] ** 2 > self.H[0] ** 2 + self.H[1] ** 2:
             self.typ ^= 1
             self.H, self.Ha = self.Ha, self.H
@@ -1197,6 +1255,7 @@ class Carrier:
             self.favg = 0
             self.navg = 0
             self.n_acq += 1
+            self.acq_now = not self.pilots
             return f
         f = self.fll([self.zh])
         self.big = self.big + 1 if abs(f) > FLL_CLAMP else 0
@@ -1214,6 +1273,53 @@ class Carrier:
         if self.nhdr < 15:
             self.nhdr += 1
         return f
+
+    def _lock(self):
+        """Pilots off, at the end of each header (after the PLL's frequency
+        went into the NCO): lock decision on the data since the last
+        decision, frequency search (LK_*)."""
+        target = self.fhat + self.upd           # the NCO frequency after this header
+        if self.acq_now:
+            self.acq_now = False
+            self.srch = LK_SEARCH and not self.psk8
+            self.hyp = 0
+            self.f0 = target
+            self.lk_bad = 0
+            self.lk_d = self.lk_n = 0
+            return
+        if not self.acquired:
+            self.srch = False
+            self.lk_d = self.lk_n = 0
+            return
+        if self.lk_n < LK_NMIN:
+            return                              # (a dummy frame: keep accumulating)
+        lock = self.lk_d > (self.lk_n >> LK_SH)
+        self.lk_d = self.lk_n = 0
+        if self.srch:
+            if lock:
+                self.srch = False
+                self.lk_bad = 0
+                return
+            self.hyp += 1
+            self.n_fa += 1                      # (pilots off: the search's steps)
+            if self.hyp == LK_NHYP:
+                self.srch = False               # none locked: acquire again
+                self.acquired = False
+                self.big = 0
+                return
+            k = (self.hyp + 1) >> 1
+            off = k * LK_STEP if self.hyp & 1 else -k * LK_STEP
+            self.upd = self.f0 + off - self.fhat
+            self.nhdr = FLL_ACQ_NHDR
+            return
+        if LK_SEARCH:
+            self.lk_bad = 0 if lock else self.lk_bad + 1
+            if self.lk_bad == LK_LOSE:
+                self.srch = True
+                self.hyp = 0
+                self.f0 = target
+                self.lk_bad = 0
+                self.nhdr = FLL_ACQ_NHDR
 
     def _body_pos(self, q):
         """Index in the slot (>= 0), or -(index + 1) inside a pilot block."""
@@ -1463,6 +1569,8 @@ def write_rx_pkg(path=None):
     import os
     path = path or os.path.join(m.HERE, "..", "rtl", "gen", "dvbs2_rx_pkg.sv")
     assert PLL_SOFT_SH == 11            # the RTL clamp (SOFT_C, 12-bit ci, cq)
+    assert LK_STEP == 1 << LK_STEP_SH and LK_NHYP < 32 and LK_LOSE < 8
+    assert LK_PSH == 20                 # the RTL's 13-bit terms and 30-bit sums
     ra36, re36 = stat_consts(36)
     ra90, re90 = stat_consts(90)
     mul = [round((1 << 17) / (M + 1)) for M in FLL_STAGES]
@@ -1492,6 +1600,13 @@ def write_rx_pkg(path=None):
               "  localparam logic [2:0] PLL_GEAR_KI_SH [PLL_NGEAR] = '{" + ", ".join(f"3'd{g[2]}" for g in PLL_GEAR) + "};",
               f"  localparam logic [3:0] PLL_KICK_NHDR = 4'd{PLL_KICK_NHDR};",
               f"  localparam int PLL_SOFT_SH = {PLL_SOFT_SH};",
+              "  // pilots off, QPSK: lock detector and frequency search (model: LK_*)",
+              f"  localparam int LK_PSH = {LK_PSH};",
+              f"  localparam int LK_SH = {LK_SH};",
+              f"  localparam logic [29:0] LK_NMIN = 30'd{LK_NMIN};",
+              f"  localparam int LK_STEP_SH = {LK_STEP_SH};",
+              f"  localparam logic [4:0] LK_NHYP = 5'd{LK_NHYP};",
+              f"  localparam logic [2:0] LK_LOSE = 3'd{LK_LOSE};",
               f"  localparam logic [31:0] FS_THRESH_DEFAULT = 32'd{fs_threshold()};",
               f"  localparam logic signed [15:0] FA_THRESH = 16'sd{FA_THRESH};",
               f"  localparam logic signed [31:0] FA_STEP = 32'sd{FA_STEP};",

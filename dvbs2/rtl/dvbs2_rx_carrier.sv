@@ -308,7 +308,7 @@ module dvbs2_rx_carrier
     M_BLK_COR, M_BLK_CORW, M_BLK_ST1, M_BLK_ST1B, M_BLK_ST2, M_BLK_ST3, M_BLK_ST3B, M_BLK_DIVW,
     M_SEG_DIV, M_SEG_DIVW, M_SEG_DIVW2, M_SEG_SET, M_SEG_EMIT, M_SEG_DONE, M_PAD, M_BLK_END,
     M_TYP1, M_TYP3, M_HZ, M_HZ2, M_DUM_COR, M_DUM_CORW, M_DUM2,
-    M_SEG_FA1, M_SEG_FA2, M_SEG_FA3
+    M_SEG_FA1, M_SEG_FA2, M_SEG_FA3, M_LK, M_LK2
   } st_t;
   st_t st, ret_pad, ret_blk, seg_cont;
 
@@ -430,7 +430,33 @@ module dvbs2_rx_carrier
   logic [3:0]         big;
   logic signed [31:0] favg;
   logic [4:0]         navg;
-  logic [15:0]        n_fa, n_acq, n_retype;
+  logic [15:0]        n_fa, n_acq, n_retype;   // n_fa: pilots off, the frequency search's steps
+  // pilots off: the PLL's inputs besides the data (model: PLL_HDR_DA False,
+  // PLL_DUMMY_COH): no header symbols; a dummy body only if the frame's type
+  // was decided coherently (tcoh: acquired at its header)
+  logic               tcoh;
+  // pilots off, QPSK: lock detector and frequency search (model: LK_*,
+  // Carrier._lock): per data symbol after the PLL, |Re s^2| >> 20 and
+  // |Im s^2| >> 20 summed as D = im - re, N = im + re; at each header with
+  // N >= LK_NMIN locked = D > N >> LK_SH. Searching (srch) from the
+  // acquisition (f0): not locked -> hypothesis hyp + 1, the NCO to f0 + k
+  // 2^LK_STEP_SH (k = 1, -1, 2, -2, ..), after LK_NHYP hypotheses acquire
+  // again; locked: LK_LOSE frames in a row not locked search again around
+  // the current frequency (LK_*: dvbs2_rx_pkg)
+  logic               srch, acq_now;
+  logic [4:0]         hyp;
+  logic [31:0]        f0;
+  logic signed [29:0] lk_d;
+  logic [29:0]        lk_n;
+  logic [2:0]         lk_bad;
+  // per symbol / per header temporaries
+  logic               lk_v;
+  logic signed [16:0] lk_a, lk_b;
+  logic signed [33:0] lk_re;
+  logic signed [31:0] lk_im;
+  logic [12:0]        lk_ra, lk_ia;
+  logic               lk_ok, lk_en;
+  logic [31:0]        lk_f;
   // acquisition from confirmed headers: the last header (bank nconf of
   // zbuf) is confirmed when the next one is detected exactly its frame
   // length later; FLL_ACQ_N of them give the first estimate (all stages'
@@ -563,6 +589,14 @@ module dvbs2_rx_carrier
       cflip <= '0;
       since <= '0;
       dth <= '0;
+      tcoh <= 1'b0;
+      srch <= 1'b0;
+      acq_now <= 1'b0;
+      hyp <= '0;
+      f0 <= '0;
+      lk_d <= '0;
+      lk_n <= '0;
+      lk_bad <= '0;
     end else begin
       case (st)
         // ------------------------------------------------------------ input
@@ -662,6 +696,7 @@ module dvbs2_rx_carrier
           z_dum <= 1'b0;
           z_soft <= 1'b0;
           z_p8 <= 1'b0;
+          lk_v <= 1'b0;
           pll_e <= '0;
           if (is_hdr) begin : hdr
             logic signed [17:0] a_i, a_q;
@@ -678,7 +713,8 @@ module dvbs2_rx_carrier
             z_hdr <= 1'b1;
             st <= M_SYM2;
           end else if (typ) begin
-            pll_e <= 18'(s1q) - 18'(s1i);   // dummy body: (1+j)/sqrt2
+            // dummy body: (1+j)/sqrt2; only with the type decided coherently
+            pll_e <= tcoh ? 18'(s1q) - 18'(s1i) : 18'sd0;
             zi <= 18'(s1i) + 18'(s1q);       // z = s1 * (1 - j)
             zq <= 18'(s1q) - 18'(s1i);
             z_dum <= pilots && acquired;
@@ -712,6 +748,10 @@ module dvbs2_rx_carrier
               ci <= s1i > SOFT_C ? 12'(SOFT_C) : s1i < -SOFT_C ? 12'(-SOFT_C) : 12'(s1i);
               cq <= s1q > SOFT_C ? 12'(SOFT_C) : s1q < -SOFT_C ? 12'(-SOFT_C) : 12'(s1q);
               z_soft <= 1'b1;
+              // lock detector: s^2 = (I + Q)(I - Q) + j 2 I Q
+              lk_v <= acquired;
+              lk_a <= 17'(s1i) + 17'(s1q);
+              lk_b <= 17'(s1i) - 17'(s1q);
             end
             st <= M_SYM2;
           end
@@ -720,13 +760,15 @@ module dvbs2_rx_carrier
         M_SYM2: begin
           sq_zi <= 36'(36'(zi) * (z_soft ? 36'(ci) : z_p8 ? 36'(PSK8_K) : 36'(zi)));
           sq_zq <= 36'(36'(zq) * (z_soft ? 36'(cq) : z_p8 ? 36'(PSK8_K) : 36'(zq)));
+          lk_re <= 34'(lk_a) * 34'(lk_b);
+          lk_im <= 32'(s1i) * 32'(s1q);
           if (z_hdr) begin
             zw_v <= 1'b1; zw_a <= 10'({wb, 7'(p)}); zw_d <= {s1q, s1i};
             Hi <= Hi + 24'(zi);
             Hq <= Hq + 24'(zq);
             Hai <= Hai + 24'(zai);
             Haq <= Haq + 24'(zaq);
-            pll_e <= zq;
+            // (no PLL update from the header: its phase resets the PLL at the end)
           end
           if (z_pil || z_dum) begin
             Pi <= Pi + 24'(zi);
@@ -741,6 +783,8 @@ module dvbs2_rx_carrier
           if (z_hdr) Esum <= Esum + e2;
           if (z_pil) Pe <= Pe + e2;
           if (z_soft) pll_e <= 18'(($signed(sq_zi) - $signed(sq_zq)) >>> PLL_SOFT_SH);
+          lk_ra <= 13'((lk_re < 0 ? -lk_re : lk_re) >> LK_PSH);
+          lk_ia <= 13'((lk_im < 0 ? -lk_im : lk_im) >> (LK_PSH - 1));   // |2 I Q|
           e8_ci <= 18'(($signed(sq_zi) + 36'sd16384) >>> 15);
           e8_cq <= 18'(($signed(sq_zq) + 36'sd16384) >>> 15);
           e8_u  <= (zi + zq) >>> 1;
@@ -780,6 +824,10 @@ module dvbs2_rx_carrier
         M_PLL: begin : pll
           logic signed [17:0] e;
           e = (pilots || !acquired) ? 18'sd0 : pll_e;
+          if (lk_v) begin
+            lk_d <= lk_d + 30'($signed({1'b0, lk_ia})) - 30'($signed({1'b0, lk_ra}));
+            lk_n <= lk_n + 30'(lk_ia) + 30'(lk_ra);
+          end
           p_ki <= 36'(e) * 36'($signed({1'b0, ki_g}));
           p_kp <= 36'(e) * 36'($signed({1'b0, kp_g}));
           st <= M_PLL2;
@@ -839,6 +887,7 @@ module dvbs2_rx_carrier
         M_TYP3: begin : typ3
           logic nt;
           nt = typ;
+          tcoh <= acquired;
           // acquired: the type whose header correlates better (coherently)
           if (acquired && hha > hh) begin
             nt = !typ;
@@ -1019,6 +1068,7 @@ module dvbs2_rx_carrier
             favg <= '0;
             navg <= '0;
             n_acq <= n_acq + 16'd1;
+            acq_now <= !pilots;
             f_c <= f;
             fsh <= '0;
             fkick <= 1'b1;
@@ -1068,6 +1118,62 @@ module dvbs2_rx_carrier
           blen  <= 7'd90;
           blk_opens <= pilots && !typ;
           ret_blk <= M_NEXT;
+          st <= pilots ? M_BLK_COR : M_LK;
+        end
+
+        // ------------------------------------------------------------ lock detector, frequency search (pilots off)
+        M_LK: begin : lk1
+          logic [4:0] hn, k;
+          hn = hyp + 5'd1;
+          k  = (hn + 5'd1) >> 1;
+          lk_ok <= lk_d > $signed({1'b0, lk_n >> LK_SH});
+          lk_en <= lk_n >= LK_NMIN;
+          lk_f  <= hn[0] ? f0 + (32'(k) << LK_STEP_SH) : f0 - (32'(k) << LK_STEP_SH);
+          st <= M_LK2;
+        end
+
+        M_LK2: begin
+          // fhat: the NCO frequency after this header (the PLL's folded in)
+          if (acq_now) begin
+            acq_now <= 1'b0;
+            srch <= !is_psk8(modcod);
+            hyp <= '0;
+            f0 <= fhat;
+            lk_bad <= '0;
+            lk_d <= '0;
+            lk_n <= '0;
+          end else if (!acquired) begin
+            srch <= 1'b0;
+            lk_d <= '0;
+            lk_n <= '0;
+          end else if (lk_en) begin
+            lk_d <= '0;
+            lk_n <= '0;
+            if (srch) begin
+              if (lk_ok) begin
+                srch <= 1'b0;
+                lk_bad <= '0;
+              end else begin
+                hyp <= hyp + 5'd1;
+                n_fa <= n_fa + 16'd1;
+                if (hyp + 5'd1 == LK_NHYP) begin
+                  srch <= 1'b0;              // none locked: acquire again
+                  acquired <= 1'b0;
+                  big <= '0;
+                end else begin
+                  fhat <= lk_f;
+                  nhdr <= ACQ_NHDR;
+                end
+              end
+            end else if (lk_ok) lk_bad <= '0;
+            else if (lk_bad == LK_LOSE - 3'd1) begin
+              srch <= 1'b1;
+              hyp <= '0;
+              f0 <= fhat;
+              lk_bad <= '0;
+              nhdr <= ACQ_NHDR;
+            end else lk_bad <= lk_bad + 3'd1;
+          end
           st <= M_BLK_COR;
         end
 

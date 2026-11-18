@@ -23,8 +23,10 @@
 // adds 0x100 s to the 1.x offsets; VERSION, ID and SCRATCH read the same in
 // every bank. The slot's settings are static while it runs: change them with
 // the slot disabled or in its soft reset.
-//   0x200 VERSION     RO  0x0002_0100: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD
-//                         [9], packet header [38]) (0x0002_0000: two receive slots, register map v2, the DDR LLR
+//   0x200 VERSION     RO  0x0002_0101: pilots off, the carrier's PLL is not driven by the
+//                         headers, and a lock detector with a frequency search after the
+//                         acquisition (QPSK) (0x0002_0100: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD
+//                         [9], packet header [38]); 0x0002_0000: two receive slots, register map v2, the DDR LLR
 //                         queue in the path (on once LLRQ_BASE is set), a slot's reset
 //                         drops everything of the slot from before it (0x0001_0500: DDR LLR queue (0xDC..0xF0), the
 //                         packet header's MODCOD/pilots are the frame's own; 0x0001_0402:
@@ -113,7 +115,8 @@
 //   +0x88 LDPC_FAILED RO  ... not converged
 //   +0x8C PKT_DROPPED RO  frames of the slot dropped (both packet slots full)
 //   +0x90 PKT_SENT    RO  packets of the slot sent
-//   +0x94 CARRIER_ACQ RO  [15:0] frequency acquisitions, [31:16] 1/1476 false-lock corrections
+//   +0x94 CARRIER_ACQ RO  [15:0] frequency acquisitions, [31:16] pilots on: 1/1476 false-lock
+//                         corrections; pilots off: frequency search steps (from 0x0002_0101)
 //   +0x98 CARRIER_RETYPE RO [15:0] frame types changed by the coherent decision
 //   +0x9C BCH         RO  [15:0] frames corrected, [31:16] frames not decodable
 //   +0xA0 SNAP_CTRL   RW  as 0x2A0, the slot being this bank's (a write sets SNAP_CTRL[3] = s)
@@ -218,7 +221,7 @@ module dvbs2_rx_axi #(
   output logic        m_axi_rready
 );
 
-  localparam logic [31:0] VERSION = 32'h0002_0100;
+  localparam logic [31:0] VERSION = 32'h0002_0101;
   wire clk = s_axi_aclk;
 
   // ---------------------------------------------------------------- registers

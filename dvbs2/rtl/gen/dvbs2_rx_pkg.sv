@@ -21,6 +21,13 @@ package dvbs2_rx_pkg;
   localparam logic [2:0] PLL_GEAR_KI_SH [PLL_NGEAR] = '{3'd2, 3'd4};
   localparam logic [3:0] PLL_KICK_NHDR = 4'd2;
   localparam int PLL_SOFT_SH = 11;
+  // pilots off, QPSK: lock detector and frequency search (model: LK_*)
+  localparam int LK_PSH = 20;
+  localparam int LK_SH = 6;
+  localparam logic [29:0] LK_NMIN = 30'd131072;
+  localparam int LK_STEP_SH = 20;
+  localparam logic [4:0] LK_NHYP = 5'd9;
+  localparam logic [2:0] LK_LOSE = 3'd4;
   localparam logic [31:0] FS_THRESH_DEFAULT = 32'd324444;
   localparam logic signed [15:0] FA_THRESH = 16'sd19661;
   localparam logic signed [31:0] FA_STEP = 32'sd2909869;

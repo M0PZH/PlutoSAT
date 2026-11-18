@@ -481,7 +481,7 @@ CR_CONTEXT = [
     "idle", "Hi", "Hq", "Hai", "Haq", "Pi", "Pq", "Esum", "Pe", "A", "E", "nblk", "stat_rst", "G",
     "seg_pend", "owner_ended", "nd", "th0", "len0", "oc_push", "fmute", "smute", "acquired", "nconf",
     "big", "favg", "navg", "n_fa", "n_acq", "n_retype", "wb", "ap_v", "ap_typ", "prev_ok", "since",
-    "cflip", "c90", "dth",
+    "cflip", "c90", "dth", "tcoh", "srch", "acq_now", "hyp", "f0", "lk_d", "lk_n", "lk_bad",
 ]
 # written and read within one symbol or one header / known-block / segment job
 # (M_IDLE back to M_IDLE)
@@ -494,6 +494,7 @@ CR_TEMP = [
     "fa_stepk", "fa_jump", "sph", "sk", "sk_done", "inflight", "p_dd", "ret_pad", "ret_blk", "seg_cont",
     "zrbuf", "hz1_si", "hz1_sq", "hz1_a", "hz2_a", "hz2_i", "hz2_q", "zr2_ph", "zr2_tag",
     "z_p8", "e8_ci", "e8_cq", "e8_u", "e8_v", "e8_a", "e8_k",
+    "lk_v", "lk_a", "lk_b", "lk_re", "lk_im", "lk_ra", "lk_ia", "lk_ok", "lk_en", "lk_f",
 ]
 # the engine itself: state, unit operands and strobes, buffer write ports, the
 # LLR pipeline input (its words carry the slot), the header z and zbuf read pipelines
