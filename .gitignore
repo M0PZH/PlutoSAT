@@ -70,4 +70,13 @@ awgn/sw/rx-awgn
 awgn/sw/ts-prbs
 awgn/syn/out/
 nbiq/syn/clockInfo.txt
+
+# narrowband IQ transmitter
+iqtx/.venv/
+iqtx/sim/build/
+iqtx/sw/iqtx
+iqtx/syn/out_*/
+iqtx/syn/*.log
+iqtx/syn/.Xil/
+iqtx/syn/clockInfo.txt
 awgn/syn/clockInfo.txt

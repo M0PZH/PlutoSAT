@@ -1,0 +1,235 @@
+# Narrowband IQ transmitter (iqtx/): complex baseband from a DDR ring (UIO
+# map 1, read by the core through S_AXI_HP0) -> envelope -> FIR x5 -> CIC x
+# RATE -> NCO -> AD9363 TX1, and the DAC source mux (DVB-S2 TX / IQ TX / off).
+# Ring words: {Q[15:0], I[15:0]}, little-endian, int16. See iqtx/README.md.
+[core]
+name = "iqtx"
+title = "Narrowband IQ transmitter"
+uio = "iqtx"
+size = 0x10000
+id = { offset = 0x004, value = 0x49515458 }
+version = { offset = 0x000, value = 0x00010000 }
+rtl = "iqtx/rtl/iqtx_axi.sv"
+maps = ["regs", "ring"]
+
+[[reg]]
+name = "VERSION"
+offset = 0x000
+access = "ro"
+reset = 0x00010000
+doc = "Core version (major in [31:16])"
+
+[[reg]]
+name = "ID"
+offset = 0x004
+access = "ro"
+reset = 0x49515458
+doc = "Core identifier \"IQTX\""
+
+[[reg]]
+name = "CTRL"
+offset = 0x008
+access = "rw"
+reset = 0
+doc = "Control"
+  [[reg.field]]
+  name = "EN"
+  bits = [0, 0]
+  doc = "1: start (once IQ TX is the active DAC source; ramps up from the first sample); 0: ramp down, flush, stop (STATUS.BUSY falls)"
+
+[[reg]]
+name = "TX_SRC"
+offset = 0x00C
+access = "rw"
+reset = 0
+doc = "Requested DAC source; becomes active only while the active and the requested source are both silent"
+  [[reg.field]]
+  name = "SRC"
+  bits = [0, 1]
+  doc = "DAC channel 0 source (3 reads back as 2)"
+  enum = { DVBS2 = 0, IQ = 1, OFF = 2 }
+
+[[reg]]
+name = "STATUS"
+offset = 0x010
+access = "ro"
+doc = "Status"
+  [[reg.field]]
+  name = "ACTIVE"
+  bits = [0, 1]
+  doc = "Active DAC source"
+  enum = { DVBS2 = 0, IQ = 1, OFF = 2 }
+  [[reg.field]]
+  name = "PENDING"
+  bits = [2, 2]
+  doc = "TX_SRC differs from ACTIVE (waiting for both sources to be silent)"
+  [[reg.field]]
+  name = "BUSY"
+  bits = [3, 3]
+  doc = "Running, ramping down or flushing (not idle)"
+  [[reg.field]]
+  name = "WAIT"
+  bits = [4, 4]
+  doc = "Enabled, waiting for IQ TX to become the active source"
+  [[reg.field]]
+  name = "STOPPING"
+  bits = [5, 5]
+  doc = "Ramping down or flushing after EN = 0"
+  [[reg.field]]
+  name = "DVB_SILENT"
+  bits = [6, 6]
+  doc = "The DVB-S2 TX output has been zero for 16 samples"
+  [[reg.field]]
+  name = "STARTED"
+  bits = [7, 7]
+  doc = "Busy and the first ring sample has been taken"
+
+[[reg]]
+name = "RATE"
+offset = 0x014
+access = "rw"
+reset = 50
+doc = "CIC interpolation R, 8..400: input rate 12 MS/s / (5 R) (48 kS/s at 50); latched at the start"
+  [[reg.field]]
+  name = "R"
+  bits = [0, 8]
+  doc = "R, 8..400"
+
+[[reg]]
+name = "GAIN"
+offset = 0x018
+access = "rw"
+reset = 0x4000
+doc = "Digital gain, Q2.14 (0x4000 = 1.0: an int16 full-scale input gives a 16-bit full-scale output); applies from the next sample"
+  [[reg.field]]
+  name = "GAIN"
+  bits = [0, 15]
+  doc = "Gain x 2^14"
+
+[[reg]]
+name = "FINC"
+offset = 0x01C
+access = "rw"
+reset = 0
+doc = "NCO step (signed): the signal moves by FINC / 2^32 * 12 MHz (2.8 mHz steps); phase-continuous, applies at once"
+
+[[reg]]
+name = "RAMP"
+offset = 0x020
+access = "rw"
+reset = 8
+doc = "Start/stop ramp (raised cosine); latched at the start"
+  [[reg.field]]
+  name = "RLOG"
+  bits = [0, 3]
+  doc = "Ramp length 2^RLOG input samples (8: 5.3 ms at 48 kS/s; 0: none)"
+
+[[reg]]
+name = "RING_BASE"
+offset = 0x024
+access = "rw"
+reset = 0
+doc = "Ring physical address, aligned to RING_MASK + 1"
+
+[[reg]]
+name = "RING_MASK"
+offset = 0x028
+access = "rw"
+reset = 0xFFF
+doc = "Ring size - 1 (size a power of two >= 4096)"
+
+[[reg]]
+name = "WPTR"
+offset = 0x02C
+access = "rw"
+reset = 0
+doc = "Bytes written to the ring by software, wraps at 2^32; bits [5:0] ignored (the core reads 64-byte blocks)"
+
+[[reg]]
+name = "RPTR"
+offset = 0x030
+access = "ro"
+reset = 0
+doc = "Bytes fetched by the core, wraps at 2^32; set to WPTR & ~63 when the core stops (unplayed data is dropped)"
+
+[[reg]]
+name = "LOWATER"
+offset = 0x034
+access = "rw"
+reset = 0
+doc = "Low-water mark in bytes: IRQ_STATUS.LOW when WPTR - RPTR falls below it while playing"
+
+[[reg]]
+name = "IRQ_EN"
+offset = 0x038
+access = "rw"
+reset = 0
+doc = "Interrupt enables (bits as IRQ_STATUS)"
+  [[reg.field]]
+  name = "LOW"
+  bits = [0, 0]
+  doc = "Low water"
+  [[reg.field]]
+  name = "IDLE"
+  bits = [1, 1]
+  doc = "Stopped"
+  [[reg.field]]
+  name = "UNDERRUN"
+  bits = [2, 2]
+  doc = "Underrun"
+
+[[reg]]
+name = "IRQ_STATUS"
+offset = 0x03C
+access = "w1c"
+reset = 0
+doc = "Interrupt events; write 1 to clear"
+  [[reg.field]]
+  name = "LOW"
+  bits = [0, 0]
+  doc = "The fill (WPTR - RPTR) fell below LOWATER"
+  [[reg.field]]
+  name = "IDLE"
+  bits = [1, 1]
+  doc = "The core stopped (ramp-down and flush done)"
+  [[reg.field]]
+  name = "UNDERRUN"
+  bits = [2, 2]
+  doc = "An input sample was replaced by zero (ring empty)"
+
+[[reg]]
+name = "SAMPLES"
+offset = 0x040
+access = "ro"
+doc = "Input samples played since the start (including ramps and underrun zeros)"
+
+[[reg]]
+name = "UNDERRUNS"
+offset = 0x044
+access = "ro"
+doc = "Input samples replaced by zero since the start (ring empty)"
+
+[[reg]]
+name = "DAC_UNDERRUNS"
+offset = 0x048
+access = "ro"
+doc = "DAC samples with IQ TX active and no sample at hand (a core fault; stays 0)"
+
+[[reg]]
+name = "INFO"
+offset = 0x04C
+access = "ro"
+reset = 0x01900805
+doc = "Core parameters"
+  [[reg.field]]
+  name = "FIR_L"
+  bits = [0, 7]
+  doc = "FIR interpolation (5)"
+  [[reg.field]]
+  name = "RATE_MIN"
+  bits = [8, 15]
+  doc = "Minimum RATE (8)"
+  [[reg.field]]
+  name = "RATE_MAX"
+  bits = [16, 31]
+  doc = "Maximum RATE (400)"
