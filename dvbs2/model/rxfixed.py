@@ -438,8 +438,8 @@ FS_PLS_AT = 3072
 FS_PLS_NBAD = 3
 FS_CHK1 = 4
 FS_CHK2 = 10
-# Probes (2.1.3): in SEARCH, a new search peak above max(threshold,
-# FS_PROBE_K x the mean metric) is tagged for the PLS decoder only (not the
+# Probes (2.1.3): in SEARCH, a new search peak above FS_PROBE_K x the mean
+# metric (from symbol FS_DELAY on) is tagged for the PLS decoder only (not the
 # carrier, not the frame sync's states), if no tag's or probe's decode is
 # pending (FS_PLS_AT): the next tag after a probe is a check of that peak or
 # of a later one, >= L_DUMMY - FS_W symbols on, so every probe and tag is
@@ -608,8 +608,8 @@ class FrameSync:
                 # the carrier takes for confirmed headers, and keeps the search
                 # from ever reaching the real header
                 # probe: a new search peak, no decode pending (FS_PROBE_K)
-                if (best[1] == k and k > 88 and pls_at is None and self.probe_k
-                        and best[0] > max(self.T, self.probe_k * self.nm)):
+                if (best[1] == k and k >= FS_DELAY and pls_at is None and self.probe_k
+                        and best[0] > self.probe_k * self.nm):
                     probe[k - 89] = 1
                     pls_at, pls_n = k + FS_PLS_AT, len(pls.results) if pls is not None else 0
                     self.events.append(("probe", k - 89, best[2], best[0]))

@@ -216,6 +216,8 @@ def table(args):
     from multiprocessing import Pool
     jobs = []
     for (mc, sh, e) in CASES:
+        if args.short >= 0 and sh != args.short:
+            continue
         for p in (0, 1):
             for s in range(args.starts):
                 kw = dict(cfg=(args.cfg_modcod, p if args.cfg_pilots < 0 else args.cfg_pilots, 0),
@@ -234,8 +236,8 @@ def summarize(res):
     groups = {}
     for r in res:
         groups.setdefault((r["modcod"], r["short"], r["pilots"], r["esn0"]), []).append(r)
-    print("MODCOD short pilots Es/N0 | detected | frames to first (median/max) | false conf / decodes "
-          "| real tags | false-conf best max")
+    print("MODCOD short pilots Es/N0 | detected | frames to first (median/max) | k symbols (median/max) "
+          "| false conf / decodes | real tags (probes)")
     tf = tn = 0
     for k, rs in sorted(groups.items()):
         det = [r for r in rs if r["first"] is not None]
@@ -243,20 +245,21 @@ def summarize(res):
         nf = sum(r["nfalse"] for r in rs)
         nd = sum(r["ndec"] for r in rs)
         nreal = sum(r["nreal"] for r in rs)
-        npr = sum(r["nprobe"] for r in rs)
-        fb = [d["best"] for r in rs for d in r["dec"] if d["conf"] and not d["real"]]
+        npr = sum(r.get("nprobe", 0) for r in rs)
+        ks = sorted(r["first"] / 1000 for r in det)
         tf += nf
         tn += nd
         print(f"{k[0]:3d} {k[1]} {k[2]} {k[3]:5.1f} | {len(det)}/{len(rs)} | "
               f"{(fr[len(fr) // 2] if fr else float('nan')):5.1f} / {(fr[-1] if fr else float('nan')):5.1f} | "
-              f"{nf} / {nd} | {nreal} (probes {npr}) | {max(fb) if fb else '-'}")
+              f"{(ks[len(ks) // 2] if ks else float('nan')):5.1f} / {(ks[-1] if ks else float('nan')):5.1f} | "
+              f"{nf} / {nd} | {nreal} ({npr})")
     print(f"total false confident {tf} of {tn} decodes")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modcod", type=int, default=13)
-    ap.add_argument("--short", type=int, default=0)
+    ap.add_argument("--short", type=int, default=0, help="(--table: only these frames, -1 all)")
     ap.add_argument("--pilots", type=int, default=1)
     ap.add_argument("--esn0", type=float, default=7.0)
     ap.add_argument("--cfg-modcod", type=int, default=6)
@@ -271,7 +274,13 @@ def main():
     ap.add_argument("--probe", type=int, default=None)
     ap.add_argument("--jobs", type=int, default=os.cpu_count() // 2)
     ap.add_argument("--out")
+    ap.add_argument("--summarize", nargs="*", help="summarize saved --out files")
     a = ap.parse_args()
+    if a.summarize:
+        res = []
+        for f in a.summarize:
+            res += json.load(open(f))
+        return summarize(res)
     if a.table:
         return table(a)
     for s in range(a.starts):
