@@ -1,6 +1,7 @@
 """dvbs2_tx end to end.
 
-* PLFRAME symbols (tap before shaping) vs gr-dtv dvbs2_physical_cc: exact.
+* PLFRAME symbols (tap before shaping) vs gr-dtv dvbs2_physical_cc: exact,
+  QPSK and 8PSK, normal and short FECFRAMEs, mixed frame by frame.
 * Dummy PLFRAMEs vs the model.
 * Output samples (RRC interpolation + NCO) vs the bit-exact model: exact.
 * Low symbol rates (RRC by P + CIC by R, P x R up to 360 samples per symbol)
@@ -20,19 +21,26 @@ from axis import Sink, Source
 TPP = 16
 
 
-def gr_reference(rate_idx, pilots, gold, seed):
-    """One BBFRAME (bits) and gr-dtv's PLFRAME symbol signs for it."""
+def gr_reference(modcod, pilots, gold, seed, short=False):
+    """One BBFRAME (bits) and gr-dtv's PLFRAME symbols for it, as phase indices."""
+    rate_idx, psk8 = m.modcod_info(modcod)
     rate = m.RATES[rate_idx]
-    kbch = m.LDPC[rate]["kbch"]
+    kbch = m.rate_params(rate_idx, short)[0]
     rng = np.random.default_rng(seed)
     npk = 2 * kbch // (8 * 188) + 2
     ts = rng.integers(0, 256, (npk, 188), dtype=np.uint8)
     ts[:, 0] = 0x47
-    ref = grref.tx_chain(ts.ravel(), rate, pilots=bool(pilots), goldcode=gold)
-    nsym = 90 + 32400 + (22 * 36 if pilots else 0)
+    ref = grref.tx_chain(ts.ravel(), rate, pilots=bool(pilots), goldcode=gold, short=short, psk8=psk8)
+    nsym = m.plframe_len(modcod, pilots, short)
     pl = ref["plframe"][0::2][:nsym]   # gr-dtv zero-stuffs to 2 samples/symbol
-    signs = np.stack([pl.real < 0, pl.imag < 0], axis=1).astype(np.uint8)
-    return ref["bbframe"][:kbch], signs
+    ph = np.round(np.angle(pl) / (np.pi / 4)).astype(np.int64) % 8
+    return ref["bbframe"][:kbch], ph
+
+
+def user_of(modcod, pilots, short=False):
+    """s_user = {psk8, short, pilots, rate_idx}."""
+    rate_idx, psk8 = m.modcod_info(modcod)
+    return (int(psk8) << 6) | (int(short) << 5) | (int(pilots) << 4) | rate_idx
 
 
 async def setup(dut, sps, gold, finc, rolloff=0.35, cfg=None):
@@ -72,15 +80,14 @@ async def symbol_monitor(dut, out):
     while True:
         await ReadOnly()
         if dut.sym_valid.value:
-            out.append((int(dut.sym_si.value), int(dut.sym_sq.value),
-                        int(dut.sym_sof.value), int(dut.sym_dummy.value)))
+            out.append((int(dut.sym_ph.value), int(dut.sym_sof.value), int(dut.sym_dummy.value)))
         await RisingEdge(dut.clk)
 
 
 def split_frames(syms):
-    syms = np.array(syms, dtype=np.uint8)
-    starts = list(np.flatnonzero(syms[:, 2])) + [len(syms)]
-    return [(bool(syms[a, 3]), syms[a:b, :2]) for a, b in zip(starts[:-1], starts[1:])]
+    syms = np.array(syms, dtype=np.int64)
+    starts = list(np.flatnonzero(syms[:, 1])) + [len(syms)]
+    return [(bool(syms[a, 2]), syms[a:b, 0]) for a, b in zip(starts[:-1], starts[1:])]
 
 
 def to_signed16(v):
@@ -95,11 +102,12 @@ async def run(dut, frames, sps, gold, finc, stall, check_samples):
     cocotb.start_soon(snk.run())
     src = Source(dut)
 
-    refs = [gr_reference(r, p, gold, seed=50 + k) for k, (r, p) in enumerate(frames)]
+    frames = [f if len(f) == 3 else (f[0], f[1], False) for f in frames]
+    refs = [gr_reference(mc, p, gold, seed=50 + k, short=sh) for k, (mc, p, sh) in enumerate(frames)]
     beats = []
-    for (r, p), (bb, _) in zip(frames, refs):
+    for (mc, p, sh), (bb, _) in zip(frames, refs):
         by = np.packbits(bb)
-        beats += [{"data": int(b), "user": (p << 4) | r, "last": int(k == len(by) - 1)}
+        beats += [{"data": int(b), "user": user_of(mc, p, sh), "last": int(k == len(by) - 1)}
                   for k, b in enumerate(by)]
     dut.enable.value = 1
     cocotb.start_soon(src.send(beats))
@@ -124,21 +132,21 @@ async def run(dut, frames, sps, gold, finc, stall, check_samples):
     dut._log.info(f"captured {len(got)} PLFRAMEs: {len(data)} data, {len(dummies)} dummy")
     assert len(data) >= len(frames)
 
-    for k, ((r, p), (_, ref)) in enumerate(zip(frames, refs)):
+    for k, ((mc, p, sh), (_, ref)) in enumerate(zip(frames, refs)):
         f = data[k]
         assert len(f) == len(ref), (len(f), len(ref))
-        bad = np.flatnonzero((f != ref).any(axis=1))
+        bad = np.flatnonzero(f != ref)
         assert bad.size == 0, f"data frame {k}: {bad.size} symbol errors, first {bad[:5]}"
-        dut._log.info(f"PLFRAME {k} (MODCOD {r + 1}, pilots {p}): {len(f)} symbols match gr-dtv")
+        dut._log.info(f"PLFRAME {k} (MODCOD {mc}, pilots {p}, short {sh}): {len(f)} symbols match gr-dtv")
 
-    dref = m.dummy_plframe_signs(gold)
+    dref = m.dummy_plframe_phases(gold)
     for f in dummies[:-1]:            # the last one may be truncated
         assert np.array_equal(f, dref), "dummy PLFRAME mismatch"
     dut._log.info(f"{len(dummies) - 1} complete dummy PLFRAMEs match the model")
 
     if check_samples:
-        allsyms = np.array(syms, dtype=np.uint8)[:, :2]
-        model = m.nco_mix(m.rrc_interp(m.signs_to_iq(allsyms), coefs, sps, TPP), finc)
+        allsyms = np.array(syms, dtype=np.int64)[:, 0]
+        model = m.nco_mix(m.rrc_interp(m.phases_to_iq(allsyms), coefs, sps, TPP), finc)
         rtl = np.array([(to_signed16(i), to_signed16(q)) for i, q in snk.beats], dtype=np.int64)
         n = min(len(rtl), len(model))
         assert n > 1000
@@ -150,14 +158,23 @@ async def run(dut, frames, sps, gold, finc, stall, check_samples):
 @cocotb.test()
 async def tx_symbols_and_samples(dut):
     """Two data frames (1/2 pilots, 9/10 no pilots) among dummies, sps=4, NCO on."""
-    await run(dut, [(3, 1), (10, 0)], sps=4, gold=0, finc=0x0A3D70A4, stall=0.3,
+    await run(dut, [(4, 1), (11, 0)], sps=4, gold=0, finc=0x0A3D70A4, stall=0.3,
               check_samples=True)
+
+
+@cocotb.test()
+async def tx_8psk_short(dut):
+    """8PSK and short FECFRAMEs mixed with QPSK frame by frame: 8PSK 3/5
+    (reversed bit order) pilots, QPSK 1/4 short, 8PSK 9/10 no pilots, 8PSK
+    2/3 short pilots, QPSK 8/9 short; samples (8PSK amplitudes) vs the model."""
+    await run(dut, [(12, 1, False), (1, 1, True), (17, 0, False), (13, 1, True), (10, 0, True)],
+              sps=2, gold=7, finc=0x0A3D70A4, stall=0.2, check_samples=True)
 
 
 @cocotb.test()
 async def tx_gold_code(dut):
     """Gold code n = 12345, rates 1/4 and 8/9 with pilots."""
-    await run(dut, [(0, 1), (9, 1)], sps=2, gold=12345, finc=0, stall=0.0,
+    await run(dut, [(1, 1), (10, 1)], sps=2, gold=12345, finc=0, stall=0.0,
               check_samples=False)
 
 
@@ -201,12 +218,12 @@ async def run_rate(dut, cfg, finc, nsym, stall=0.3, carrier=False):
     while len(snk.beats) < nsym * sps:
         await RisingEdge(dut.clk)
     dut.enable.value = 0
-    s = np.array(syms, dtype=np.uint8)[:, :2]
-    dref = m.dummy_plframe_signs(0)
+    s = np.array(syms, dtype=np.int64)[:, 0]
+    dref = m.dummy_plframe_phases(0)
     assert len(s) <= len(dref) and np.array_equal(s, dref[:len(s)]), "dummy PLFRAME symbols differ"
     if carrier:
-        s = np.zeros_like(s)
-    model = m.nco_mix(m.tx_shape(m.signs_to_iq(s), cfg, TPP), finc)
+        s = np.ones_like(s)
+    model = m.nco_mix(m.tx_shape(m.phases_to_iq(s), cfg, TPP), finc)
     rtl = np.array([(to_signed16(i), to_signed16(q)) for i, q in snk.beats], dtype=np.int64)
     n = len(rtl)
     assert len(model) >= n

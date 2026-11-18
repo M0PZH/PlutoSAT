@@ -7,7 +7,7 @@ module tb_ldpc_dec;
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
 
-  logic [3:0] s_rate, m_rate;
+  logic [4:0] s_rate, m_rate;
   logic [5:0] s_max_it, it_cap;
   logic [7:0] s_tag, m_tag;
   logic it_cap_en;
@@ -49,7 +49,7 @@ module tb_ldpc_dec;
           rc = $fscanf(fi, "%h %h %d %d %d %d", vi, vq, a, ra, mi, tg);
           if (rc == 6) begin
             s_valid <= 1; s_llr_i <= vi; s_llr_q <= vq; s_first <= a[0]; n_in++;
-            s_rate <= 4'(ra); s_max_it <= 6'(mi); s_tag <= 8'(tg);
+            s_rate <= 5'(ra); s_max_it <= 6'(mi); s_tag <= 8'(tg);
           end else eof <= 1;
         end
       end

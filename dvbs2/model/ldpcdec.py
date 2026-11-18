@@ -1,4 +1,4 @@
-"""DVB-S2 LDPC decoder, normal FECFRAMEs: bit-exact model of rtl/dvbs2_ldpc_dec.sv.
+"""DVB-S2 LDPC decoder, normal and short FECFRAMEs: bit-exact model of rtl/dvbs2_ldpc_dec.sv.
 
 Layered offset min-sum on the quasi-cyclic form of the parity-check
 matrix (EN 302 307-1 5.3.2 tables):
@@ -21,6 +21,12 @@ column group is stored as S words of P values: word w, lane i holds
 m = w + S*i; an edge reads word (b - t0) mod S rotated by (b - t0) div S.
 
 Stops after an iteration with all checks satisfied and no APP sign change.
+
+Short FECFRAMEs: some codes (1/4, 1/2, 3/4, 4/5, 5/6) have layers of
+different check degrees; their layers are padded to the largest degree
+with absent edges (PAD_G in the RTL edge ROM: never the minimum, sign 0, no
+parity contribution, no write), so every layer of a code has the same
+number of edges.
 """
 
 import numpy as np
@@ -51,6 +57,7 @@ def sat(a, w):
 
 
 OFFSET = 1           # offset min-sum: |R| = max(min - 1 LSB, 0)
+PAD_G = 255          # column group of an absent (padding) edge in the RTL ROM
 
 
 def norm(mag):
@@ -61,8 +68,9 @@ def norm(mag):
 class Code:
     """Layer structure of one code rate."""
 
-    def __init__(self, rate_idx):
-        L = m.LDPC[m.RATES[rate_idx]]
+    def __init__(self, rate_idx, short=False):
+        L = (m.LDPC_SHORT if short else m.LDPC)[m.RATES[rate_idx]]
+        self.N = m.nldpc(short)
         self.q = q = L["q"]
         self.M = L["nparity"]
         self.K = L["kldpc"]
@@ -72,6 +80,12 @@ class Code:
         for g, row in enumerate(L["table"]):
             for x in row:
                 layers[x % q].append((g, x // q, False))
+        # pad the info edges to one degree (irregular short codes); the two
+        # parity edges come last (the RTL generates them, they are not in
+        # its edge ROM)
+        dinfo = max(len(lay) for lay in layers)
+        for lay in layers:
+            lay.extend([(PAD_G, 0, "pad")] * (dinfo - len(lay)))
         for j in range(q):
             if j == 0:
                 layers[j].append((self.ng + q - 1, 1, True))   # p_(c-1), absent at t = 0
@@ -79,7 +93,8 @@ class Code:
                 layers[j].append((self.ng + j - 1, 0, False))
             layers[j].append((self.ng + j, 0, False))
         self.layers = layers
-        self.dup = [len({e[0] for e in lay}) != len(lay) for lay in layers]
+        self.dup = [len({e[0] for e in lay if e[2] != "pad"}) != len([e for e in lay if e[2] != "pad"])
+                    for lay in layers]
 
     def perm(self):
         """Codeword position of (column group, m) for all groups: (ng+q, 360)."""
@@ -89,13 +104,13 @@ class Code:
 
 
 class Decoder:
-    def __init__(self, rate_idx):
-        self.code = Code(rate_idx)
+    def __init__(self, rate_idx, short=False):
+        self.code = Code(rate_idx, short)
         c = self.code
         self.pos = c.perm()
 
     def decode(self, llr, max_it=MAX_IT):
-        """llr: 64800 int8 (codeword order). Returns (hard bits 64800, iterations,
+        """llr: Nldpc int8 (codeword order). Returns (hard bits, iterations,
         converged)."""
         c = self.code
         L = np.clip(np.asarray(llr, np.int64)[self.pos], -LCH, LCH)   # (groups, 360)
@@ -125,7 +140,7 @@ class Decoder:
             if unsat == 0 and flips == 0:
                 conv = True
                 break
-        hard = np.zeros(64800, np.uint8)
+        hard = np.zeros(c.N, np.uint8)
         hard[self.pos.ravel()] = (L.ravel() < 0).astype(np.uint8)
         return hard, it, conv
 
@@ -141,9 +156,13 @@ class Decoder:
         for e, (G, t0, special) in enumerate(lay):
             mm = (T - t0) % 360
             idx.append(mm)
-            if special:
-                valid[e] = T != 0
-            lv = L[G, mm]
+            if special == "pad":
+                valid[e] = False
+                lv = np.zeros(n, np.int64)
+            else:
+                if special:
+                    valid[e] = T != 0
+                lv = L[G, mm]
             mag = norm(np.where(ix[T] == e, m2[T], m1[T]))
             ro = np.where((st[T] ^ sg[e, T]) == 1, -mag, mag)
             Ro[e] = ro
@@ -170,6 +189,8 @@ class Decoder:
             magn = norm(np.where(i1 == e, a2, a1))
             rn = np.where((stot ^ sgn[e]) == 1, -magn, magn)
             v = valid[e]
+            if special == "pad":
+                continue
             old = L[G, mm[v]]
             new = sat(old + rn[v] - Ro[e][v], WA)
             flips += int(np.count_nonzero((old < 0) != (new < 0)))
@@ -182,24 +203,30 @@ class Decoder:
 # ---------------------------------------------------------------------------
 
 def write_rtl_tables(gen_dir=None):
-    """rtl/gen/ldpc_dec_rom.mem (edges of every layer of every rate:
-    {k0[4:0], w0[4:0], G[7:0]}, t0 = k0*S + w0; the special edge is layer 0's
-    edge to parity group q-1) and
-    rtl/gen/dvbs2_ldpc_dec_pkg.sv (per-rate parameters)."""
+    """rtl/gen/ldpc_dec_rom.mem (the info edges of every layer of every code,
+    padded: {k0[4:0], w0[4:0], G[7:0]}, t0 = k0*S + w0; normal rates 0..10,
+    then short 0..9; the two parity edges of each layer, the last ones, are
+    generated by the RTL: layer j to parity groups j - 1 (layer 0: q - 1 with
+    shift 1, the special edge) and j) and
+    rtl/gen/dvbs2_ldpc_dec_pkg.sv (per-code parameters, indexed {short,
+    rate_idx[3:0]}; unused indices repeat the nearest code)."""
     import os
     gen_dir = gen_dir or os.path.join(m.HERE, "..", "rtl", "gen")
-    rom, rows = [], []
-    for ri in range(11):
-        c = Code(ri)
-        base = len(rom)
-        for lay in c.layers:
-            for G, t0, special in lay:
-                rom.append(((t0 // S) << 13) | ((t0 % S) << 8) | G)
-        rows.append((base, c.q, c.ng, len(c.layers[0]), c.kbch, c.K))
+    rom, rows = [], {}
+    for short in (False, True):
+        for ri in range(10 if short else 11):
+            c = Code(ri, short)
+            base = len(rom)
+            for lay in c.layers:
+                for G, t0, special in lay[:-2]:
+                    rom.append(((t0 // S) << 13) | ((t0 % S) << 8) | G)
+            rows[16 * short + ri] = (base, c.q, c.ng, len(c.layers[0]), c.kbch, c.K, c.N)
     with open(os.path.join(gen_dir, "ldpc_dec_rom.mem"), "w") as f:
         for v in rom:
             f.write(f"{v:05x}\n")
-    L = ["// Generated by model/ldpcdec.py write_rtl_tables(): LDPC decoder parameters.",
+    full = [rows[(i & 16) + min(i & 15, 9 if i & 16 else 10)] for i in range(32)]
+    L = ["// Generated by model/ldpcdec.py write_rtl_tables(): LDPC decoder parameters,",
+         "// indexed {short, rate_idx[3:0]} (unused indices repeat the nearest code).",
          "package dvbs2_ldpc_dec_pkg;",
          f"  localparam int LD_P = {P};",
          f"  localparam int LD_S = {S};",
@@ -207,9 +234,9 @@ def write_rtl_tables(gen_dir=None):
          f"  localparam int LD_RMAX = {RMAX};",
          f"  localparam int LD_OFFSET = {OFFSET};",
          f"  localparam int LD_LCH = {LCH};"]
-    for name, k in (("BASE", 0), ("Q", 1), ("NG", 2), ("DEG", 3), ("KBCH", 4), ("KLDPC", 5)):
-        L.append(f"  localparam logic [15:0] LD_{name} [11] = '{{" +
-                 ", ".join(f"16'd{r[k]}" for r in rows) + "};")
+    for name, k in (("BASE", 0), ("Q", 1), ("NG", 2), ("DEG", 3), ("KBCH", 4), ("KLDPC", 5), ("N", 6)):
+        L.append(f"  localparam logic [15:0] LD_{name} [32] = '{{" +
+                 ", ".join(f"16'd{r[k]}" for r in full) + "};")
     L += ["endpackage", ""]
     with open(os.path.join(gen_dir, "dvbs2_ldpc_dec_pkg.sv"), "w") as f:
         f.write("\n".join(L))

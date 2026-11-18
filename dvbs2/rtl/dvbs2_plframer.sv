@@ -1,16 +1,17 @@
-// DVB-S2 PL framing for QPSK normal frames (EN 302 307-1 5.5).
+// DVB-S2 PL framing for QPSK and 8PSK, normal and short frames (EN 302 307-1 5.5).
 //
 //   PLHEADER  : SOF + RM(64,7)-coded PLS, pi/2-BPSK, 90 symbols
-//   payload   : 360 slots of 90 QPSK symbols, a 36-symbol pilot block after
-//               every 16 slots when pilots are on
+//   payload   : S slots of 90 symbols (QPSK 360 / short 90, 8PSK 240 /
+//               short 60), a 36-symbol pilot block after every 16 slots
+//               when pilots are on
 //   dummy     : MODCOD 0 header + 36 slots of (1+j)/sqrt2, sent whenever no
 //               complete FECFRAME is waiting, so the carrier never stops
 //   scrambling: Gold sequence n (x states supplied by software), restarted
 //               after each header
 //
-// Every symbol here is (+-a, +-a), so symbols are carried as two sign bits
-// (1 = negative); the rotation by j^R of the PL scrambler maps that set onto
-// itself.
+// Symbols are carried as a phase index p (symbol exp(j pi p / 4)): the
+// header, pilots, dummy bodies and QPSK are odd p, 8PSK any p; the PL
+// scrambler's rotation by j^R adds 2R.
 
 module dvbs2_plframer
   import dvbs2_tables_pkg::*;
@@ -22,16 +23,15 @@ module dvbs2_plframer
   input  logic [17:0] gold_xb,       // x LFSR state for n + 131072
 
   input  logic        frame_avail,
-  input  logic [4:0]  frame_cfg,     // {pilots, rate_idx}
+  input  logic [6:0]  frame_cfg,     // {psk8, short, pilots, rate_idx}
   output logic        frame_pop,
   input  logic        sym_valid,
-  input  logic [1:0]  sym_data,
+  input  logic [2:0]  sym_data,      // phase index
   output logic        sym_rd,
 
   output logic        m_valid,
   input  logic        m_ready,
-  output logic        m_si,          // I sign
-  output logic        m_sq,          // Q sign
+  output logic [2:0]  m_ph,          // phase index
   output logic        m_sof,         // first header symbol
   output logic        m_dummy,       // symbol belongs to a dummy frame
 
@@ -42,14 +42,15 @@ module dvbs2_plframer
   localparam logic [25:0] SOF = 26'h18D2E82;
   localparam logic [63:0] PLSC_SCR = 64'h719D83C953422DFA;
 
-  function automatic logic [89:0] plheader(input logic [4:0] modcod, input logic pilots);
+  function automatic logic [89:0] plheader(input logic [4:0] modcod, input logic pilots,
+                                           input logic short_fr);
     logic [31:0] c;
     logic [63:0] y;
     logic [5:0]  b;
     logic [31:0] g [6];
     g[0] = 32'h55555555; g[1] = 32'h33333333; g[2] = 32'h0F0F0F0F;
     g[3] = 32'h00FF00FF; g[4] = 32'h0000FFFF; g[5] = 32'hFFFFFFFF;
-    b = {modcod, 1'b0};          // b[5] = MSB of MODCOD ... b[0] = FECFRAME size (normal)
+    b = {modcod, short_fr};      // b[5] = MSB of MODCOD ... b[0] = FECFRAME size
     c = '0;
     for (int k = 0; k < 6; k++)
       if (b[5 - k]) c ^= g[k];
@@ -79,16 +80,30 @@ module dvbs2_plframer
 
   assign sym_rd = can_emit && need_data;
 
-  // unscrambled body symbol
-  logic bsi, bsq;
-  always_comb begin
-    if (need_data) {bsi, bsq} = sym_data;
-    else           {bsi, bsq} = 2'b00;   // pilot / dummy: (1+j)/sqrt2
-  end
+  // unscrambled body symbol; pilot / dummy: (1+j)/sqrt2
+  wire [2:0] bph = need_data ? sym_data : 3'd1;
 
-  logic [8:0] nslots_cfg;
-  logic       next_pilots;
-  logic [4:0] next_modcod;
+  // MODCOD of a frame configuration: QPSK rate_idx + 1, 8PSK 12..17
+  function automatic logic [4:0] modcod_of(input logic [6:0] c);
+    if (!c[6]) modcod_of = 5'(c[3:0] + 4'd1);
+    else case (c[3:0])
+      4'd4:    modcod_of = 5'd12;
+      4'd5:    modcod_of = 5'd13;
+      4'd6:    modcod_of = 5'd14;
+      4'd8:    modcod_of = 5'd15;
+      4'd9:    modcod_of = 5'd16;
+      default: modcod_of = 5'd17;
+    endcase
+  endfunction
+  // slots - 1: QPSK 360 / 90 (short), 8PSK 240 / 60
+  function automatic logic [8:0] nslots_m1_of(input logic [6:0] c);
+    case (c[6:5])
+      2'b00:   nslots_m1_of = 9'd359;
+      2'b01:   nslots_m1_of = 9'd89;
+      2'b10:   nslots_m1_of = 9'd239;
+      default: nslots_m1_of = 9'd59;
+    endcase
+  endfunction
 
   always_ff @(posedge clk) begin
     frame_pop        <= 1'b0;
@@ -107,14 +122,14 @@ module dvbs2_plframer
             if (frame_avail) begin
               dummy     <= 1'b0;
               pilots    <= frame_cfg[4];
-              hdr       <= plheader(5'(frame_cfg[3:0] + 4'd1), frame_cfg[4]);
-              nslots_m1 <= 9'd359;
+              hdr       <= plheader(modcod_of(frame_cfg), frame_cfg[4], frame_cfg[5]);
+              nslots_m1 <= nslots_m1_of(frame_cfg);
               frame_pop <= 1'b1;
               stat_data_frame <= 1'b1;
             end else begin
               dummy     <= 1'b1;
               pilots    <= 1'b0;
-              hdr       <= plheader(5'd0, 1'b0);
+              hdr       <= plheader(5'd0, 1'b0, 1'b0);
               nslots_m1 <= 9'd35;
               stat_dummy_frame <= 1'b1;
             end
@@ -124,10 +139,10 @@ module dvbs2_plframer
         end
 
         ST_HDR: if (can_emit) begin
-          // pi/2-BPSK: even symbols (1+j)(1-2y)/sqrt2, odd (-1+j)(1-2y)/sqrt2
+          // pi/2-BPSK: even symbols (1+j)(1-2y)/sqrt2 (p = 1, 5), odd
+          // (-1+j)(1-2y)/sqrt2 (p = 3, 7)
           m_valid <= 1'b1;
-          m_si    <= hdr[89] ^ hdr_i[0];
-          m_sq    <= hdr[89];
+          m_ph    <= {hdr[89], hdr_i[0], 1'b1};
           m_sof   <= (hdr_i == 0);
           m_dummy <= dummy;
           hdr     <= {hdr[88:0], 1'b0};
@@ -144,12 +159,7 @@ module dvbs2_plframer
           m_valid <= 1'b1;
           m_sof   <= 1'b0;
           m_dummy <= dummy;
-          case (rot)   // multiply by j^rot
-            2'd0: begin m_si <= bsi;  m_sq <= bsq;  end
-            2'd1: begin m_si <= !bsq; m_sq <= bsi;  end
-            2'd2: begin m_si <= !bsi; m_sq <= !bsq; end
-            2'd3: begin m_si <= bsq;  m_sq <= !bsi; end
-          endcase
+          m_ph    <= bph + {rot, 1'b0};    // multiply by j^rot
           xa <= {xa[0] ^ xa[7], xa[17:1]};
           xb <= {xb[0] ^ xb[7], xb[17:1]};
           ya <= {ya[0] ^ ya[5] ^ ya[7] ^ ya[10], ya[17:1]};

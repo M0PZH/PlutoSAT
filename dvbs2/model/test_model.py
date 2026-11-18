@@ -53,6 +53,56 @@ def test_plframe(rate_idx, pilots, gold):
     assert bad.size == 0, f"{bad.size} symbol mismatches, first at {bad[:8]}"
 
 
+def gr_frames_x(rate_idx, pilots, gold, short, psk8, nframes=2, seed=0):
+    rate = m.RATES[rate_idx]
+    kbch = m.rate_params(rate_idx, short)[0]
+    npk = (nframes + 1) * kbch // (8 * 188) + 2
+    ref = grref.tx_chain(ts_packets(npk, seed), rate, pilots=pilots, goldcode=gold,
+                         short=short, psk8=psk8)
+    n = min(nframes, len(ref["bbframe"]) // kbch)
+    assert n >= 1
+    return ref, n
+
+
+@pytest.mark.parametrize("rate_idx", range(10))
+def test_fec_short(rate_idx):
+    ref, n = gr_frames_x(rate_idx, True, 0, True, False)
+    kbch = m.rate_params(rate_idx, True)[0]
+    for f in range(n):
+        bb = ref["bbframe"][f * kbch:(f + 1) * kbch]
+        assert np.array_equal(m.fec_frame(bb, rate_idx, True), ref["ldpc"][f * 16200:(f + 1) * 16200])
+
+
+# (MODCOD, short, pilots, gold): QPSK short, 8PSK normal and short (3/5 has
+# the reversed bit order), QPSK normal through the phase path
+@pytest.mark.parametrize("modcod,short,pilots,gold", [
+    (1, True, True, 0), (4, True, False, 0), (10, True, True, 77), (7, False, True, 0),
+    (12, False, True, 0), (12, True, False, 0), (13, False, False, 0), (14, True, True, 5),
+    (15, False, True, 262140), (16, True, False, 0), (17, False, True, 0)])
+def test_plframe_phases(modcod, short, pilots, gold):
+    rate_idx, psk8 = m.modcod_info(modcod)
+    ref, n = gr_frames_x(rate_idx, pilots, gold, short, psk8, nframes=1)
+    kbch = m.rate_params(rate_idx, short)[0]
+    ph = m.plframe_phases(m.fec_frame(ref["bbframe"][:kbch], rate_idx, short), modcod, pilots, gold, short)
+    assert len(ph) == m.plframe_len(modcod, pilots, short)
+    iq = m.phases_to_iq(ph)
+    gr = ref["plframe"][0::2][:len(ph)]
+    gr_iq = np.stack([np.round(gr.real * 32767), np.round(gr.imag * 32767)], axis=1).astype(np.int64)
+    assert len(gr) == len(ph)
+    bad = np.flatnonzero((gr_iq != iq).any(axis=1))
+    assert bad.size == 0, f"{bad.size} symbol mismatches, first at {bad[:8]}"
+
+
+def test_phases_match_signs():
+    """QPSK normal: the phase path equals the sign path."""
+    rng = np.random.default_rng(5)
+    bits = rng.integers(0, 2, 64800).astype(np.uint8)
+    sig = m.plframe_signs(bits, 4, True, 9)
+    ph = m.plframe_phases(bits, 4, True, 9)
+    assert np.array_equal(m.signs_to_iq(sig), m.phases_to_iq(ph))
+    assert np.array_equal(m.phases_to_iq(m.dummy_plframe_phases(9)), m.signs_to_iq(m.dummy_plframe_signs(9)))
+
+
 def test_rrc_vs_gnuradio():
     """Fixed-point polyphase RRC vs GR's float interpolating RRC: > 60 dB SNR."""
     sps, alpha, tpp = 24, 0.35, 16

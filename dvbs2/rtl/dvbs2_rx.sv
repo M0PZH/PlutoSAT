@@ -85,7 +85,7 @@ module dvbs2_rx #(
   output logic [4:0]         m_nerr,       // BCH errors located
   output logic [15:0]        m_raw_err,    // pre-FEC bit errors of the frame (if m_ok)
   // the frame's own parameters (taken with its first LLR word), constant in a frame
-  output logic [3:0]         m_rate,       // code rate 0..10
+  output logic [4:0]         m_rate,       // code {short, rate_idx 0..10}
   output logic [4:0]         m_modcod,
   output logic               m_pilots,
   output logic               m_slot,       // receive slot
@@ -272,7 +272,7 @@ module dvbs2_rx #(
   // ---------------------------------------------------------------- LLR queue
   logic       d_valid, d_ready, d_first, d_slot, d_pilots;
   logic [7:0] d_i, d_q;
-  logic [3:0] d_rate;
+  logic [4:0] d_rate;
   logic [5:0] d_max_it;
   logic [4:0] d_modcod;
   logic       cap_en;
@@ -294,9 +294,10 @@ module dvbs2_rx #(
     .max_it0(ldpc_max_it[0]), .max_it1(ldpc_max_it[1]), .qhi(llrq_qhi), .it_lo(llrq_it_lo),
     .clr_dropped(rst_s),
     .s_valid(l_valid && llrq_en), .s_ready(q_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
+    .s_llr_z(8'd0), .s_short(1'b0),
     .s_slot(l_slot), .s_modcod(modcod[l_slot]), .s_pilots(pilots[l_slot]), .s_epoch(epoch[l_slot]),
     .m_valid(d_valid), .m_ready(d_ready), .m_llr_i(d_i), .m_llr_q(d_q), .m_first(d_first),
-    .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots), .m_epoch(d_epoch),
+    .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots), .m_short(), .m_epoch(d_epoch),
     .it_cap_en(cap_en), .it_cap(cap),
     .st_depth(st_llrq_depth), .st_depth_max(st_llrq_depth_max), .st_frames(st_llrq_frames),
     .st_dropped0(st_llrq_dropped[0]), .st_dropped1(st_llrq_dropped[1]), .st_axi_err(st_llrq_axi_err),
@@ -312,7 +313,7 @@ module dvbs2_rx #(
   logic       c_valid, c_ready, c_last, c_ok;   // LDPC -> BCH
   logic [7:0] c_data, c_chan;
   logic [5:0] c_iters;
-  logic [3:0] c_rate;
+  logic [4:0] c_rate;
   logic [7:0] c_tag, m_tag;
   logic       x_valid, x_ready;
 

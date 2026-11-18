@@ -1,9 +1,11 @@
-// DVB-S2 BCH outer encoder, normal FECFRAME, bit serial (EN 302 307-1 5.3.1).
+// DVB-S2 BCH outer encoder, normal and short FECFRAMEs, bit serial (EN 302
+// 307-1 5.3.1).
 //
 // Passes Kbch info bits through while dividing by g(x), then appends the
-// 16*t parity bits. The parity LFSR is 192 bits wide and left aligned, so
-// t = 12/10/8 share one register: the polynomial is shifted up for t < 12
-// and the unused low bits stay zero.
+// 16*t (short: 168) parity bits. The parity LFSR is 192 bits wide and left
+// aligned, so t = 12/10/8 and the short code share one register: the
+// polynomial is shifted up for fewer parity bits and the unused low bits
+// stay zero.
 
 module dvbs2_bch_enc
   import dvbs2_tables_pkg::*;
@@ -14,13 +16,13 @@ module dvbs2_bch_enc
   input  logic       s_valid,
   output logic       s_ready,
   input  logic       s_data,
-  input  logic [4:0] s_user,
+  input  logic [6:0] s_user,
   input  logic       s_last,   // last info bit (Kbch-1)
 
   output logic       m_valid,
   input  logic       m_ready,
   output logic       m_data,
-  output logic [4:0] m_user,
+  output logic [6:0] m_user,
   output logic       m_last    // last BCH codeword bit (Nbch-1)
 );
 
@@ -28,11 +30,12 @@ module dvbs2_bch_enc
   logic         parity_phase;
   logic [7:0]   par_cnt;
   logic [7:0]   par_len_m1;
-  logic [4:0]   cfg;
+  logic [6:0]   cfg;
   logic         first;        // next info bit starts a frame
 
-  function automatic logic [191:0] poly_aligned(input logic [3:0] rate);
-    case (BCH_T[rate])
+  function automatic logic [191:0] poly_aligned(input logic [4:0] idx);
+    if (idx[4]) return {BCH_POLY_SHORT, 24'd0};
+    case (BCH_T[idx])
       8:       poly_aligned = {BCH_POLY_T8, 64'd0};
       10:      poly_aligned = {BCH_POLY_T10, 32'd0};
       default: poly_aligned = BCH_POLY_T12;
@@ -40,7 +43,7 @@ module dvbs2_bch_enc
   endfunction
 
   logic [191:0] poly;
-  wire [3:0] rate_now = first ? s_user[3:0] : cfg[3:0];
+  wire [4:0] rate_now = first ? {s_user[5], s_user[3:0]} : {cfg[5], cfg[3:0]};
 
   assign s_ready = !parity_phase && m_ready;
   assign m_valid = parity_phase || s_valid;
@@ -60,7 +63,7 @@ module dvbs2_bch_enc
       if (s_valid && s_ready) begin
         if (first) begin
           cfg        <= s_user;
-          par_len_m1 <= 8'(16 * BCH_T[s_user[3:0]] - 1);
+          par_len_m1 <= s_user[5] ? 8'd167 : 8'(16 * BCH_T[{1'b0, s_user[3:0]}] - 1);
           first      <= 1'b0;
         end
         // divide; the register is all-zero at every frame start because

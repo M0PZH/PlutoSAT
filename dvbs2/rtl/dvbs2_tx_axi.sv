@@ -3,7 +3,7 @@
 // core's channel 0 DAC input.
 //
 // Register map (byte offsets, 32-bit):
-//   0x00 VERSION      RO  0x0001_0001 (1.1: CIC register)
+//   0x00 VERSION      RO  0x0001_0002 (1.2: 8PSK and short frames; 1.1: CIC register)
 //   0x04 ID           RO  "DVS2" (0x44565332)
 //   0x08 SCRATCH      RW
 //   0x10 CTRL         RW  [0] enable PLFRAME generation
@@ -26,7 +26,7 @@
 //   0x34 DUMMY_FRAMES RO  dummy PLFRAMEs sent
 //   0x38 LEN_ERRORS   RO  bad-length packets (adapter) + core length errors
 //   0x3C HDR_ERRORS   RO  packets with a bad header word
-//   0x40 FIFO_LEVEL   RO  FECFRAME buffer level in symbols
+//   0x40 FIFO_LEVEL   RO  FECFRAME buffer level: bits stored or reserved / 2
 //   0x44 DAC_UNDERRUN RO  DAC samples with no DVB-S2 sample available
 //   0x48 FIFO_FRAMES  RO  [2:0] complete FECFRAMEs waiting
 
@@ -148,7 +148,7 @@ module dvbs2_tx_axi #(
         s_axi_arready <= 1'b0;
         s_axi_rvalid  <= 1'b1;
         case (s_axi_araddr[7:2])
-          6'h00: s_axi_rdata <= 32'h0001_0001;
+          6'h00: s_axi_rdata <= 32'h0001_0002;
           6'h01: s_axi_rdata <= 32'h4456_5332;
           6'h02: s_axi_rdata <= scratch;
           6'h04: s_axi_rdata <= {27'd0, ctrl};
@@ -178,7 +178,7 @@ module dvbs2_tx_axi #(
   // ---------------------------------------------------------------- packet adapter + core
   logic       b_valid, b_ready, b_last, err_hdr, err_len;
   logic [7:0] b_data;
-  logic [4:0] b_user;
+  logic [6:0] b_user;
 
   dvbs2_bb_adapter i_adapter (
     .clk, .rst(core_rst),
@@ -206,7 +206,7 @@ module dvbs2_tx_axi #(
     .m_valid(t_valid), .m_ready(t_ready), .m_i(t_i), .m_q(t_q),
     .cnt_data_frames(cnt_data), .cnt_dummy_frames(cnt_dummy), .cnt_len_errors(cnt_len_core),
     .fifo_level, .fifo_frames,
-    .sym_valid(), .sym_si(), .sym_sq(), .sym_sof(), .sym_dummy());
+    .sym_valid(), .sym_ph(), .sym_sof(), .sym_dummy());
 
   // ---------------------------------------------------------------- CDC to the DAC clock
   (* ASYNC_REG = "TRUE" *) logic [2:0] drst_sync;

@@ -27,6 +27,27 @@ NORMAL_BCH = {
 }
 NLDPC = 64800
 
+# Table 5b (short FECFRAME, 16200 bits; no 9/10): Kbch, Nbch(=Kldpc), t
+SHORT_RATES = QPSK_RATES[:10]
+SHORT_BCH = {
+    "1/4": (3072, 3240, 12), "1/3": (5232, 5400, 12), "2/5": (6312, 6480, 12),
+    "1/2": (7032, 7200, 12), "3/5": (9552, 9720, 12), "2/3": (10632, 10800, 12),
+    "3/4": (11712, 11880, 12), "4/5": (12432, 12600, 12), "5/6": (13152, 13320, 12),
+    "8/9": (14232, 14400, 12),
+}
+NLDPC_SHORT = 16200
+
+# 8PSK code rates (MODCOD 12..17)
+PSK8_RATES = ["3/5", "2/3", "3/4", "5/6", "8/9", "9/10"]
+
+
+def _fs(short):
+    return dtv.FECFRAME_SHORT if short else dtv.FECFRAME_NORMAL
+
+
+def _mod(psk8):
+    return dtv.MOD_8PSK if psk8 else dtv.MOD_QPSK
+
 ROLLOFF = {0.35: dtv.RO_0_35, 0.25: dtv.RO_0_25, 0.20: dtv.RO_0_20}
 
 
@@ -51,39 +72,39 @@ def _src_c(data):
     return blocks.vector_source_c(np.asarray(data, dtype=np.complex64).tolist(), False)
 
 
-def bbheader(ts_bytes, rate, rolloff=0.35):
+def bbheader(ts_bytes, rate, rolloff=0.35, short=False):
     """TS packets (packed bytes) -> BBFRAME bits (unpacked), Kbch bits per frame."""
-    b = dtv.dvb_bbheader_bb(dtv.STANDARD_DVBS2, dtv.FECFRAME_NORMAL, GR_RATE[rate],
+    b = dtv.dvb_bbheader_bb(dtv.STANDARD_DVBS2, _fs(short), GR_RATE[rate],
                             ROLLOFF[rolloff], dtv.INPUTMODE_NORMAL, dtv.INBAND_OFF, 168, 4000000)
     return _run(_src_b, [b], ts_bytes, blocks.vector_sink_b).astype(np.uint8)
 
 
-def bbscrambler(bits, rate):
-    b = dtv.dvb_bbscrambler_bb(dtv.STANDARD_DVBS2, dtv.FECFRAME_NORMAL, GR_RATE[rate])
+def bbscrambler(bits, rate, short=False):
+    b = dtv.dvb_bbscrambler_bb(dtv.STANDARD_DVBS2, _fs(short), GR_RATE[rate])
     return _run(_src_b, [b], bits, blocks.vector_sink_b).astype(np.uint8)
 
 
-def bch(bits, rate):
-    b = dtv.dvb_bch_bb(dtv.STANDARD_DVBS2, dtv.FECFRAME_NORMAL, GR_RATE[rate])
+def bch(bits, rate, short=False):
+    b = dtv.dvb_bch_bb(dtv.STANDARD_DVBS2, _fs(short), GR_RATE[rate])
     return _run(_src_b, [b], bits, blocks.vector_sink_b).astype(np.uint8)
 
 
-def ldpc(bits, rate):
-    b = dtv.dvb_ldpc_bb(dtv.STANDARD_DVBS2, dtv.FECFRAME_NORMAL, GR_RATE[rate], dtv.MOD_QPSK)
+def ldpc(bits, rate, short=False):
+    b = dtv.dvb_ldpc_bb(dtv.STANDARD_DVBS2, _fs(short), GR_RATE[rate], dtv.MOD_QPSK)
     return _run(_src_b, [b], bits, blocks.vector_sink_b).astype(np.uint8)
 
 
-def interleave_modulate(bits, rate):
-    """FECFRAME bits -> QPSK symbols (complex64)."""
-    il = dtv.dvbs2_interleaver_bb(dtv.FECFRAME_NORMAL, GR_RATE[rate], dtv.MOD_QPSK)
-    mod = dtv.dvbs2_modulator_bc(dtv.FECFRAME_NORMAL, GR_RATE[rate], dtv.MOD_QPSK,
+def interleave_modulate(bits, rate, short=False, psk8=False):
+    """FECFRAME bits -> QPSK or 8PSK symbols (complex64)."""
+    il = dtv.dvbs2_interleaver_bb(_fs(short), GR_RATE[rate], _mod(psk8))
+    mod = dtv.dvbs2_modulator_bc(_fs(short), GR_RATE[rate], _mod(psk8),
                                  dtv.INTERPOLATION_OFF)
     return _run(_src_b, [il, mod], bits, blocks.vector_sink_c)
 
 
-def physical(symbols, rate, pilots=True, goldcode=0):
-    """QPSK symbols -> PLFRAMEs (header, pilots, PL scrambling)."""
-    b = dtv.dvbs2_physical_cc(dtv.FECFRAME_NORMAL, GR_RATE[rate], dtv.MOD_QPSK,
+def physical(symbols, rate, pilots=True, goldcode=0, short=False, psk8=False):
+    """QPSK/8PSK symbols -> PLFRAMEs (header, pilots, PL scrambling)."""
+    b = dtv.dvbs2_physical_cc(_fs(short), GR_RATE[rate], _mod(psk8),
                               dtv.PILOTS_ON if pilots else dtv.PILOTS_OFF, goldcode)
     return _run(_src_c, [b], symbols, blocks.vector_sink_c)
 
@@ -99,13 +120,13 @@ def shape(plframe_symbols, sps, rolloff, span_symbols):
     return _run(_src_c, [f], plframe_symbols, blocks.vector_sink_c), taps
 
 
-def tx_chain(ts_bytes, rate, pilots=True, goldcode=0, rolloff=0.35):
+def tx_chain(ts_bytes, rate, pilots=True, goldcode=0, rolloff=0.35, short=False, psk8=False):
     """Full GR TX chain; returns every intermediate stage as a dict."""
     out = {}
-    out["bbframe"] = bbheader(ts_bytes, rate, rolloff)
-    out["bbscrambled"] = bbscrambler(out["bbframe"], rate)
-    out["bch"] = bch(out["bbscrambled"], rate)
-    out["ldpc"] = ldpc(out["bch"], rate)
-    out["symbols"] = interleave_modulate(out["ldpc"], rate)
-    out["plframe"] = physical(out["symbols"], rate, pilots, goldcode)
+    out["bbframe"] = bbheader(ts_bytes, rate, rolloff, short)
+    out["bbscrambled"] = bbscrambler(out["bbframe"], rate, short)
+    out["bch"] = bch(out["bbscrambled"], rate, short)
+    out["ldpc"] = ldpc(out["bch"], rate, short)
+    out["symbols"] = interleave_modulate(out["ldpc"], rate, short, psk8)
+    out["plframe"] = physical(out["symbols"], rate, pilots, goldcode, short, psk8)
     return out

@@ -400,10 +400,31 @@ def soft_demap(data, nvar, scale=4.0):
     return np.clip(np.round(llr), -LLR_MAX, LLR_MAX).astype(np.int8)
 
 
+_warned_no_dvbs2rx = False
+
+
 def gr_ldpc_decode_llr(llrs, rate_idx):
-    """gr-dvbs2rx LDPC + BCH + BB descrambler on int8 LLRs (nframes, 64800)."""
+    """gr-dvbs2rx LDPC + BCH + BB descrambler on int8 LLRs (nframes, 64800).
+    Without gr-dvbs2rx (not built for the host's Python) the LDPC and BCH
+    decoder models (bit exact to the RTL decoders) stand in, with a warning:
+    the check is then no longer independent of our decoders."""
     from gnuradio import blocks, gr
-    import gnuradio.dvbs2rx as rx
+    try:
+        import gnuradio.dvbs2rx as rx
+    except ImportError:
+        import sys
+        import bchdec
+        import ldpcdec
+        global _warned_no_dvbs2rx
+        if not _warned_no_dvbs2rx:
+            print("warning: gnuradio.dvbs2rx not available, decoding with the LDPC/BCH models", file=sys.stderr)
+            _warned_no_dvbs2rx = True
+        dec = ldpcdec.Decoder(rate_idx)
+        out = []
+        for llr in np.asarray(llrs, np.int8):
+            hard, _, _ = dec.decode(llr, max_it=25)
+            out.append(bchdec.decode(hard[:dec.code.K], rate_idx)[0])
+        return np.concatenate(out) if out else np.zeros(0, np.uint8)
     rate = getattr(rx, "C" + m.RATES[rate_idx].replace("/", "_"))
     kbch = m.LDPC[m.RATES[rate_idx]]["kbch"]
     l = np.asarray(llrs, np.int8)

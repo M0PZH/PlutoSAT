@@ -6,12 +6,68 @@
 static const unsigned kbch_tab[11] = {
 	16008, 21408, 25728, 32208, 38688, 43040, 48408, 51648, 53840, 57472, 58192,
 };
+/* short FECFRAMEs (EN 302 307-1 Table 5b), no 9/10 */
+static const unsigned kbch_short_tab[10] = {
+	3072, 5232, 6312, 7032, 9552, 10632, 11712, 12432, 13152, 14232,
+};
 
 unsigned dvbs2_kbch_bytes(int rate_idx)
 {
-	if (rate_idx < 0 || rate_idx > 10)
+	return dvbs2_kbch_bytes_x(rate_idx, 0);
+}
+
+unsigned dvbs2_kbch_bytes_x(int rate_idx, int short_frame)
+{
+	if (rate_idx < 0 || rate_idx > (short_frame ? 9 : 10))
 		return 0;
-	return kbch_tab[rate_idx] / 8;
+	return (short_frame ? kbch_short_tab : kbch_tab)[rate_idx] / 8;
+}
+
+static const char *const modcod_names[DVBS2_NMODCOD + 1] = {
+	"dummy",
+	"qpsk1/4", "qpsk1/3", "qpsk2/5", "qpsk1/2", "qpsk3/5", "qpsk2/3",
+	"qpsk3/4", "qpsk4/5", "qpsk5/6", "qpsk8/9", "qpsk9/10",
+	"8psk3/5", "8psk2/3", "8psk3/4", "8psk5/6", "8psk8/9", "8psk9/10",
+};
+static const int psk8_rate[6] = { 4, 5, 6, 8, 9, 10 };
+
+int dvbs2_modcod_parse(const char *name)
+{
+	for (int m = 1; m <= DVBS2_NMODCOD; m++)
+		if (!strcmp(name, modcod_names[m]))
+			return m;
+	return 0;
+}
+
+const char *dvbs2_modcod_name(int modcod)
+{
+	return (modcod >= 1 && modcod <= DVBS2_NMODCOD) ? modcod_names[modcod] : "?";
+}
+
+int dvbs2_modcod_rate(int modcod)
+{
+	if (modcod >= 1 && modcod <= 11)
+		return modcod - 1;
+	if (modcod >= 12 && modcod <= 17)
+		return psk8_rate[modcod - 12];
+	return -1;
+}
+
+int dvbs2_modcod_psk8(int modcod)
+{
+	return modcod >= 12 && modcod <= 17;
+}
+
+int dvbs2_modcod_valid(int modcod, int short_frame)
+{
+	int r = dvbs2_modcod_rate(modcod);
+	return r >= 0 && !(short_frame && r == 10);
+}
+
+unsigned dvbs2_plframe_symbols(int modcod, int pilots, int short_frame)
+{
+	unsigned slots = (short_frame ? 16200 : 64800) / (dvbs2_modcod_psk8(modcod) ? 3 : 2) / 90;
+	return 90 + 90 * slots + (pilots ? 36 * ((slots - 1) / 16) : 0);
 }
 
 /* g(x) = x^8 + x^7 + x^6 + x^4 + x^2 + 1, MSB first, init 0 */
@@ -29,10 +85,15 @@ uint8_t dvbs2_crc8(const uint8_t *p, size_t n)
 
 int bbframer_init(struct bbframer *b, int rate_idx, double rolloff)
 {
+	return bbframer_init_x(b, rate_idx, 0, rolloff);
+}
+
+int bbframer_init_x(struct bbframer *b, int rate_idx, int short_frame, double rolloff)
+{
 	unsigned ro;
 
 	memset(b, 0, sizeof(*b));
-	b->kbch = dvbs2_kbch_bytes(rate_idx) * 8;
+	b->kbch = dvbs2_kbch_bytes_x(rate_idx, short_frame) * 8;
 	if (!b->kbch)
 		return -1;
 	if (rolloff > 0.3)

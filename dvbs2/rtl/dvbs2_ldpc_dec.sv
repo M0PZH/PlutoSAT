@@ -1,4 +1,5 @@
-// DVB-S2 LDPC decoder, normal FECFRAMEs, all 11 rates (model: model/ldpcdec.py).
+// DVB-S2 LDPC decoder, normal FECFRAMEs (11 rates) and short FECFRAMEs (10
+// rates) (model: model/ldpcdec.py).
 //
 // Layered offset min-sum, P = 18 lanes, edges serial; see the model for the
 // schedule. Two APP memories (18 lanes x 4096 x 9 bit each) ping-pong between
@@ -7,10 +8,10 @@
 // first; m_ok on the last byte says whether the LDPC decoder converged;
 // m_chan: the channel's hard decisions (input LLR signs) of the same bits.
 //
-// Input: 32400 words of two LLRs (bit 2i from I, 2i+1 from Q) per frame, as
-// produced by dvbs2_rx_carrier, clipped to +-LD_LCH; s_first restarts a frame.
+// Input: Nldpc / 2 words of two LLRs (bits 2i, 2i+1) per frame (32400 or
+// 8100), clipped to +-LD_LCH; s_first restarts a frame.
 // Per frame (sampled on its first word, i.e. with s_first or the word after
-// the previous frame's last): the code rate s_rate, the iteration limit s_max_it and an
+// the previous frame's last): the code s_rate ({short, rate_idx}), the iteration limit s_max_it and an
 // opaque tag s_tag ({slot, MODCOD, pilots} in dvbs2_rx), which come out
 // again with the frame's bytes (m_rate, m_tag). Each of the two APP buffers
 // keeps its frame's values, so consecutive frames may have different rates.
@@ -18,7 +19,10 @@
 // as well, checked at the end of each iteration.
 //
 // Clocks per iteration: sum over the q*S sub-steps of 2*deg + ~14, about
-// 50k for every rate (e.g. 1/2: 1800 sub-steps x 28).
+// 50k for every normal rate (e.g. 1/2: 1800 sub-steps x 28), 10-14k for the
+// short ones. The layers of the irregular short codes are padded to one
+// degree with absent edges (G = 255 in the edge ROM: never the minimum, no
+// parity contribution, no write).
 
 module dvbs2_ldpc_dec
   import dvbs2_ldpc_dec_pkg::*;
@@ -34,7 +38,7 @@ module dvbs2_ldpc_dec
   input  logic [7:0]  s_llr_i,
   input  logic [7:0]  s_llr_q,
   input  logic        s_first,
-  input  logic [3:0]  s_rate,        // per frame: code rate 0..10 (MODCOD 1..11)
+  input  logic [4:0]  s_rate,        // per frame: code {short, rate_idx 0..10}
   input  logic [5:0]  s_max_it,      // per frame: iteration limit
   input  logic [TW-1:0] s_tag,       // per frame: carried to m_tag
 
@@ -48,7 +52,7 @@ module dvbs2_ldpc_dec
   output logic        m_ok,
   output logic [5:0]  m_iters,
   output logic [7:0]  m_chan,
-  output logic [3:0]  m_rate,
+  output logic [4:0]  m_rate,
   output logic [TW-1:0] m_tag,
 
   output logic [15:0] st_frames,
@@ -63,7 +67,7 @@ module dvbs2_ldpc_dec
 
   // ------------------------------------------------------------ per-frame parameters
   // one set per APP buffer, written with the frame's first word
-  logic [3:0]    f_rate  [2];
+  logic [4:0]    f_rate  [2];
   logic [5:0]    f_maxit [2];
   logic [TW-1:0] f_tag   [2];
   logic          ib, db;                   // input buffer, decoder buffer
@@ -71,21 +75,23 @@ module dvbs2_ldpc_dec
   // the decoder's rate (buffer db) and the input writer's (buffer ib)
   logic [7:0]  q, ng;
   logic [4:0]  deg;
-  logic [12:0] rbase;
+  logic [13:0] rbase;
   logic [15:0] kldpc;
   logic [5:0]  max_it;
   logic [7:0]  iw_rq, iw_rng;
   logic [15:0] iw_rkldpc;
+  logic [16:0] iw_rn_m1;                   // Nldpc - 1
   always_ff @(posedge clk) begin
     q      <= 8'(LD_Q[f_rate[db]]);
     ng     <= 8'(LD_NG[f_rate[db]]);
     deg    <= 5'(LD_DEG[f_rate[db]]);
-    rbase  <= 13'(LD_BASE[f_rate[db]]);
+    rbase  <= 14'(LD_BASE[f_rate[db]]);
     kldpc  <= LD_KLDPC[f_rate[db]];
     max_it <= f_maxit[db];
     iw_rq     <= 8'(LD_Q[f_rate[ib]]);
     iw_rng    <= 8'(LD_NG[f_rate[ib]]);
     iw_rkldpc <= LD_KLDPC[f_rate[ib]];
+    iw_rn_m1  <= 17'(LD_N[f_rate[ib]]) - 17'd1;
   end
 
   function automatic logic [AW-1:0] gs(input logic [7:0] g);   // g * S
@@ -160,7 +166,7 @@ module dvbs2_ldpc_dec
   logic [11:0] r_addr;
   logic [13:0] sg_base;
   logic [13:0] sg_wa5;
-  logic [12:0] ed_base;
+  logic [13:0] ed_base;
   logic [7:0]  ed_g  [32];
   logic [4:0]  ed_w0 [32], ed_k0 [32];
   logic [5:0]  o_m1 [P], o_m2 [P], n_m1 [P], n_m2 [P];
@@ -175,6 +181,7 @@ module dvbs2_ldpc_dec
   logic [4:0]    e2, e3, e4, e5;
   logic [4:0]    k2, k3, k4, k5;
   logic          inv2, inv3, inv4, inv5;
+  logic          pad2, pad3, pad4, pad5;   // absent (padding) edge
   logic [AW-1:0] a2, a3, a4, a5, a6;
   logic [P-1:0]  sg3, sg4;
   logic signed [W-1:0] lv4 [P], q5 [P], ro5 [P], nw5 [P], lvp5 [P];
@@ -343,12 +350,12 @@ module dvbs2_ldpc_dec
           wv = sg_sr;
           wv[n[4:0]] = llr[7];
           sg_sr <= wv;
-          sg_we <= n[4:0] == 5'd31 || n == 17'd64799;
+          sg_we <= n[4:0] == 5'd31 || n == iw_rn_m1;
           sg_wb <= ib;
           sg_wa <= n[15:5];
           sg_wd <= wv;
         end
-        if (n == 17'd64799) begin
+        if (n == iw_rn_m1) begin
           iw_n <= '0; iw_par <= 1'b0; iw_g <= '0; iw_m <= '0; iw_w <= '0; iw_lane <= '0; iw_base <= '0;
           in_done <= 1'b1;
         end else begin
@@ -393,6 +400,7 @@ module dvbs2_ldpc_dec
   wire [AW-1:0] c_a   = ia0;
   // the p_(c-1) edge of layer 0 (parity group q-1, shift 1) is absent in row 0
   wire          c_inv = j == 8'd0 && ed_g[e] == ng + q - 8'd1 && b == 5'd0;
+  wire          c_pad = ed_g[e] == 8'hFF;
   wire          hazard = phase_b && ((v2 && a2 == c_a) || (v3 && a3 == c_a) || (v4 && a4 == c_a) ||
                                      (v5 && a5 == c_a) || (v6 && a6 == c_a));
   wire          issuing = (dst == D_A || dst == D_B) && e != deg && !hazard;
@@ -414,19 +422,19 @@ module dvbs2_ldpc_dec
       // T: issue -> read address, sign memory read
       v2 <= issuing;
       if (issuing) begin
-        e2 <= e; k2 <= c_k; inv2 <= c_inv; a2 <= c_a;
+        e2 <= e; k2 <= c_k; inv2 <= c_inv; pad2 <= c_pad; a2 <= c_a;
         smem_q <= smem[sg_base + 14'(e)];
         e <= e + 5'd1;
         ia0 <= ia1;
         ia1 <= eaddr(e + 5'd2);
       end
       // T+1: APP memory read
-      v3 <= v2; e3 <= e2; k3 <= k2; inv3 <= inv2; a3 <= a2; sg3 <= smem_q;
+      v3 <= v2; e3 <= e2; k3 <= k2; inv3 <= inv2; pad3 <= pad2; a3 <= a2; sg3 <= smem_q;
       // T+2: data valid, rotate left by k (check lane l <- memory lane (l + k) mod P)
-      v4 <= v3; e4 <= e3; k4 <= k3; inv4 <= inv3; a4 <= a3; sg4 <= sg3;
+      v4 <= v3; e4 <= e3; k4 <= k3; inv4 <= inv3; pad4 <= pad3; a4 <= a3; sg4 <= sg3;
       for (int l = 0; l < P; l++) lv4[l] <= $signed(ld_q[(l + int'(k3)) % P]);
       // T+3: phase A: R_old, Q; phase B: L + R_new - R_old
-      v5 <= v4; e5 <= e4; k5 <= k4; inv5 <= inv4; a5 <= a4;
+      v5 <= v4; e5 <= e4; k5 <= k4; inv5 <= inv4; pad5 <= pad4; a5 <= a4;
       sg_wa5 <= sg_base + 14'(e4);           // sign write address (sg_base is static in phase A)
       if (v4 && !phase_b) begin
         for (int l = 0; l < P; l++) begin : pa
@@ -459,7 +467,7 @@ module dvbs2_ldpc_dec
         end
       end
       // T+4: phase A: min tracking, signs, FIFO; phase B: rotate right
-      v6 <= v5 && phase_b; a6 <= a5;
+      v6 <= v5 && phase_b && !pad5; a6 <= a5;
       if (v5 && !phase_b) begin : a5s
         logic [P*8-1:0] fw;
         logic [P-1:0]   sgn;
@@ -469,15 +477,15 @@ module dvbs2_ldpc_dec
           logic [6:0] mg;
           neg = q5[l] < 0;
           aq  = neg ? 9'(-q5[l]) : 9'(q5[l]);
-          mg  = (inv5 && l == 0) ? 7'd64 : (aq > 9'd63 ? 7'd63 : 7'(aq));
-          s   = (inv5 && l == 0) ? 1'b0 : neg;
+          mg  = (pad5 || (inv5 && l == 0)) ? 7'd64 : (aq > 9'd63 ? 7'd63 : 7'(aq));
+          s   = (pad5 || (inv5 && l == 0)) ? 1'b0 : neg;
           sgn[l] = s;
           fw[l*8 +: 8] = {s, 7'(ro5[l])};
           if (mg < a_m1[l]) begin
             a_m2[l] <= a_m1[l]; a_m1[l] <= mg; a_ix[l] <= e5;
           end else if (mg < a_m2[l]) a_m2[l] <= mg;
           a_st[l] <= a_st[l] ^ s;
-          if (!(inv5 && l == 0)) hpar[l] <= hpar[l] ^ hs5[l];
+          if (!pad5 && !(inv5 && l == 0)) hpar[l] <= hpar[l] ^ hs5[l];
         end
         fifo[fifo_wp] <= fw;
         fifo_wp <= fifo_wp + 5'd1;
@@ -486,7 +494,7 @@ module dvbs2_ldpc_dec
       if (v5 && phase_b) begin
         for (int l = 0; l < P; l++) begin
           wd6[(l + int'(k5)) % P] <= nw5[l];
-          if (!(inv5 && l == 0) && ((lvp5[l] < 0) != (nw5[l] < 0))) flips <= 1'b1;
+          if (!pad5 && !(inv5 && l == 0) && ((lvp5[l] < 0) != (nw5[l] < 0))) flips <= 1'b1;
         end
       end
       // T+5: write (l_we in the memory block)
@@ -514,11 +522,23 @@ module dvbs2_ldpc_dec
 
         // edges of layer j into registers (ROM latency 1)
         D_LOAD: begin
-          erom_q <= erom[ed_base + 13'(ld_e)];
+          erom_q <= erom[ed_base + 14'(ld_e)];
+          // the info edges from the ROM; the two parity edges generated:
+          // parity group j - 1 (layer 0: q - 1, shift 1) and j
           if (ld_e != 0) begin
-            ed_g[ld_e - 5'd1]  <= erom_q[7:0];
-            ed_w0[ld_e - 5'd1] <= erom_q[12:8];
-            ed_k0[ld_e - 5'd1] <= erom_q[17:13];
+            if (ld_e == deg - 5'd1) begin
+              ed_g[ld_e - 5'd1]  <= (j == 8'd0) ? ng + q - 8'd1 : ng + j - 8'd1;
+              ed_w0[ld_e - 5'd1] <= (j == 8'd0) ? 5'd1 : 5'd0;
+              ed_k0[ld_e - 5'd1] <= '0;
+            end else if (ld_e == deg) begin
+              ed_g[ld_e - 5'd1]  <= ng + j;
+              ed_w0[ld_e - 5'd1] <= '0;
+              ed_k0[ld_e - 5'd1] <= '0;
+            end else begin
+              ed_g[ld_e - 5'd1]  <= erom_q[7:0];
+              ed_w0[ld_e - 5'd1] <= erom_q[12:8];
+              ed_k0[ld_e - 5'd1] <= erom_q[17:13];
+            end
           end
           if (ld_e == deg) dst <= D_SUB;
           else ld_e <= ld_e + 5'd1;
@@ -573,7 +593,7 @@ module dvbs2_ldpc_dec
             if (j == q - 8'd1) dst <= D_ITEREND;
             else begin
               j <= j + 8'd1;
-              ed_base <= ed_base + 13'(deg);
+              ed_base <= ed_base + 14'(deg - 5'd2);     // the ROM has the info edges
               ld_e <= '0;
               dst <= D_LOAD;
             end

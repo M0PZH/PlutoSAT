@@ -2,7 +2,9 @@
 //
 // One AXI-Stream packet (one DMA transfer) per BBFRAME, 32-bit words, first
 // byte in bits [7:0]:
-//   word 0      : header {8'hB5, 16'h0, 3'b0, pilots, rate_idx[3:0]}
+//   word 0      : header {8'hB5, 16'h0, 1'b0, psk8, short, pilots, rate_idx[3:0]}
+//                 (rate_idx 0..10 = 1/4 .. 9/10; 8PSK: 3/5, 2/3, 3/4, 5/6, 8/9,
+//                 9/10; short frames: no 9/10)
 //   words 1..   : the Kbch/8 BBFRAME bytes, zero padded to a word boundary,
 //                 plus at most one more padding word (64-bit DMA alignment)
 // A packet with a bad header is dropped. A packet that ends early is padded
@@ -23,7 +25,7 @@ module dvbs2_bb_adapter
   output logic        m_valid,
   input  logic        m_ready,
   output logic [7:0]  m_data,
-  output logic [4:0]  m_user,
+  output logic [6:0]  m_user,       // {psk8, short, pilots, rate_idx}
   output logic        m_last,
 
   output logic        err_hdr,    // pulse: bad header, packet dropped
@@ -37,10 +39,13 @@ module dvbs2_bb_adapter
   logic [1:0]  bidx;
   logic        word_valid, word_last;
   logic [12:0] nbytes_m1, bcnt;
-  logic [4:0]  cfg;
+  logic [6:0]  cfg;
   logic        tail_extra;   // one padding word already seen
 
-  wire hdr_ok = (s_data[31:24] == 8'hB5) && (s_data[3:0] < 4'(NUM_RATES));
+  wire [3:0] h_rate = s_data[3:0];
+  wire       h_rate_ok = h_rate < 4'd11 && !(s_data[5] && h_rate == 4'd10) &&
+                         !(s_data[6] && (h_rate < 4'd4 || h_rate == 4'd7));
+  wire hdr_ok = (s_data[31:24] == 8'hB5) && h_rate_ok;
   wire out_fire = m_valid && m_ready;
   wire frame_end = out_fire && (bcnt == nbytes_m1);
 
@@ -64,8 +69,8 @@ module dvbs2_bb_adapter
       case (state)
         ST_HDR: if (s_valid) begin
           if (hdr_ok && !s_last) begin
-            cfg       <= {s_data[4], s_data[3:0]};
-            nbytes_m1 <= 13'(KBCH[s_data[3:0]] / 8 - 1);
+            cfg       <= s_data[6:0];
+            nbytes_m1 <= 13'(KBCH[{s_data[5], s_data[3:0]}] / 8 - 1);
             bcnt      <= '0;
             word_valid <= 1'b0;
             state     <= ST_DATA;

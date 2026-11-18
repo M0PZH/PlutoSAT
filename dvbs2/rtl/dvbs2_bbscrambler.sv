@@ -1,7 +1,7 @@
 // BBFRAME byte input -> bit serialiser + BB scrambler (EN 302 307-1 5.2.2).
 //
 // Input: one BBFRAME per packet, Kbch/8 bytes, MSB of each byte first.
-// s_user carries the frame configuration {pilots, rate_idx[3:0]}; it is
+// s_user carries the frame configuration {psk8, short, pilots, rate_idx[3:0]}; it is
 // sampled on the first byte of each frame and must be constant per frame.
 // s_last is only checked: the frame length is taken from the rate.
 //
@@ -16,13 +16,13 @@ module dvbs2_bbscrambler
   input  logic       s_valid,
   output logic       s_ready,
   input  logic [7:0] s_data,
-  input  logic [4:0] s_user,
+  input  logic [6:0] s_user,
   input  logic       s_last,
 
   output logic       m_valid,
   input  logic       m_ready,
   output logic       m_data,
-  output logic [4:0] m_user,
+  output logic [6:0] m_user,
   output logic       m_last,
 
   output logic       err_len    // pulse: s_last not on the frame's last byte
@@ -39,7 +39,7 @@ module dvbs2_bbscrambler
   logic [12:0] nbytes_m1;
   logic [14:0] prbs;
   logic        in_frame;
-  logic [4:0]  cfg;
+  logic [6:0]  cfg;
 
   wire prbs_bit = prbs[1] ^ prbs[0];
   wire out_fire = m_valid && m_ready;
@@ -85,8 +85,8 @@ module dvbs2_bbscrambler
         // completing the previous frame is leaving right now
         if (!in_frame || (out_fire && m_last)) begin
           cfg       <= s_user;
-          kbch_m1   <= 16'(KBCH[s_user[3:0]] - 1);
-          nbytes_m1 <= 13'(KBCH[s_user[3:0]] / 8 - 1);
+          kbch_m1   <= 16'(KBCH[{s_user[5], s_user[3:0]}] - 1);
+          nbytes_m1 <= 13'(KBCH[{s_user[5], s_user[3:0]}] / 8 - 1);
           byte_cnt  <= 13'd1;
           in_frame  <= 1'b1;
           err_len   <= s_last;  // a one-byte frame is always wrong

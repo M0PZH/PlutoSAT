@@ -68,6 +68,7 @@
 #define CIC_N 3
 #define CIC_RMAX 32
 #define VERSION_CIC 0x00010001
+#define VERSION_8PSK 0x00010002         /* 8PSK and short FECFRAMEs */
 #define QUEUE_S 0.5         /* queued air time beyond which BBFRAMEs wait (at least 2 frames) */
 #define SLOT_BYTES 8192
 #define NSLOTS 16
@@ -313,11 +314,6 @@ static void dma_submit(unsigned slot, unsigned len)
 }
 
 /* ---------------------------------------------------------------- main */
-static const char *modcods[11] = {
-	"qpsk1/4", "qpsk1/3", "qpsk2/5", "qpsk1/2", "qpsk3/5", "qpsk2/3",
-	"qpsk3/4", "qpsk4/5", "qpsk5/6", "qpsk8/9", "qpsk9/10",
-};
-
 static void usage(const char *p)
 {
 	fprintf(stderr,
@@ -325,8 +321,9 @@ static void usage(const char *p)
 		"  -s, --sym-rate SR      symbol rate in S/s (default 500000); fs/SR must be an integer,\n"
 		"                         2..64, or P x R with P <= 64, R 2..32 (e.g. 96, 180, 360)\n"
 		"  -F, --fs FS            AD9363 sample rate (default 12000000)\n"
-		"  -m, --modcod MC        qpsk1/4 .. qpsk9/10 (default qpsk1/2)\n"
+		"  -m, --modcod MC        qpsk1/4 .. qpsk9/10, 8psk3/5 .. 8psk9/10 (default qpsk1/2)\n"
 		"  -p, --pilots           pilots on\n"
+		"  -S, --short            short FECFRAMEs (16200 bits; no 9/10)\n"
 		"  -r, --rolloff R        0.35, 0.25 or 0.20 (default 0.35)\n"
 		"  -g, --gold N           PL scrambling Gold code (default 0)\n"
 		"  -o, --offset HZ        digital frequency offset (NCO), default 0\n"
@@ -348,7 +345,7 @@ static void usage(const char *p)
 int main(int argc, char **argv)
 {
 	double sr = 500e3, fs = 12e6, rolloff = 0.35, offset = 0, freq = 0, atten = -1;
-	int rate_idx = 3, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0, tone = 0, dump = 0;
+	int modcod = 4, short_fr = 0, pilots = 0, port = 1234, flush_ms = 100, no_iio = 0, tone = 0, dump = 0;
 	uint32_t gold = 0;
 	const char *input = NULL;
 
@@ -358,21 +355,20 @@ int main(int argc, char **argv)
 		{ "offset", 1, 0, 'o' }, { "freq", 1, 0, 'f' }, { "atten", 1, 0, 'a' },
 		{ "udp", 1, 0, 'u' }, { "input", 1, 0, 'i' }, { "flush-ms", 1, 0, 't' },
 		{ "no-iio", 0, 0, 'n' }, { "tone", 0, 0, 'T' }, { "dump-coefs", 0, 0, 1 },
+		{ "short", 0, 0, 'S' },
 		{ 0, 0, 0, 0 },
 	};
-	for (int c; (c = getopt_long(argc, argv, "s:F:m:pr:g:o:f:a:u:i:t:nT", lo, NULL)) != -1;) {
+	for (int c; (c = getopt_long(argc, argv, "s:F:m:pSr:g:o:f:a:u:i:t:nT", lo, NULL)) != -1;) {
 		switch (c) {
 		case 's': sr = atof(optarg); break;
 		case 'F': fs = atof(optarg); break;
 		case 'm':
-			rate_idx = -1;
-			for (int k = 0; k < 11; k++)
-				if (!strcmp(optarg, modcods[k]))
-					rate_idx = k;
-			if (rate_idx < 0)
+			modcod = dvbs2_modcod_parse(optarg);
+			if (!modcod)
 				usage(argv[0]);
 			break;
 		case 'p': pilots = 1; break;
+		case 'S': short_fr = 1; break;
 		case 'r': rolloff = atof(optarg); break;
 		case 'g': gold = strtoul(optarg, NULL, 0); break;
 		case 'o': offset = atof(optarg); break;
@@ -387,6 +383,11 @@ int main(int argc, char **argv)
 		default: usage(argv[0]);
 		}
 	}
+	if (!dvbs2_modcod_valid(modcod, short_fr)) {
+		fprintf(stderr, "%s has no short FECFRAME\n", dvbs2_modcod_name(modcod));
+		return 2;
+	}
+	const int rate_idx = dvbs2_modcod_rate(modcod);
 	/* fs / sr within 100 ppm of an integer (so 33333 means 12e6 / 360) */
 	int sps = (int)lround(fs / sr), sps_p = 0, cic_r = 1;
 	if (sps < 2 || fabs(sps * sr - fs) > fmax(0.5, 1e-4 * fs) || !tx_split(sps, &sps_p, &cic_r)) {
@@ -436,6 +437,11 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	const uint32_t version = rd(regs, R_VERSION);
+	if ((dvbs2_modcod_psk8(modcod) || short_fr) && version < VERSION_8PSK) {
+		fprintf(stderr, "core version %u.%u has no 8PSK or short FECFRAMEs\n",
+			version >> 16, version & 0xFFFF);
+		return 1;
+	}
 	if (cic_r >= 2 && version < VERSION_CIC) {
 		fprintf(stderr, "core version %u.%u has no CIC: at most %d samples per symbol "
 			"(symbol rate >= %.0f S/s)\n", version >> 16, version & 0xFFFF, P_MAX, fs / P_MAX);
@@ -517,8 +523,8 @@ int main(int argc, char **argv)
 		 * arriving faster than the channel carries is dropped by the
 		 * kernel instead of piling up seconds of latency (at 33 kS/s,
 		 * QPSK 1/2 carries ~4 kB/s) */
-		unsigned kb = dvbs2_kbch_bytes(rate_idx);
-		double cap = (kb - BBHEADER_BYTES) * sr / (90 + 32400 + (pilots ? 22 * 36 : 0));
+		unsigned kb = dvbs2_kbch_bytes_x(rate_idx, short_fr);
+		double cap = (kb - BBHEADER_BYTES) * sr / dvbs2_plframe_symbols(modcod, pilots, short_fr);
 		int rcvbuf = (int)fmin(4 << 20, fmax(8192, cap));
 		in->fd = socket(AF_INET, SOCK_DGRAM, 0);
 		in->is_udp = 1;
@@ -529,12 +535,13 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-	fprintf(stderr, "dvbs2-tx: %s%s, %.2f S/s (sps %d = RRC %d x CIC %d), roll-off %.2f, Gold %u, "
-		"offset %.0f Hz\n", modcods[rate_idx], pilots ? " pilots" : "", sr, sps, sps_p, cic_r,
+	fprintf(stderr, "dvbs2-tx: %s%s%s, %.2f S/s (sps %d = RRC %d x CIC %d), roll-off %.2f, Gold %u, "
+		"offset %.0f Hz\n", dvbs2_modcod_name(modcod), pilots ? " pilots" : "", short_fr ? " short" : "",
+		sr, sps, sps_p, cic_r,
 		rolloff, gold, offset);
 
 	struct bbframer bf;
-	bbframer_init(&bf, rate_idx, rolloff);
+	bbframer_init_x(&bf, rate_idx, short_fr, rolloff);
 	const unsigned frame_bytes = bf.kbch / 8;
 	const unsigned df_bytes = frame_bytes - BBHEADER_BYTES;
 	unsigned slot = 0, frames = 0;
@@ -543,7 +550,7 @@ int main(int argc, char **argv)
 	 * ready): at low symbol rates a frame lasts up to ~1 s and the DMA and
 	 * core buffers alone would hold several seconds. Frames not yet on air
 	 * = BBFRAMEs submitted - DATA_FRAMES (counted at each frame start). */
-	const double frame_s = (90 + 32400 + (pilots ? 22 * 36 : 0)) / sr;
+	const double frame_s = dvbs2_plframe_symbols(modcod, pilots, short_fr) / sr;
 	const unsigned max_queued = (unsigned)fmax(2, ceil(QUEUE_S / frame_s));
 	struct timespec last_data, now;
 	clock_gettime(CLOCK_MONOTONIC, &last_data);
@@ -567,7 +574,9 @@ int main(int argc, char **argv)
 			uint8_t frame[BBFRAME_MAX_BYTES];
 			if (!bbframer_build(&bf, ts_next, in, frame))
 				break;
-			uint32_t hdr = 0xB5000000u | (pilots << 4) | rate_idx;
+			/* {psk8, short, pilots, rate_idx}: dvbs2_bb_adapter.sv */
+			uint32_t hdr = 0xB5000000u | (uint32_t)dvbs2_modcod_psk8(modcod) << 6 |
+				       (uint32_t)short_fr << 5 | (uint32_t)pilots << 4 | (uint32_t)rate_idx;
 			unsigned len = (4 + frame_bytes + 7) & ~7u;     /* 64-bit DMA beats */
 			memset(buf, 0, len);
 			memcpy(buf, &hdr, 4);

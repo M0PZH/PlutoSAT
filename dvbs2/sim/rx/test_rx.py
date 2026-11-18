@@ -523,16 +523,16 @@ def ldpc_exe():
                                        os.path.join(HERE, "tb_ldpc_dec.sv")])
 
 
-def ldpc_case(rate_idx, esn0, nframes, seed, max_it=30):
+def ldpc_case(rate_idx, esn0, nframes, seed, max_it=30, short=False):
     import ldpcdec as ld
     import txmodel as m
     rng = np.random.default_rng(seed)
-    dec = ld.Decoder(rate_idx)
+    dec = ld.Decoder(rate_idx, short)
     kb = dec.code.kbch
     llrs, want = [], []
     for _ in range(nframes):
         bb = rng.integers(0, 2, kb).astype(np.uint8)
-        cw = m.fec_frame(bb, rate_idx)
+        cw = m.fec_frame(bb, rate_idx, short)
         llr = ld.awgn_llr(cw, esn0, rng)
         hard, it, conv = dec.decode(llr, max_it=max_it)
         want.append((np.packbits(hard[:dec.code.K]), conv, it, np.array_equal(hard, cw),
@@ -542,12 +542,13 @@ def ldpc_case(rate_idx, esn0, nframes, seed, max_it=30):
 
 
 def write_ldpc_in(path, frames):
-    """LLR words "ii qq first rate maxit tag" of frames [(llr, rate_idx, max_it, tag)]."""
+    """LLR words "ii qq first rate maxit tag" of frames [(llr, rate, max_it, tag)]
+    (rate = {short, rate_idx}: rate_idx + 16 for a short frame)."""
     with open(path, "w") as f:
         for llr, rate_idx, max_it, tag in frames:
             u = llr.astype(np.int64) & 0xFF
             f.write("".join(f"{u[2 * k]:02x} {u[2 * k + 1]:02x} {int(k == 0)} {rate_idx} {max_it} {tag}\n"
-                            for k in range(32400)))
+                            for k in range(len(u) // 2)))
 
 
 def check_ldpc_out(got, want):
@@ -634,6 +635,31 @@ def test_ldpc_mixed(ldpc_exe):
     log = rxsim.run(ldpc_exe, stall=10, gap=1, **{"in": fin, "out": fout})
     print(log, [(w[1], w[2]) for w in want])
     got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 4, 8))
+    check_ldpc_out(got, want)
+
+
+def test_ldpc_short(ldpc_exe):
+    """Short FECFRAMEs (16200 bits), every code including the irregular ones
+    (1/4, 1/2, 3/4, 4/5, 5/6: layers padded with absent edges), mixed with
+    normal frames through the two APP buffers; each equal to the model."""
+    os.makedirs(WORK, exist_ok=True)
+    cases = [(0, True, -0.5, 30), (3, True, 2.5, 30), (6, False, 4.5, 30), (6, True, 5.0, 30),
+             (7, True, 5.8, 30), (8, True, 6.6, 30), (9, True, 7.4, 30), (1, True, 0.8, 30),
+             (2, True, 1.6, 30), (4, True, 3.4, 30), (5, True, 4.2, 4), (3, False, 1.2, 30), (0, True, -1.5, 30)]
+    frames, want = [], []
+    for k, (rate_idx, short, esn0, max_it) in enumerate(cases):
+        llrs, w = ldpc_case(rate_idx, esn0, 1, seed=200 + k, max_it=max_it, short=short)
+        tag = (k * 29 + 3) & 0xFF
+        code = rate_idx + 16 * short
+        frames.append((llrs[0], code, max_it, tag))
+        want.append(w[0] + (code, tag))
+    fin = os.path.join(WORK, "l_in_short.hex")
+    fout = os.path.join(WORK, "l_out_short.hex")
+    write_ldpc_in(fin, frames)
+    log = rxsim.run(ldpc_exe, stall=10, gap=1, **{"in": fin, "out": fout})
+    print(log, [(w[1], w[2]) for w in want])
+    assert any(not w[1] for w in want) and sum(w[1] for w in want) >= 8
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 5, 8))
     check_ldpc_out(got, want)
 
 
@@ -1095,14 +1121,17 @@ def bch_exe():
                                       os.path.join(HERE, "tb_bch_dec.sv")])
 
 
-@pytest.mark.parametrize("rate_idx,stall", [(0, 0), (5, 20), (10, 5)])
+@pytest.mark.parametrize("rate_idx,stall", [(0, 0), (5, 20), (10, 5), (16, 0), (20, 10), (25, 5)])
 def test_bch(bch_exe, rate_idx, stall):
     """RTL BCH decoder = model: corrected, BB-descrambled BBFRAME, ok, deg
-    Lambda, for 0 .. t + 6 errors (also in the parity part)."""
+    Lambda, for 0 .. t + 6 errors (also in the parity part). rate_idx >= 16:
+    short frames ({short, rate_idx}: GF(2^14))."""
     import bchdec
     import txmodel as m
     os.makedirs(WORK, exist_ok=True)
-    kbch, n, t = bchdec.params(rate_idx)
+    code = rate_idx
+    short, rate_idx = rate_idx >= 16, rate_idx & 15
+    kbch, n, t = bchdec.params(rate_idx, short)
     rng = np.random.default_rng(rate_idx + 3)
     nerrs = [0, 1, 3, t, t + 1, t + 6]
     fin = os.path.join(WORK, f"bch_in{rate_idx}.hex")
@@ -1111,21 +1140,21 @@ def test_bch(bch_exe, rate_idx, stall):
     with open(fin, "w") as f:
         for i, ne in enumerate(nerrs):
             bb = rng.integers(0, 2, kbch).astype(np.uint8)
-            r = m.bch_encode(m.bb_scramble(bb), t)
+            r = m.bch_encode(m.bb_scramble(bb), t, short)
             pos = rng.choice(n, ne, replace=False)
             if i == 1:
                 pos = np.array([n - 1])                     # a parity bit
             r[pos] ^= 1
-            out, ok, L = bchdec.decode(r, rate_idx)
+            out, ok, L = bchdec.decode(r, rate_idx, short)
             chan = r.copy()
             chan[rng.choice(n, 50 * i, replace=False)] ^= 1             # "channel" decisions
             want.append((np.packbits(out), ok, L, i % 2, 7 + i, ne <= t and np.array_equal(out, bb),
                          int(np.sum(chan != r))))
             for k, (v, c) in enumerate(zip(np.packbits(r), np.packbits(chan))):
-                f.write(f"{v:02x} {int(k == n // 8 - 1)} {i % 2} {7 + i} {c:02x} {rate_idx} {i + 3}\n")
+                f.write(f"{v:02x} {int(k == n // 8 - 1)} {i % 2} {7 + i} {c:02x} {code} {i + 3}\n")
     log = rxsim.run(bch_exe, stall=stall, **{"in": fin, "out": fout})
     print(log, [(w[1], w[2], w[5]) for w in want])
-    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 4, 8))
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 5, 8))
     nb = kbch // 8
     assert len(got) == nb * len(want)
     for i, (data, ok, L, lok, it, right, raw) in enumerate(want):
@@ -1135,7 +1164,7 @@ def test_bch(bch_exe, rate_idx, stall):
         assert (g[-1, 2], g[-1, 3], g[-1, 4], g[-1, 5]) == (int(ok), lok, it, L), (i, g[-1], ok, L)
         assert right == (nerrs[i] <= t)                    # the model corrects <= t
         assert g[-1, 6] == raw
-        assert np.all(g[:, 7] == rate_idx) and np.all(g[:, 8] == i + 3)
+        assert np.all(g[:, 7] == code) and np.all(g[:, 8] == i + 3)
 
 
 def test_bch_mixed(bch_exe):
@@ -1149,19 +1178,20 @@ def test_bch_mixed(bch_exe):
     fout = os.path.join(WORK, "bch_out_mixed.hex")
     want = []
     with open(fin, "w") as f:
-        for i, rate_idx in enumerate([10, 0, 5, 9, 3, 3, 7, 1]):
-            kbch, n, t = bchdec.params(rate_idx)
+        for i, code in enumerate([10, 0, 5, 9, 19, 3, 3, 16, 7, 1, 25]):
+            short, rate_idx = code >= 16, code & 15
+            kbch, n, t = bchdec.params(rate_idx, short)
             bb = rng.integers(0, 2, kbch).astype(np.uint8)
-            r = m.bch_encode(m.bb_scramble(bb), t)
+            r = m.bch_encode(m.bb_scramble(bb), t, short)
             ne = [0, t, t + 2, 1][i % 4]
             r[rng.choice(n, ne, replace=False)] ^= 1
-            out, ok, L = bchdec.decode(r, rate_idx)
-            want.append((np.packbits(out), ok, L, rate_idx, 0x80 + i))
+            out, ok, L = bchdec.decode(r, rate_idx, short)
+            want.append((np.packbits(out), ok, L, code, 0x80 + i))
             for k, v in enumerate(np.packbits(r)):
-                f.write(f"{v:02x} {int(k == n // 8 - 1)} 1 {i} {v:02x} {rate_idx} {0x80 + i}\n")
+                f.write(f"{v:02x} {int(k == n // 8 - 1)} 1 {i} {v:02x} {code} {0x80 + i}\n")
     log = rxsim.run(bch_exe, stall=15, **{"in": fin, "out": fout})
     print(log, [(w[1], w[2]) for w in want])
-    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 4, 8))
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 1, 6, 5, 16, 5, 8))
     pos = 0
     for i, (data, ok, L, rate_idx, tag) in enumerate(want):
         g = got[pos:pos + len(data)]

@@ -8,7 +8,7 @@ title = "DVB-S2 transmitter"
 uio = "dvbs2-tx"
 size = 0x10000
 id = { offset = 0x04, value = 0x44565332 }        # "DVS2"
-version = { offset = 0x00, value = 0x00010001 }
+version = { offset = 0x00, value = 0x00010002 }
 rtl = "dvbs2/rtl/dvbs2_tx_axi.sv"
 maps = ["regs", "dmac", "buffer"]
 
@@ -43,6 +43,11 @@ value = 0x00010001
 doc = "First core version with the CIC register"
 
 [[const]]
+name = "VERSION_8PSK"
+value = 0x00010002
+doc = "First core version with 8PSK and short FECFRAMEs (HDR.PSK8, HDR.SHORT)"
+
+[[const]]
 name = "GOLD_MAX"
 value = 262142
 doc = "Largest PL scrambling Gold code number"
@@ -56,7 +61,7 @@ doc = "HDR.MAGIC value of a valid DMA packet"
 name = "VERSION"
 offset = 0x00
 access = "ro"
-doc = "Core version, 0x0001_0001 = 1.1 (1.1: CIC register)"
+doc = "Core version, 0x0001_0002 = 1.2 (1.2: 8PSK and short FECFRAMEs; 1.1: CIC register)"
   [[reg.field]]
   name = "MINOR"
   bits = [0, 15]
@@ -206,7 +211,7 @@ doc = "Packets with a bad header word"
 name = "FIFO_LEVEL"
 offset = 0x40
 access = "ro"
-doc = "FECFRAME buffer level in symbols"
+doc = "FECFRAME buffer level: bits stored or reserved / 2 (QPSK symbols; up to 1.1: symbols stored)"
 
 [[reg]]
 name = "DAC_UNDERRUN"
@@ -231,11 +236,19 @@ doc = "Word 0 of a DMA packet (32-bit words, first byte in [7:0]); the Kbch/8 BB
   [[packet.field]]
   name = "RATE"
   bits = [0, 3]
-  doc = "Rate index 0..10 (QPSK 1/4 .. 9/10)"
+  doc = "Code rate index 0..10 (1/4 .. 9/10); 8PSK: 4..6, 8..10 (3/5 .. 9/10); short frames: no 10"
   [[packet.field]]
   name = "PILOTS"
   bits = [4, 4]
   doc = "Pilots on"
+  [[packet.field]]
+  name = "SHORT"
+  bits = [5, 5]
+  doc = "Short FECFRAME (16200 bits), from VERSION 1.2"
+  [[packet.field]]
+  name = "PSK8"
+  bits = [6, 6]
+  doc = "8PSK, from VERSION 1.2"
   [[packet.field]]
   name = "MAGIC"
   bits = [24, 31]

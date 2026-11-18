@@ -6,7 +6,7 @@
 #define DVBS2_TX_UIO "dvbs2-tx"
 #define DVBS2_TX_SIZE 0x00010000u
 #define DVBS2_TX_ID_VALUE 0x44565332u
-#define DVBS2_TX_VERSION_VALUE 0x00010001u
+#define DVBS2_TX_VERSION_VALUE 0x00010002u
 #define DVBS2_TX_MAP_REGS 0
 #define DVBS2_TX_MAP_DMAC 1
 #define DVBS2_TX_MAP_BUFFER 2
@@ -23,12 +23,14 @@
 #define DVBS2_TX_CIC_R_MAX 32
 /* First core version with the CIC register */
 #define DVBS2_TX_VERSION_CIC 65537
+/* First core version with 8PSK and short FECFRAMEs (HDR.PSK8, HDR.SHORT) */
+#define DVBS2_TX_VERSION_8PSK 65538
 /* Largest PL scrambling Gold code number */
 #define DVBS2_TX_GOLD_MAX 262142
 /* HDR.MAGIC value of a valid DMA packet */
 #define DVBS2_TX_HDR_MAGIC 181
 
-/* VERSION (ro): Core version, 0x0001_0001 = 1.1 (1.1: CIC register) */
+/* VERSION (ro): Core version, 0x0001_0002 = 1.2 (1.2: 8PSK and short FECFRAMEs; 1.1: CIC register) */
 #define DVBS2_TX_VERSION 0x000
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_TX_VERSION_MINOR_SHIFT 0
@@ -114,7 +116,7 @@
 #define DVBS2_TX_LEN_ERRORS 0x038
 /* HDR_ERRORS (ro): Packets with a bad header word */
 #define DVBS2_TX_HDR_ERRORS 0x03C
-/* FIFO_LEVEL (ro): FECFRAME buffer level in symbols */
+/* FIFO_LEVEL (ro): FECFRAME buffer level: bits stored or reserved / 2 (QPSK symbols; up to 1.1: symbols stored) */
 #define DVBS2_TX_FIFO_LEVEL 0x040
 /* DAC_UNDERRUN (ro): DAC samples with no DVB-S2 sample available */
 #define DVBS2_TX_DAC_UNDERRUN 0x044
@@ -126,7 +128,7 @@
 #define DVBS2_TX_FIFO_FRAMES_FRAMES_MASK 0x00000007u
 
 /* DMA packet word HDR (32 bits): Word 0 of a DMA packet (32-bit words, first byte in [7:0]); the Kbch/8 BBFRAME bytes follow, zero padded to 64 bits */
-/*   [3:0] RATE: Rate index 0..10 (QPSK 1/4 .. 9/10) */
+/*   [3:0] RATE: Code rate index 0..10 (1/4 .. 9/10); 8PSK: 4..6, 8..10 (3/5 .. 9/10); short frames: no 10 */
 #define DVBS2_TX_PKT_HDR_RATE_SHIFT 0
 #define DVBS2_TX_PKT_HDR_RATE_WIDTH 4
 #define DVBS2_TX_PKT_HDR_RATE_MASK 0x0000000Fu
@@ -134,6 +136,14 @@
 #define DVBS2_TX_PKT_HDR_PILOTS_SHIFT 4
 #define DVBS2_TX_PKT_HDR_PILOTS_WIDTH 1
 #define DVBS2_TX_PKT_HDR_PILOTS_MASK 0x00000010u
+/*   [5] SHORT: Short FECFRAME (16200 bits), from VERSION 1.2 */
+#define DVBS2_TX_PKT_HDR_SHORT_SHIFT 5
+#define DVBS2_TX_PKT_HDR_SHORT_WIDTH 1
+#define DVBS2_TX_PKT_HDR_SHORT_MASK 0x00000020u
+/*   [6] PSK8: 8PSK, from VERSION 1.2 */
+#define DVBS2_TX_PKT_HDR_PSK8_SHIFT 6
+#define DVBS2_TX_PKT_HDR_PSK8_WIDTH 1
+#define DVBS2_TX_PKT_HDR_PSK8_MASK 0x00000040u
 /*   [31:24] MAGIC: 0xB5 (HDR_MAGIC) */
 #define DVBS2_TX_PKT_HDR_MAGIC_SHIFT 24
 #define DVBS2_TX_PKT_HDR_MAGIC_WIDTH 8

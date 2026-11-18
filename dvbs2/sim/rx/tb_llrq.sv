@@ -1,8 +1,9 @@
 // Testbench for the DDR LLR queue: dvbs2_rx_llrq -> dvbs2_ldpc_dec, the
 // queue's AXI master on axi_mem.
-//   +in=<file> words "gap ii qq first slot modcod pilots": offered gap clocks
+//   +in=<file> words "gap ii qq zz first slot modcod pilots short": offered gap clocks
 //       after the previous word was taken (backpressure delays the rest)
-//   +out=<file> decoder bytes "dd last ok iters chan rate tag", tag = {0, slot, pilots, modcod}
+//   +out=<file> decoder bytes "dd last ok iters chan rate tag", tag = {0, slot, pilots, modcod},
+//       rate = {short, rate_idx}
 //   +nfr= +qhi= +itlo= +maxit0= +maxit1= +base=<hex> +stall=<decoder output %>
 //   +rstat=<clock>: soft reset (16 clocks); the input then skips to the next first word
 //   +axistall= +axilat= +memlo= +memhi= (axi_mem)
@@ -14,12 +15,12 @@ module tb_llrq;
   logic [31:0] base;
   logic [4:0]  nfr;
   logic [5:0]  max_it0, max_it1, qhi, it_lo;
-  logic        s_valid = 0, s_ready, s_first, s_slot, s_pilots;
-  logic [7:0]  s_llr_i, s_llr_q;
+  logic        s_valid = 0, s_ready, s_first, s_slot, s_pilots, s_short;
+  logic [7:0]  s_llr_i, s_llr_q, s_llr_z;
   logic [4:0]  s_modcod;
-  logic        q_valid, q_ready, q_first, q_slot, q_pilots, it_cap_en;
+  logic        q_valid, q_ready, q_first, q_slot, q_pilots, q_short, it_cap_en;
   logic [7:0]  q_llr_i, q_llr_q;
-  logic [3:0]  q_rate;
+  logic [4:0]  q_rate;
   logic [5:0]  q_max_it, it_cap;
   logic [4:0]  q_modcod;
   logic [5:0]  st_depth, st_depth_max;
@@ -37,7 +38,8 @@ module tb_llrq;
 
   dvbs2_rx_llrq dut (
     .clk, .arst, .rst, .en(1'b1), .base, .nfr, .max_it0, .max_it1, .qhi, .it_lo, .clr_dropped(2'b00),
-    .s_valid, .s_ready, .s_llr_i, .s_llr_q, .s_first, .s_slot, .s_modcod, .s_pilots, .s_epoch(1'b0), .m_epoch(),
+    .s_valid, .s_ready, .s_llr_i, .s_llr_q, .s_llr_z, .s_first, .s_slot, .s_modcod, .s_pilots, .s_short,
+    .s_epoch(1'b0), .m_epoch(), .m_short(q_short),
     .m_valid(q_valid), .m_ready(q_ready), .m_llr_i(q_llr_i), .m_llr_q(q_llr_q), .m_first(q_first),
     .m_rate(q_rate), .m_max_it(q_max_it), .m_slot(q_slot), .m_modcod(q_modcod), .m_pilots(q_pilots),
     .it_cap_en, .it_cap,
@@ -58,7 +60,7 @@ module tb_llrq;
   logic       m_valid, m_ready = 0, m_last, m_ok;
   logic [7:0] m_data, m_chan, m_tag;
   logic [5:0] m_iters;
-  logic [3:0] m_rate;
+  logic [4:0] m_rate;
   logic [15:0] l_frames, l_failed;
 
   dvbs2_ldpc_dec #(.ROM_FILE("../../rtl/gen/ldpc_dec_rom.mem")) u_ldpc (
@@ -70,7 +72,7 @@ module tb_llrq;
     .st_frames(l_frames), .st_failed(l_failed));
 
   string fin, fout;
-  int fi, fo, stall, rc, tmp, gap, a_i, a_q, a_f, a_s, a_m, a_p, n_in = 0, n_out = 0, cnt = 0;
+  int fi, fo, stall, rc, tmp, gap, a_i, a_q, a_z, a_f, a_s, a_m, a_p, a_sh, n_in = 0, n_out = 0, cnt = 0;
   longint rstat, cyc = 0, n_stall = 0, run = 0, max_run = 0;
   logic eof = 0, skipping = 0, have = 0;
 
@@ -115,8 +117,8 @@ module tb_llrq;
       if (s_valid && s_ready) s_valid <= 0;
       if (!s_valid || s_ready) begin
         if (!have && !eof) begin
-          rc = $fscanf(fi, "%d %h %h %d %d %d %d", gap, a_i, a_q, a_f, a_s, a_m, a_p);
-          if (rc == 7) begin have = 1; cnt = gap; end
+          rc = $fscanf(fi, "%d %h %h %h %d %d %d %d %d", gap, a_i, a_q, a_z, a_f, a_s, a_m, a_p, a_sh);
+          if (rc == 9) begin have = 1; cnt = gap; end
           else eof <= 1;
         end
         if (have && skipping && a_f == 0) have = 0;              // after a reset: to a frame start
@@ -126,6 +128,7 @@ module tb_llrq;
           else begin
             s_valid <= 1; s_llr_i <= 8'(a_i); s_llr_q <= 8'(a_q); s_first <= a_f[0];
             s_slot <= a_s[0]; s_modcod <= 5'(a_m); s_pilots <= a_p[0];
+            s_llr_z <= 8'(a_z); s_short <= a_sh[0];
             have = 0; n_in++;
           end
         end

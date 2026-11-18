@@ -93,13 +93,13 @@ async def send_packets(dut, packets):
         dut.s_axis_tvalid.value = 0
 
 
-def packet(bbframe_bits, rate_idx, pilots, nbytes=None):
+def packet(bbframe_bits, rate_idx, pilots, nbytes=None, short=0, psk8=0):
     by = np.packbits(bbframe_bits).tobytes()
     if nbytes is not None:
         by = by[:nbytes] if nbytes <= len(by) else by + bytes(nbytes - len(by))
     by += bytes((-len(by)) % 4)
     words = np.frombuffer(by, dtype="<u4").tolist()
-    return [0xB5000000 | (pilots << 4) | rate_idx] + words
+    return [0xB5000000 | (psk8 << 6) | (short << 5) | (pilots << 4) | rate_idx] + words
 
 
 async def dac_monitor(dut, out):
@@ -141,7 +141,7 @@ async def axi_regs_packets_and_dac(dut):
     await ClockCycles(dut.s_axi_aclk, 20)
 
     assert await axi.read(0x04) == 0x44565332
-    assert await axi.read(0x00) == 0x00010001
+    assert await axi.read(0x00) == 0x00010002
     await axi.write(0x08, 0xDEADBEEF)
     assert await axi.read(0x08) == 0xDEADBEEF
     assert await axi.read(0x2C) == 0                  # CIC off after reset
@@ -176,7 +176,8 @@ async def axi_regs_packets_and_dac(dut):
     mon.clear()
     await axi.write(0x10, 0b1101)
 
-    # packets: bad header, good, short (padded), long (truncated), good
+    # packets: bad header, good, short (padded), long (truncated), good,
+    # 8PSK 3/5 short frame, bad code (8PSK 1/2), QPSK normal
     rate = m.RATES[3]
     kbch = m.LDPC[rate]["kbch"]
     rng = np.random.default_rng(1)
@@ -190,12 +191,15 @@ async def axi_regs_packets_and_dac(dut):
         packet(frames[1], 3, 1, nbytes=kbch // 8 - 100),
         packet(frames[2], 3, 1, nbytes=kbch // 8 + 40),
         packet(frames[0], 3, 1),
+        packet(rng.integers(0, 2, m.rate_params(4, True)[0]).astype(np.uint8), 4, 1, short=1, psk8=1),
+        packet(frames[1], 3, 1, psk8=1),
+        packet(frames[1], 3, 0),
     ]
     cocotb.start_soon(send_packets(dut, pk))
 
     for _ in range(3_000_000):
         await RisingEdge(dut.s_axi_aclk)
-        if int(dut.i_dvbs2_tx_axi.cnt_data.value) >= 4:
+        if int(dut.i_dvbs2_tx_axi.cnt_data.value) >= 6:
             break
     nd = await axi.read(0x30)
     ndum = await axi.read(0x34)
@@ -203,7 +207,7 @@ async def axi_regs_packets_and_dac(dut):
     nhdr = await axi.read(0x3C)
     unf = await axi.read(0x44)
     dut._log.info(f"data={nd} dummy={ndum} len_err={nlen} hdr_err={nhdr} dac_underruns={unf}")
-    assert nd >= 4 and nhdr == 1 and nlen == 2
+    assert nd >= 6 and nhdr == 2 and nlen == 2
 
     # DAC samples vs model: the symbol stream is reconstructed from the model
     # (dummies until the first data frame, then the frames as sent)

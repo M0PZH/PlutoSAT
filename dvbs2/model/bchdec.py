@@ -1,14 +1,16 @@
-"""DVB-S2 BCH decoder model (normal FECFRAMEs), bit exact to rtl/dvbs2_bch_dec.sv.
+"""DVB-S2 BCH decoder model (normal and short FECFRAMEs), bit exact to rtl/dvbs2_bch_dec.sv.
 
-Code: GF(2^16), primitive polynomial x^16 + x^5 + x^3 + x^2 + 1, t = 12, 10
-or 8 (rate), n = Kldpc bits (shortened), the first received bit is the
+Code: normal frames GF(2^16), primitive polynomial x^16 + x^5 + x^3 + x^2 +
+1, t = 12, 10 or 8 (rate); short frames GF(2^14), x^14 + x^5 + x^3 + x + 1,
+t = 12. n = Kldpc bits (shortened), the first received bit is the
 coefficient of x^(n-1).
 
   syndromes  S_j = r(alpha^j), j odd 1 .. 2t-1 (8 bits per clock in the RTL),
              S_2j = S_j^2
   error locator: simplified inversionless Berlekamp-Massey (t steps)
   Chien search: position k (degree n-1-k) is an error if
-             Lambda(alpha^-(n-1-k)) = 0 (8 positions per clock in the RTL)
+             Lambda(alpha^-(n-1-k)) = 0 (8 positions per clock in the RTL for
+             normal frames, 1 per clock for short ones)
   success: deg Lambda (L) <= t and exactly L roots among the n positions.
 
 The corrections found are applied in every case (the RTL streams them out
@@ -21,50 +23,72 @@ import numpy as np
 
 import txmodel as m
 
+class Field:
+    """GF(2^w) with primitive polynomial prim (exp/log tables)."""
+
+    def __init__(self, w, prim):
+        self.w, self.prim = w, prim
+        self.nf = nf = (1 << w) - 1
+        self.exp = [0] * (2 * nf)
+        self.log = [0] * (1 << w)
+        v = 1
+        for i in range(nf):
+            self.exp[i] = self.exp[i + nf] = v
+            self.log[v] = i
+            v <<= 1
+            if v >> w:
+                v ^= prim
+
+    def mul(self, a, b):
+        if a == 0 or b == 0:
+            return 0
+        return self.exp[self.log[a] + self.log[b]]
+
+    def apow(self, e):
+        return self.exp[e % self.nf]
+
+
 PRIM = 0x1002D
-NF = (1 << 16) - 1
-EXP = [0] * (2 * NF)
-LOG = [0] * (1 << 16)
-_v = 1
-for _i in range(NF):
-    EXP[_i] = EXP[_i + NF] = _v
-    LOG[_v] = _i
-    _v <<= 1
-    if _v & 0x10000:
-        _v ^= PRIM
+PRIM_SHORT = 0x402B
+GF16 = Field(16, PRIM)
+GF14 = Field(14, PRIM_SHORT)
 
 
-def mul(a, b):
-    if a == 0 or b == 0:
-        return 0
-    return EXP[LOG[a] + LOG[b]]
+def field(short=False):
+    return GF14 if short else GF16
 
 
-def apow(e):
-    return EXP[e % NF]
+def mul(a, b, short=False):
+    return field(short).mul(a, b)
 
 
-def params(rate_idx):
-    kbch, kldpc, t, _, _ = m.rate_params(rate_idx)
+def apow(e, short=False):
+    return field(short).apow(e)
+
+
+def params(rate_idx, short=False):
+    kbch, kldpc, t, _, _ = m.rate_params(rate_idx, short)
     return kbch, kldpc, t
 
 
-def syndromes(bits, t):
+def syndromes(bits, t, short=False):
     """S[1..2t] (S[0] unused), Horner over the bits in received order."""
+    F = field(short)
     S = [0] * (2 * t + 1)
     for j in range(1, 2 * t, 2):
-        aj = apow(j)
+        aj = F.apow(j)
         s = 0
         for b in bits:
-            s = mul(s, aj) ^ int(b)
+            s = F.mul(s, aj) ^ int(b)
         S[j] = s
     for j in range(2, 2 * t + 1, 2):
-        S[j] = mul(S[j // 2], S[j // 2])
+        S[j] = F.mul(S[j // 2], S[j // 2])
     return S
 
 
-def berlekamp(S, t):
+def berlekamp(S, t, short=False):
     """Simplified inversionless BM for binary codes. Returns (Lambda[0..t+1], L)."""
+    mul = field(short).mul
     lam = [1] + [0] * (t + 1)
     b = [1] + [0] * (t + 1)
     gamma, L = 1, 0
@@ -85,27 +109,28 @@ def berlekamp(S, t):
     return lam, L
 
 
-def chien_init(rate_idx):
+def chien_init(rate_idx, short=False):
     """alpha^(-j(n-1)), j = 1 .. t (Lambda_j's term at the first position)."""
-    _, n, t = params(rate_idx)
-    return [apow(-j * (n - 1)) for j in range(1, t + 1)]
+    _, n, t = params(rate_idx, short)
+    return [apow(-j * (n - 1), short) for j in range(1, t + 1)]
 
 
-def decode(bits, rate_idx):
+def decode(bits, rate_idx, short=False):
     """bits: Kldpc hard decisions (BB-scrambled BBFRAME + BCH parity).
     Returns (BBFRAME bits (descrambled), ok, L)."""
-    kbch, n, t = params(rate_idx)
+    F = field(short)
+    kbch, n, t = params(rate_idx, short)
     bits = np.asarray(bits[:n], np.uint8).copy()
-    S = syndromes(bits, t)
-    lam, L = berlekamp(S, t)
-    term = [mul(lam[j], c) for j, c in zip(range(1, t + 1), chien_init(rate_idx))]
-    step = [apow(j) for j in range(1, t + 1)]
+    S = syndromes(bits, t, short)
+    lam, L = berlekamp(S, t, short)
+    term = [F.mul(lam[j], c) for j, c in zip(range(1, t + 1), chien_init(rate_idx, short))]
+    step = [F.apow(j) for j in range(1, t + 1)]
     roots = 0
     for k in range(n):
         v = lam[0]
         for j in range(t):
             v ^= term[j]
-            term[j] = mul(term[j], step[j])
+            term[j] = F.mul(term[j], step[j])
         if v == 0:
             bits[k] ^= 1
             roots += 1
@@ -114,32 +139,43 @@ def decode(bits, rate_idx):
 
 
 def write_rtl_pkg(path=None):
-    """rtl/gen/dvbs2_bch_pkg.sv: per rate N = Kldpc, T and the Chien start
-    constants (12 per rate, unused ones 0)."""
+    """rtl/gen/dvbs2_bch_pkg.sv: per code ({short, rate_idx}, 32 entries,
+    unused ones repeat the nearest code) N = Kldpc, T and the Chien start
+    constants (12 per code, unused ones 0); the syndrome and Chien step
+    constants of both fields."""
     path = path or os.path.join(m.HERE, "..", "rtl", "gen", "dvbs2_bch_pkg.sv")
     lines = ["// Generated by model/bchdec.py write_rtl_pkg(): BCH decoder constants.",
+             "// Codes indexed {short, rate_idx[3:0]}; short frames: GF(2^14), 1 Chien",
+             "// position per clock.",
              "package dvbs2_bch_pkg;",
-             "  localparam logic [16:0] BCH_PRIM = 17'h1002D;"]
+             f"  localparam logic [16:0] BCH_PRIM = 17'h{PRIM:05X};",
+             f"  localparam logic [14:0] BCH_PRIM14 = 15'h{PRIM_SHORT:04X};"]
     ns, ts, ci = [], [], []
-    for r in range(11):
-        _, n, t = params(r)
+    for idx in range(32):
+        short = idx >= 16
+        r = min(idx & 15, 9 if short else 10)
+        _, n, t = params(r, short)
         ns.append(f"16'd{n}")
         ts.append(f"4'd{t}")
-        c = chien_init(r) + [0] * (12 - t)
+        c = chien_init(r, short) + [0] * (12 - t)
         ci.append("'{" + ", ".join(f"16'h{v:04X}" for v in c) + "}")
-    lines.append("  localparam logic [15:0] BCH_N [11] = '{" + ", ".join(ns) + "};")
-    lines.append("  localparam logic [3:0]  BCH_T [11] = '{" + ", ".join(ts) + "};")
+    lines.append("  localparam logic [15:0] BCH_N [32] = '{" + ", ".join(ns) + "};")
+    lines.append("  localparam logic [3:0]  BCH_T [32] = '{" + ", ".join(ts) + "};")
     # syndrome j = 2jj+1, 8 bits per clock: S <- S a^(8j) + sum_k d[k] a^(jk)
-    lines.append("  localparam logic [15:0] BCH_SYN_MUL [12][9] = '{")
-    lines.append(",\n".join("    '{" + ", ".join(f"16'h{apow((2 * jj + 1) * k):04X}" for k in range(9)) + "}"
-                            for jj in range(12)))
-    lines.append("  };")
+    for name, sh in (("BCH_SYN_MUL", False), ("BCH_SYN_MUL14", True)):
+        lines.append(f"  localparam logic [15:0] {name} [12][9] = '{{")
+        lines.append(",\n".join("    '{" + ", ".join(f"16'h{apow((2 * jj + 1) * k, sh):04X}" for k in range(9)) + "}"
+                                for jj in range(12)))
+        lines.append("  };")
     # Chien, 8 positions per clock: term_j a^(ji), i = 0..7, step a^(8j)
     lines.append("  localparam logic [15:0] BCH_CH_MUL [12][9] = '{")
     lines.append(",\n".join("    '{" + ", ".join(f"16'h{apow(j * i):04X}" for i in range(9)) + "}"
                             for j in range(1, 13)))
     lines.append("  };")
-    lines.append("  localparam logic [15:0] BCH_CINIT [11][12] = '{")
+    # short frames, 1 position per clock: step a^j
+    lines.append("  localparam logic [15:0] BCH_CH_STEP14 [12] = '{" +
+                 ", ".join(f"16'h{apow(j, True):04X}" for j in range(1, 13)) + "};")
+    lines.append("  localparam logic [15:0] BCH_CINIT [32][12] = '{")
     lines.append(",\n".join("    " + c for c in ci))
     lines.append("  };")
     lines += ["endpackage", ""]

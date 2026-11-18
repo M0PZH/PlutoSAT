@@ -35,3 +35,20 @@ def test_bbframe_vs_gr(cli, rate_idx, rolloff):
     nf = min(len(gr), len(cb)) // kb
     assert nf >= 3
     assert np.array_equal(gr[:nf * kb], cb[:nf * kb])
+
+
+@pytest.mark.parametrize("rate_idx", range(10))
+def test_bbframe_short_vs_gr(cli, rate_idx):
+    """Short FECFRAMEs (Kbch of Table 5b): the C BBFRAMEs equal gr-dtv's."""
+    rate = m.RATES[rate_idx]
+    kb = m.rate_params(rate_idx, True)[0]
+    rng = np.random.default_rng(50 + rate_idx)
+    ts = rng.integers(0, 256, (6 * kb // 1504 + 3, 188), dtype=np.uint8)
+    ts[:, 0] = 0x47
+    gr = grref.bbheader(ts.ravel(), rate, 0.35, short=True)
+    c = subprocess.run([cli, str(rate_idx), "0.35", "1"], input=ts.tobytes(),
+                       capture_output=True, check=True).stdout
+    cb = np.unpackbits(np.frombuffer(c, dtype=np.uint8))
+    nf = min(len(gr), len(cb)) // kb
+    assert nf >= 4
+    assert np.array_equal(gr[:nf * kb], cb[:nf * kb])

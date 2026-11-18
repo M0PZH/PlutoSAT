@@ -6,7 +6,7 @@ module tb_bch_dec;
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
 
-  logic [3:0] s_rate, m_rate;
+  logic [4:0] s_rate, m_rate;
   logic [7:0] s_tag, m_tag;
   logic s_valid = 0, s_ready, s_last, s_ok;
   logic [7:0] s_data, s_chan;
@@ -41,7 +41,7 @@ module tb_bch_dec;
         rc = $fscanf(fi, "%h %d %d %d %h %d %d", a, b, c, d, e, ra, tg);
         if (rc == 7) begin
           s_valid <= 1; s_data <= 8'(a); s_last <= b[0]; s_ok <= c[0]; s_iters <= 6'(d); s_chan <= 8'(e); n_in++;
-          s_rate <= 4'(ra); s_tag <= 8'(tg);
+          s_rate <= 5'(ra); s_tag <= 8'(tg);
         end else eof <= 1;
       end
     end

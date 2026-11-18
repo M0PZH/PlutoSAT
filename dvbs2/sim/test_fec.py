@@ -10,19 +10,20 @@ import txmodel as m
 from axis import Sink, Source
 
 
-def gr_bbframes(rate_idx, nframes, seed):
+def gr_bbframes(rate_idx, nframes, seed, short=False):
     rate = m.RATES[rate_idx]
-    kbch = m.LDPC[rate]["kbch"]
+    kbch = m.rate_params(rate_idx, short)[0]
     rng = np.random.default_rng(seed)
     npk = (nframes + 1) * kbch // (8 * 188) + 2
     ts = rng.integers(0, 256, (npk, 188), dtype=np.uint8)
     ts[:, 0] = 0x47
-    bb = grref.bbheader(ts.ravel(), rate)[: nframes * kbch]
-    ref = grref.ldpc(grref.bch(grref.bbscrambler(bb, rate), rate), rate)
-    return bb.reshape(nframes, kbch), ref.reshape(nframes, 64800)
+    bb = grref.bbheader(ts.ravel(), rate, short=short)[: nframes * kbch]
+    ref = grref.ldpc(grref.bch(grref.bbscrambler(bb, rate, short), rate, short), rate, short)
+    return bb.reshape(nframes, kbch), ref.reshape(nframes, m.nldpc(short))
 
 
 async def run_rates(dut, rates, pilots, idle, stall):
+    """rates: rate_idx, or (rate_idx, short)."""
     cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
     dut.rst.value = 1
     src = Source(dut, idle_prob=idle, seed=11)
@@ -33,8 +34,9 @@ async def run_rates(dut, rates, pilots, idle, stall):
 
     beats, refs, users = [], [], []
     for i, r in enumerate(rates):
-        bb, ref = gr_bbframes(r, 1, seed=100 + i)
-        user = (pilots << 4) | r
+        r, short = r if isinstance(r, tuple) else (r, False)
+        bb, ref = gr_bbframes(r, 1, seed=100 + i, short=short)
+        user = (int(short) << 5) | (pilots << 4) | r
         by = np.packbits(bb[0])
         for k, b in enumerate(by):
             beats.append({"data": int(b), "user": user, "last": int(k == len(by) - 1)})
@@ -42,7 +44,8 @@ async def run_rates(dut, rates, pilots, idle, stall):
         users.append(user)
     await src.send(beats)
 
-    total = 64800 * len(rates)
+    lens = [len(r) for r in refs]
+    total = sum(lens)
     for _ in range(4_000_000):
         if len(snk.beats) >= total:
             break
@@ -50,12 +53,13 @@ async def run_rates(dut, rates, pilots, idle, stall):
     assert len(snk.beats) == total, f"got {len(snk.beats)} of {total} bits"
     out = np.array(snk.beats)
     for f, (ref, user) in enumerate(zip(refs, users)):
-        seg = out[f * 64800:(f + 1) * 64800]
+        a = sum(lens[:f])
+        seg = out[a:a + lens[f]]
         bad = np.flatnonzero(seg[:, 0] != ref)
         assert bad.size == 0, f"frame {f} rate {m.RATES[user & 15]}: {bad.size} bit errors, first {bad[:5]}"
         assert np.all(seg[:, 1] == user)
         assert seg[-1, 2] == 1 and seg[:-1, 2].sum() == 0
-        dut._log.info(f"frame {f} rate {m.RATES[user & 15]}: 64800 bits match gr-dtv")
+        dut._log.info(f"frame {f} rate {m.RATES[user & 15]} short {user >> 5 & 1}: {lens[f]} bits match gr-dtv")
 
 
 @cocotb.test()
@@ -68,3 +72,10 @@ async def fec_all_rates(dut):
 async def fec_backpressure(dut):
     """Random input gaps and output backpressure."""
     await run_rates(dut, [4, 0, 10], pilots=0, idle=0.3, stall=0.4)
+
+
+@cocotb.test()
+async def fec_short(dut):
+    """All 10 short-frame rates, mixed with normal frames, with stalls."""
+    await run_rates(dut, [(r, True) for r in range(10)] + [3, (0, True), 10, (9, True)],
+                    pilots=1, idle=0.1, stall=0.2)

@@ -18,14 +18,46 @@ RATES = ["1/4", "1/3", "2/5", "1/2", "3/5", "2/3", "3/4", "4/5", "5/6", "8/9", "
 LDPC = _T["ldpc"]
 BCH_POLY = {int(k): int(v, 16) for k, v in _T["bch_poly"].items()}
 NLDPC = 64800
+# short FECFRAMEs (16200 bits): rates 1/4 .. 8/9 (rate_idx 0..9), BCH t = 12 over GF(2^14)
+LDPC_SHORT = _T["ldpc_short"]
+BCH_POLY_SHORT = int(_T["bch_poly_short"], 16)
+NLDPC_SHORT = 16200
+# 8PSK MODCODs 12..17: rate_idx of 3/5, 2/3, 3/4, 5/6, 8/9, 9/10
+PSK8_RATE_IDX = [4, 5, 6, 8, 9, 10]
 
 # Symbol amplitude for |I| = |Q| = 1/sqrt(2) in Q1.15 (GR value * 32767, rounded).
 SYM_A = 23170
 
 
-def rate_params(rate_idx):
-    r = LDPC[RATES[rate_idx]]
+def rate_params(rate_idx, short=False):
+    r = (LDPC_SHORT if short else LDPC)[RATES[rate_idx]]
     return r["kbch"], r["kldpc"], r["t"], r["q"], r["table"]
+
+
+def nldpc(short=False):
+    return NLDPC_SHORT if short else NLDPC
+
+
+def modcod_info(modcod):
+    """MODCOD 1..17 -> (rate_idx, psk8)."""
+    if 1 <= modcod <= 11:
+        return modcod - 1, False
+    if 12 <= modcod <= 17:
+        return PSK8_RATE_IDX[modcod - 12], True
+    raise ValueError(f"MODCOD {modcod} not supported")
+
+
+def modcod_of(rate_idx, psk8=False):
+    return 12 + PSK8_RATE_IDX.index(rate_idx) if psk8 else rate_idx + 1
+
+
+def valid_code(modcod, short):
+    """QPSK 1..11 and 8PSK 12..17, normal or short; short frames have no 9/10."""
+    try:
+        r, _ = modcod_info(modcod)
+    except ValueError:
+        return False
+    return not (short and r == 10)
 
 
 # --------------------------------------------------------------------------
@@ -43,9 +75,9 @@ def bb_scramble(bits):
     return out
 
 
-def bch_encode(msg, t):
-    nk = 16 * t
-    poly = BCH_POLY[t]
+def bch_encode(msg, t, short=False):
+    nk = 168 if short else 16 * t
+    poly = BCH_POLY_SHORT if short else BCH_POLY[t]
     mask = (1 << nk) - 1
     reg = 0
     for b in msg:
@@ -57,9 +89,9 @@ def bch_encode(msg, t):
     return np.concatenate([msg, par])
 
 
-def ldpc_encode(info, rate_idx):
-    _, kldpc, _, q, table = rate_params(rate_idx)
-    nparity = NLDPC - kldpc
+def ldpc_encode(info, rate_idx, short=False):
+    _, kldpc, _, q, table = rate_params(rate_idx, short)
+    nparity = nldpc(short) - kldpc
     p = np.zeros(nparity, dtype=np.uint8)
     idx = np.flatnonzero(info)
     for m in idx:
@@ -69,10 +101,10 @@ def ldpc_encode(info, rate_idx):
     return np.concatenate([info, np.bitwise_xor.accumulate(p)])
 
 
-def fec_frame(bbframe_bits, rate_idx):
-    kbch, _, t, _, _ = rate_params(rate_idx)
+def fec_frame(bbframe_bits, rate_idx, short=False):
+    kbch, _, t, _, _ = rate_params(rate_idx, short)
     assert len(bbframe_bits) == kbch
-    return ldpc_encode(bch_encode(bb_scramble(bbframe_bits), t), rate_idx)
+    return ldpc_encode(bch_encode(bb_scramble(bbframe_bits), t, short), rate_idx, short)
 
 
 # --------------------------------------------------------------------------
@@ -105,10 +137,10 @@ def plheader_bits(modcod, pilots, short_frame=False):
     return [(hdr >> (89 - i)) & 1 for i in range(90)]
 
 
-def plheader_signs(modcod, pilots):
+def plheader_signs(modcod, pilots, short=False):
     """pi/2-BPSK header as (sign_I, sign_Q) per symbol; sign 1 means negative."""
     out = []
-    for i, y in enumerate(plheader_bits(modcod, pilots)):
+    for i, y in enumerate(plheader_bits(modcod, pilots, short)):
         # even index (1st, 3rd, ... symbol): (1+j)(1-2y)/sqrt2; odd: (-1+j)(1-2y)/sqrt2
         if i % 2 == 0:
             out.append((y, y))
@@ -191,6 +223,78 @@ def dummy_plframe_signs(gold=0):
     rseq = pl_scramble_seq(len(body), xa, xb)
     body = [rotate_signs(si, sq, r) for (si, sq), r in zip(body, rseq)]
     return np.array(hdr + body, dtype=np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Symbols as phase indices (QPSK and 8PSK): symbol = exp(j pi p / 4), p = 0..7.
+# QPSK points and the pi/2-BPSK header, pilots and dummy bodies are the odd
+# p; the PL scrambler's j^R adds 2R. The RTL (dvbs2_plframer) carries p.
+# ---------------------------------------------------------------------------
+
+# 8PSK (EN 302 307-1 5.4.2): symbol value v = (b0 b1 b2) -> p
+PSK8_PHASE = [1, 0, 4, 5, 2, 7, 3, 6]
+# QPSK: (b0, b1) = (I sign, Q sign) -> p
+QPSK_PHASE = [1, 7, 3, 5]
+# (I, Q) per p, in Q1.15 (gr-dtv's unit-radius points * 32767, rounded)
+PHASE_IQ = np.array([(32767, 0), (SYM_A, SYM_A), (0, 32767), (-SYM_A, SYM_A),
+                     (-32767, 0), (-SYM_A, -SYM_A), (0, -32767), (SYM_A, -SYM_A)], dtype=np.int64)
+
+
+def slots(short=False, psk8=False):
+    """90-symbol slots of a data PLFRAME."""
+    return nldpc(short) // (3 if psk8 else 2) // 90
+
+
+def map_symbols(fec_bits, rate_idx, psk8=False, short=False):
+    """FECFRAME bits -> phase indices (QPSK: pairs; 8PSK: the 3-column block
+    interleaver, written column-wise and read row-wise, the first column
+    being the MSB except for rate 3/5, where it is the LSB)."""
+    b = np.asarray(fec_bits, dtype=np.int64)
+    if not psk8:
+        v = b.reshape(-1, 2) @ np.array([2, 1])
+        return np.array(QPSK_PHASE, np.int64)[v]
+    c = b.reshape(3, -1)
+    if rate_idx == 4:
+        v = c[2] * 4 + c[1] * 2 + c[0]
+    else:
+        v = c[0] * 4 + c[1] * 2 + c[2]
+    return np.array(PSK8_PHASE, np.int64)[v]
+
+
+def plheader_phases(modcod, pilots, short=False):
+    """pi/2-BPSK header: even index (1+j)(1-2y)/sqrt2 -> 1 / 5, odd (-1+j)(1-2y)/sqrt2 -> 3 / 7."""
+    return [(1 if i % 2 == 0 else 3) + 4 * y for i, y in enumerate(plheader_bits(modcod, pilots, short))]
+
+
+def plframe_phases(fec_bits, modcod, pilots, gold=0, short=False):
+    """One data PLFRAME (any supported MODCOD, normal or short) as phase indices."""
+    rate_idx, psk8 = modcod_info(modcod)
+    data = map_symbols(fec_bits, rate_idx, psk8, short)
+    body = []
+    for slot in range(len(data) // 90):
+        if pilots and slot > 0 and slot % 16 == 0:
+            body.extend([1] * 36)
+        body.extend(data[slot * 90:(slot + 1) * 90].tolist())
+    xa, xb = gold_init(gold)
+    rseq = pl_scramble_seq(len(body), xa, xb)
+    body = [(p + 2 * int(r)) & 7 for p, r in zip(body, rseq)]
+    return np.array(plheader_phases(modcod, pilots, short) + body, dtype=np.int64)
+
+
+def dummy_plframe_phases(gold=0):
+    xa, xb = gold_init(gold)
+    rseq = pl_scramble_seq(36 * 90, xa, xb)
+    return np.array(plheader_phases(0, False) + [(1 + 2 * int(r)) & 7 for r in rseq], dtype=np.int64)
+
+
+def phases_to_iq(ph):
+    return PHASE_IQ[np.asarray(ph, dtype=np.int64)]
+
+
+def plframe_len(modcod, pilots, short=False):
+    _, psk8 = modcod_info(modcod)
+    s = slots(short, psk8)
+    return 90 + 90 * s + (36 * ((s - 1) // 16) if pilots else 0)
 
 
 def signs_to_iq(signs):

@@ -1,4 +1,5 @@
-// DVB-S2 LDPC inner encoder, normal FECFRAME, bit serial (EN 302 307-1 5.3.2).
+// DVB-S2 LDPC inner encoder, normal and short FECFRAMEs, bit serial (EN 302
+// 307-1 5.3.2).
 //
 // Info bits pass straight through. For every info bit i_m equal to one, each
 // address-table entry x of its 360-bit group m/360 toggles parity bit
@@ -24,23 +25,22 @@ module dvbs2_ldpc_enc
   input  logic       s_valid,
   output logic       s_ready,
   input  logic       s_data,
-  input  logic [4:0] s_user,
+  input  logic [6:0] s_user,
   input  logic       s_last,   // last BCH codeword bit = last LDPC info bit
 
   output logic       m_valid,
   input  logic       m_ready,
   output logic       m_data,
-  output logic [4:0] m_user,
-  output logic       m_last    // bit 64799
+  output logic [6:0] m_user,
+  output logic       m_last    // bit Nldpc - 1
 );
 
-  localparam int NLDPC = 64800;
   localparam int PAR_DEPTH = 49152;   // >= max Np = 48600 (rate 1/4)
 
   typedef enum logic [2:0] {ST_START, ST_SCAN, ST_INFO, ST_ISSUE, ST_DRAIN, ST_PAR} state_t;
   state_t state, after_issue;
 
-  logic [4:0]  cfg;
+  logic [6:0]  cfg;
   logic [7:0]  q;
   logic [15:0] np_m1;
 
@@ -163,10 +163,10 @@ module dvbs2_ldpc_enc
         ST_START: begin
           if (s_valid) begin
             cfg      <= s_user;
-            q        <= 8'(Q[s_user[3:0]]);
-            np_m1    <= 16'(NLDPC - KLDPC[s_user[3:0]] - 1);
-            grp_base <= LDPC_ROM_AW'(LDPC_ROM_BASE[s_user[3:0]]);
-            scan_ptr <= LDPC_ROM_AW'(LDPC_ROM_BASE[s_user[3:0]]);
+            q        <= 8'(Q[{s_user[5], s_user[3:0]}]);
+            np_m1    <= 16'(NLDPC[{s_user[5], s_user[3:0]}] - KLDPC[{s_user[5], s_user[3:0]}] - 1);
+            grp_base <= LDPC_ROM_AW'(LDPC_ROM_BASE[{s_user[5], s_user[3:0]}]);
+            scan_ptr <= LDPC_ROM_AW'(LDPC_ROM_BASE[{s_user[5], s_user[3:0]}]);
             scan_cnt <= '0;
             scan_wait <= 1'b0;
             s_cnt    <= '0;

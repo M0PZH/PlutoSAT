@@ -1,5 +1,5 @@
 /* Host test helper: TS on stdin -> packed BBFRAMEs on stdout.
- *   bbframe_cli <rate_idx> <rolloff>
+ *   bbframe_cli <rate_idx> <rolloff> [short]
  * Only complete BBFRAMEs are written (like gr-dtv's dvb_bbheader_bb). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +17,8 @@ int main(int argc, char **argv)
 	struct bbframer b;
 	uint8_t out[BBFRAME_MAX_BYTES];
 
-	if (argc < 3 || bbframer_init(&b, atoi(argv[1]), atof(argv[2]))) {
-		fprintf(stderr, "usage: %s <rate_idx 0..10> <rolloff>\n", argv[0]);
+	if (argc < 3 || bbframer_init_x(&b, atoi(argv[1]), argc > 3 && atoi(argv[3]), atof(argv[2]))) {
+		fprintf(stderr, "usage: %s <rate_idx 0..10> <rolloff> [short 0/1]\n", argv[0]);
 		return 1;
 	}
 	for (;;) {

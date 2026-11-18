@@ -417,7 +417,7 @@ module dvbs2_rx_axi #(
 
   // ---------------------------------------------------------------- receiver core
   logic        b_valid, b_last, b_ok, b_ldpc_ok, b_pilots, b_slot;
-  logic [3:0]  b_rate;
+  logic [4:0]  b_rate;
   logic [4:0]  b_nerr, b_modcod;
   logic [15:0] b_raw_err;
   logic [7:0]  b_data;

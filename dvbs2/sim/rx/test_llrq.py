@@ -30,18 +30,35 @@ def llrq_exe():
 
 
 def make_frames(cases, seed):
-    """[(rate_idx, esn0, pilots)] -> [dict(llr, rate, modcod, pilots, chan)]."""
+    """[(rate_idx, esn0, pilots)] (QPSK normal) or [(rate_idx, esn0, pilots,
+    modcod, short)] -> [dict(llr, rate, modcod, pilots, short, chan)]. llr in
+    bit order (the LLR AWGN model of QPSK; the order through the queue is
+    what matters)."""
     import ldpcdec as ld
     import txmodel as m
     rng = np.random.default_rng(seed)
     out = []
-    for rate_idx, esn0, pilots in cases:
-        code = ld.Code(rate_idx)
+    for c in cases:
+        rate_idx, esn0, pilots = c[:3]
+        modcod, short = (c[3], c[4]) if len(c) > 3 else (rate_idx + 1, False)
+        code = ld.Code(rate_idx, short)
         bb = rng.integers(0, 2, code.kbch).astype(np.uint8)
-        llr = ld.awgn_llr(m.fec_frame(bb, rate_idx), esn0, rng)
-        out.append(dict(llr=llr, rate=rate_idx, modcod=rate_idx + 1, pilots=int(pilots),
+        llr = ld.awgn_llr(m.fec_frame(bb, rate_idx, short), esn0, rng)
+        out.append(dict(llr=llr, rate=rate_idx, modcod=modcod, pilots=int(pilots), short=int(short),
                         chan=np.packbits((llr[:code.K] < 0).astype(np.uint8))))
     return out
+
+
+def words_of(fr):
+    """The front end's words of a frame: QPSK (i, q, 0) = bits (2k, 2k+1);
+    8PSK (b0, b1, b2) of symbol k = bits (k, k + N/3, k + 2N/3), rate 3/5
+    (MODCOD 12) the other way round."""
+    u = fr["llr"].astype(np.int64) & 0xFF
+    if fr["modcod"] < 12:
+        w = u.reshape(-1, 2)
+        return np.column_stack([w, np.zeros(len(w), np.int64)])
+    c = u.reshape(3, -1)
+    return np.column_stack([c[2], c[1], c[0]] if fr["modcod"] == 12 else [c[0], c[1], c[2]])
 
 
 def schedule(slots, burst=1440):
@@ -55,18 +72,19 @@ def schedule(slots, burst=1440):
     for s, sl in enumerate(slots):
         parts = []
         for f, fr in enumerate(sl["frames"]):
-            n = sl.get("cut", {}).get(f, 32400)
-            u = fr["llr"].astype(np.int64).reshape(-1, 2)[:n] & 0xFF
+            u = words_of(fr)
+            n = sl.get("cut", {}).get(f, len(u))
+            u = u[:n]
             first = np.zeros(n, np.int64)
             first[0] = 1
             parts.append(np.column_stack([u, first, np.full(n, s), np.full(n, fr["modcod"]),
-                                          np.full(n, fr["pilots"])]))
+                                          np.full(n, fr["pilots"]), np.full(n, fr.get("short", 0))]))
         w = np.concatenate(parts)
         k = np.arange(len(w))
         t = sl.get("offset", 0) + (k // burst) * burst * sl["period"] + (k % burst)
         cols.append(np.column_stack([t, w]))
     a = np.concatenate(cols)
-    a = a[np.lexsort((a[:, 4], a[:, 0]))]
+    a = a[np.lexsort((a[:, 5], a[:, 0]))]
     t = a[:, 0] - np.arange(len(a))
     t = np.maximum.accumulate(t) + np.arange(len(a))                # at most one word per clock
     gap = np.diff(np.concatenate([[-1], t]))
@@ -75,7 +93,8 @@ def schedule(slots, burst=1440):
 
 def write_words(path, w):
     with open(path, "w") as f:
-        f.write("".join(f"{g} {i:02x} {q:02x} {fi} {s} {mc} {p}\n" for g, i, q, fi, s, mc, p in w.tolist()))
+        f.write("".join(f"{g} {i:02x} {q:02x} {z:02x} {fi} {s} {mc} {p} {sh}\n"
+                        for g, i, q, z, fi, s, mc, p, sh in w.tolist()))
 
 
 def run_queue(exe, name, slots, burst=1440, **plus):
@@ -88,7 +107,7 @@ def run_queue(exe, name, slots, burst=1440, **plus):
     log = rxsim.run(exe, **args, **{"in": fin, "out": fout})
     print(log)
     st = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", log.split("tb_llrq:")[1])}
-    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 4, 8))
+    got = rxsim.read_hex_cols(fout, (8, 1, 1, 6, 8, 5, 8))
     ends = np.nonzero(got[:, 1])[0]
     frames = np.split(got, ends[:-1] + 1) if len(ends) else []
     assert len(ends) == 0 or ends[-1] == len(got) - 1
@@ -105,7 +124,6 @@ def check_frames(slots, frames, max_it, it_lo=None):
     for k, g in enumerate(frames):
         tag = int(g[0, 6])
         s, pil, mc = (tag >> 6) & 1, (tag >> 5) & 1, tag & 31
-        assert np.all(g[:, 6] == tag) and np.all(g[:, 5] == mc - 1), f"output frame {k}: tag/rate"
         fl = slots[s]["frames"]
         cut = slots[s].get("cut", {})
         j = nxt[s]
@@ -115,9 +133,10 @@ def check_frames(slots, frames, max_it, it_lo=None):
         assert j < len(fl), f"output frame {k} (slot {s}) is no input frame of the slot, in order"
         fr = fl[j]
         assert (mc, pil) == (fr["modcod"], fr["pilots"])
+        assert np.all(g[:, 6] == tag) and np.all(g[:, 5] == fr["rate"] + 16 * fr["short"]), f"output frame {k}: tag/rate"
         it, ok = int(g[-1, 3]), bool(g[-1, 2])
-        hard, it_m, conv = ld.Decoder(fr["rate"]).decode(fr["llr"], max_it=it if not ok else max_it[s])
-        K = ld.Code(fr["rate"]).K
+        hard, it_m, conv = ld.Decoder(fr["rate"], fr["short"]).decode(fr["llr"], max_it=it if not ok else max_it[s])
+        K = ld.Code(fr["rate"], fr["short"]).K
         assert np.array_equal(g[:, 0], np.packbits(hard[:K])), f"output frame {k} (slot {s}, {j}): data"
         assert (it_m, conv) == (it, ok), (k, s, j, it_m, conv, it, ok)
         if not ok and it != max_it[s]:
@@ -206,6 +225,24 @@ def test_llrq_abort(llrq_exe):
     print(st, seen)
     assert [j for j, _ in seen[0]] == [0, 2, 4] and [j for j, _ in seen[1]] == [1, 4, 5]
     assert st["drop0"] == st["drop1"] == 0 and st["qframes"] == 6
+
+
+def test_llrq_8psk_short(llrq_exe):
+    """8PSK (3 LLRs a word, symbol order in DDR; the reader deinterleaves in
+    three passes, rate 3/5 the other way round) and short FECFRAMEs (16200
+    LLRs, 2025 beats, a 9-beat last burst), mixed with QPSK normal frames in
+    both slots, with AXI stalls and decoder backpressure; a short 8PSK frame
+    abandoned mid-way. Every frame decodes as the model, with its code."""
+    f0 = make_frames([(4, 4.5, 1, 12, False), (3, 2.5, 1, 4, True), (10, 7.5, 0, 17, False),
+                      (5, 4.5, 1, 13, True), (6, 5.0, 1, 7, False), (8, 6.6, 1, 15, True)], seed=13)
+    f1 = make_frames([(4, 3.6, 0, 12, True), (9, 7.4, 1, 16, True), (0, -0.5, 1, 1, True),
+                      (5, 4.0, 1, 13, False), (6, 5.0, 0, 14, True)], seed=14)
+    slots = [dict(frames=f0, period=9), dict(frames=f1, period=11, offset=3, cut={1: 1500})]
+    st, frames = run_queue(llrq_exe, "p8s", slots, burst=300, axistall=30, axilat=150, stall=20)
+    seen = check_frames(slots, frames, (30, 30))
+    print(st, seen)
+    assert [j for j, _ in seen[0]] == list(range(6)) and [j for j, _ in seen[1]] == [0, 2, 3, 4]
+    assert st["drop0"] == st["drop1"] == 0 and st["axi_err"] == 0
 
 
 def test_llrq_reset(llrq_exe):

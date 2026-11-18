@@ -1,4 +1,6 @@
-// DVB-S2 BCH decoder, normal FECFRAMEs (model: model/bchdec.py, bit exact).
+// DVB-S2 BCH decoder, normal and short FECFRAMEs (model: model/bchdec.py, bit
+// exact). Normal frames: GF(2^16), t = 12/10/8; short frames (s_rate[4]):
+// GF(2^14), t = 12, the Chien search one position per clock.
 //
 // Input : the Kldpc hard decisions of a frame from dvbs2_ldpc_dec (BB-
 //         scrambled BBFRAME + BCH parity) as bytes, MSB first, s_last on the
@@ -15,7 +17,7 @@
 //   SQ    S_2k = S_k^2
 //   BM    simplified inversionless Berlekamp-Massey, t steps (~30 clocks each)
 //   CI    Chien start terms Lambda_j alpha^(-j(n-1))
-//   CH    Chien search 8 positions/clock, corrections and BB descrambling
+//   CH    Chien search 8 positions/clock (short: 1), corrections and BB descrambling
 //         written back into the buffer
 //   OUT   Kbch/8 bytes, one per 2 clocks
 // Not ready during SQ..OUT (about n/8 + Kbch/4 + 500 clocks per frame).
@@ -36,7 +38,7 @@ module dvbs2_bch_dec
   input  logic        s_ok,
   input  logic [5:0]  s_iters,
   input  logic [7:0]  s_chan,
-  input  logic [3:0]  s_rate,
+  input  logic [4:0]  s_rate,         // {short, rate_idx}
   input  logic [TW-1:0] s_tag,
 
   output logic        m_valid,
@@ -48,7 +50,7 @@ module dvbs2_bch_dec
   output logic [5:0]  m_iters,
   output logic [4:0]  m_nerr,
   output logic [15:0] m_raw_err,
-  output logic [3:0]  m_rate,
+  output logic [4:0]  m_rate,
   output logic [TW-1:0] m_tag,
 
   output logic [15:0] st_frames,
@@ -56,11 +58,13 @@ module dvbs2_bch_dec
   output logic [15:0] st_failed      // frames not decodable
 );
 
-  function automatic logic [15:0] gmul(input logic [15:0] a, input logic [15:0] b);
+  // GF(2^16), or GF(2^14) with f14 (operands and result < 2^14)
+  function automatic logic [15:0] gmul(input logic [15:0] a, input logic [15:0] b, input logic f14);
     logic [15:0] r;
     r = '0;
     for (int i = 15; i >= 0; i--) begin
-      r = {r[14:0], 1'b0} ^ (r[15] ? BCH_PRIM[15:0] : 16'h0000);
+      if (f14) r = {r[14:0], 1'b0} ^ (r[13] ? 16'(BCH_PRIM14) : 16'h0000);
+      else     r = {r[14:0], 1'b0} ^ (r[15] ? BCH_PRIM[15:0] : 16'h0000);
       if (b[i]) r = r ^ a;
     end
     return r;
@@ -69,7 +73,8 @@ module dvbs2_bch_dec
   // ------------------------------------------------------------ rate
   // the frame's rate, taken with its bytes; the syndromes do not depend on
   // it, the first use (t in B_D) is 13 clocks after the last byte
-  logic [3:0]    rate_idx;
+  logic [4:0]    rate_idx;
+  wire           f14 = rate_idx[4];          // short frame: GF(2^14)
   logic [TW-1:0] tag;
   logic [15:0] nb, kb;                       // bytes: Kldpc / 8, Kbch / 8
   logic [3:0]  t;
@@ -104,6 +109,8 @@ module dvbs2_bch_dec
   logic [15:0] k;                            // byte index
   logic        ch_v;                         // CH: byte k-1 read, its mask in ch_mask
   logic [7:0]  ch_mask;
+  logic [2:0]  cb;                           // short frames: position in the byte
+  logic [7:0]  cmask;
   logic [15:0] ch_k;
   logic [14:0] prbs;
   logic [4:0]  roots;
@@ -151,10 +158,14 @@ module dvbs2_bch_dec
           rate_idx <= s_rate;
           tag <= s_tag;
           for (int jj = 0; jj < 12; jj++) begin : syn
-            logic [15:0] v;
-            v = gmul(S[2 * jj + 1], BCH_SYN_MUL[jj][8]);
-            for (int b = 0; b < 8; b++) if (s_data[b]) v = v ^ BCH_SYN_MUL[jj][b];
-            S[2 * jj + 1] <= v;
+            logic [15:0] v, v14;
+            v   = gmul(S[2 * jj + 1], BCH_SYN_MUL[jj][8], 1'b0);
+            v14 = gmul(S[2 * jj + 1], BCH_SYN_MUL14[jj][8], 1'b1);
+            for (int b = 0; b < 8; b++) if (s_data[b]) begin
+              v   = v ^ BCH_SYN_MUL[jj][b];
+              v14 = v14 ^ BCH_SYN_MUL14[jj][b];
+            end
+            S[2 * jj + 1] <= s_rate[4] ? v14 : v;
           end
           k <= k + 16'd1;
           raw <= (k == 0 ? 16'd0 : raw) + 16'($countones(s_data ^ s_chan));
@@ -167,7 +178,7 @@ module dvbs2_bch_dec
         end
 
         B_SQ: begin
-          S[2 * j] <= gmul(S[j], S[j]);
+          S[2 * j] <= gmul(S[j], S[j], f14);
           if (j == 4'd12) begin
             for (int i = 0; i < 14; i++) begin
               lam[i] <= (i == 0) ? 16'd1 : 16'd0;
@@ -186,7 +197,7 @@ module dvbs2_bch_dec
         B_D: begin : bd
           logic [5:0] si;
           si = 6'(2 * r + 1) - 6'(j);
-          if (si >= 6'd1 && si <= 6'd24) d <= d ^ gmul(lam[j], S[5'(si)]);
+          if (si >= 6'd1 && si <= 6'd24) d <= d ^ gmul(lam[j], S[5'(si)], f14);
           if (j == t) begin
             j <= '0;
             st <= B_U;
@@ -194,7 +205,7 @@ module dvbs2_bch_dec
         end
 
         B_U: begin
-          lnew[j] <= gmul(gamma, lam[j]) ^ (j != 0 ? gmul(d, bb[j - 4'd1]) : 16'd0);
+          lnew[j] <= gmul(gamma, lam[j], f14) ^ (j != 0 ? gmul(d, bb[j - 4'd1], f14) : 16'd0);
           if (j == t + 4'd1) st <= B_U2;
           else j <= j + 4'd1;
         end
@@ -220,10 +231,11 @@ module dvbs2_bch_dec
 
         // ---------------------------------------------------- Chien search
         B_CI: begin
-          term[j - 4'd1] <= gmul(lam[j], cinit[j - 4'd1]);
+          term[j - 4'd1] <= gmul(lam[j], cinit[j - 4'd1], f14);
           if (j == 4'd12) begin
             k <= '0;
             ch_v <= 1'b0;
+            cb <= '0;
             roots <= '0;
             prbs <= 15'b100101010000000;
             st <= B_CH;
@@ -233,15 +245,34 @@ module dvbs2_bch_dec
         B_CH: begin
           // byte k: read it, its 8 root flags; byte k-1: written back (always_comb)
           if (ch_v) roots <= roots + 5'($countones(ch_mask));
-          if (k != nb) begin : ch
+          if (k != nb && f14) begin : ch14
+            // short frame: one position per clock, the byte written after
+            // its 8th (cb = 7: br_q holds byte k in the next clock)
+            logic [15:0] v;
+            logic [7:0]  mk;
+            v = lam[0];
+            for (int jj = 0; jj < 12; jj++) v = v ^ term[jj];
+            for (int jj = 0; jj < 12; jj++) term[jj] <= gmul(term[jj], BCH_CH_STEP14[jj], 1'b1);
+            mk = cmask;
+            mk[3'd7 - cb] = (v == 16'd0);
+            cmask <= mk;
+            cb <= cb + 3'd1;
+            ch_v <= 1'b0;
+            if (cb == 3'd7) begin
+              ch_mask <= mk;
+              ch_k <= k;
+              ch_v <= 1'b1;
+              k <= k + 16'd1;
+            end
+          end else if (k != nb) begin : ch
             logic [7:0] mk;
             for (int i = 0; i < 8; i++) begin
               logic [15:0] v;
               v = lam[0];
-              for (int jj = 0; jj < 12; jj++) v = v ^ gmul(term[jj], BCH_CH_MUL[jj][i]);
+              for (int jj = 0; jj < 12; jj++) v = v ^ gmul(term[jj], BCH_CH_MUL[jj][i], 1'b0);
               mk[7 - i] = (v == 16'd0);
             end
-            for (int jj = 0; jj < 12; jj++) term[jj] <= gmul(term[jj], BCH_CH_MUL[jj][8]);
+            for (int jj = 0; jj < 12; jj++) term[jj] <= gmul(term[jj], BCH_CH_MUL[jj][8], 1'b0);
             ch_mask <= mk;
             ch_k <= k;
             ch_v <= 1'b1;

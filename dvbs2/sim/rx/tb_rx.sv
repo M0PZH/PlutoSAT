@@ -41,7 +41,7 @@ module tb_rx;
   logic [5:0] m_iters;
   logic [4:0] m_nerr;
   logic [15:0] m_raw_err;
-  logic [3:0] m_rate;
+  logic [4:0] m_rate;
   logic [4:0] m_modcod;
   logic m_pilots, m_slot;
   logic snap_c_v, snap_c_slot;
