@@ -1,0 +1,37 @@
+#!/bin/sh
+# plutosatd postinst
+set -e
+CONF=/etc/plutosat/plutosatd.toml
+KEEP=/etc/plutosat/plutosatd.toml.plutosat-keep
+
+case "$1" in
+configure)
+    if [ -f "$KEEP" ]; then
+        # the config that was there before the package (preinst): it wins,
+        # byte for byte; dpkg sees a locally modified conffile from now on
+        mv -f "$KEEP" "$CONF"
+        echo "plutosatd: kept the existing $CONF (the packaged default is /usr/share/plutosatd/plutosatd.toml.default)"
+    elif [ -f "$CONF" ] && grep -q '^admin_password = "ADMIN_PASSWORD"' "$CONF"; then
+        PW=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        sed -i "s/^admin_password = \"ADMIN_PASSWORD\"/admin_password = \"$PW\"/" "$CONF"
+        chmod 600 "$CONF"
+        echo "-----------------------------------------------------------------"
+        echo "plutosatd: web UI https://$(hostname)/  admin password: $PW"
+        echo "  (in $CONF, [auth] admin_password; shown only now)"
+        echo "  Transmitting is disabled: [tx] / [nbtx] enabled = false there."
+        echo "-----------------------------------------------------------------"
+    fi
+    if [ -e /etc/systemd/system/plutosatd.service ]; then
+        echo "plutosatd: WARNING: /etc/systemd/system/plutosatd.service (installed by hand?) overrides" >&2
+        echo "  the packaged /lib/systemd/system/plutosatd.service; remove it and run systemctl daemon-reload" >&2
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl enable plutosatd.service > /dev/null 2>&1 || true
+        if ! systemctl restart plutosatd.service; then
+            echo "plutosatd: WARNING: the service did not start: journalctl -u plutosatd" >&2
+        fi
+    fi
+    ;;
+esac
+exit 0

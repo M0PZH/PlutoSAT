@@ -1,0 +1,17 @@
+[Unit]
+Description=Load the PlutoSAT PL bitstream into the FPGA (plutosat-firmware)
+Documentation=file:/usr/share/doc/plutosat-firmware/README.md
+# a BOOT.bin with the PlutoSAT bitstream has loaded it already: loading the
+# same one again is harmless, and any other BOOT.bin works too
+After=local-fs.target systemd-udevd.service
+Before=plutosatd.service
+ConditionPathExists=/sys/class/fpga_manager/fpga0
+ConditionPathExists=/lib/firmware/plutosat.bit.bin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/plutosat-pl-load
+
+[Install]
+WantedBy=multi-user.target

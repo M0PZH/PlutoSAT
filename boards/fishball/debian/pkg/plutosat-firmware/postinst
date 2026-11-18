@@ -1,0 +1,61 @@
+#!/bin/sh
+# plutosat-firmware postinst: enable the boot-time PL load, check (only
+# check) the running device tree for what the PlutoSAT PL needs
+set -e
+DT=/proc/device-tree
+SHARE=/usr/share/plutosat-firmware
+
+check_dt() {
+    [ -d $DT ] || return 0
+    miss=""
+    for n in reserved-memory/dvbs2-buffer@3f000000 reserved-memory/dvbs2-rx-buffer@3ef00000 \
+             reserved-memory/nbiq-buffer@3eb00000 reserved-memory/fft-buffer@3ea00000 \
+             reserved-memory/dvbs2-llr-buffer@3e800000 reserved-memory/iqtx-buffer@3e700000 \
+             fpga-axi@0/dvbs2-tx@7c500000 fpga-axi@0/dvbs2-rx@7c510000 fpga-axi@0/nbiq@7c520000 \
+             fpga-axi@0/rx-awgn@7c530000 fpga-axi@0/fft@7c540000 fpga-axi@0/iqtx@7c550000; do
+        [ -e "$DT/$n" ] || miss="$miss $n"
+    done
+    extra=""
+    for n in "$DT"/fpga-axi@0/*@*; do
+        [ -d "$n" ] || continue
+        a=$(( 0x${n##*@} ))
+        ok=0
+        while read -r lo hi name; do
+            case "$lo" in 0x*) ;; *) continue ;; esac
+            if [ "$a" -ge $((lo)) ] && [ "$a" -le $((hi)) ]; then ok=1; break; fi
+        done < $SHARE/pl-axi.txt
+        [ $ok = 1 ] || extra="$extra ${n#$DT/}"
+    done
+    uio=1
+    grep -q 'uio_pdrv_genirq.of_id=generic-uio' /proc/cmdline || uio=0
+    if [ -n "$miss" ] || [ -n "$extra" ] || [ $uio = 0 ]; then
+        cat >&2 <<MSG
+=====================================================================
+plutosat-firmware: WARNING: the running device tree does not fit the
+PlutoSAT PL. See /usr/share/doc/plutosat-firmware/README.md.
+MSG
+        [ -z "$miss" ] || echo "  missing (reserved DDR / UIO nodes):$miss" >&2
+        [ -z "$extra" ] || echo "  PL nodes the bitstream does not have (IIO DMAs, mwipcore, ...):$extra" >&2
+        [ $uio = 1 ] || echo "  kernel command line lacks uio_pdrv_genirq.of_id=generic-uio" >&2
+        cat >&2 <<MSG
+  plutosat-pl-load refuses to load while the IIO DMAs are listed;
+  plutosatd needs the UIO nodes and the reserved memory. Fix the boot
+  files (dtb-add-plutosat.py in /usr/share/doc/plutosat-firmware/, or
+  the plutosat-boot package) and reboot.
+=====================================================================
+MSG
+    fi
+}
+
+case "$1" in
+configure)
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        systemctl enable plutosat-pl-load.service > /dev/null 2>&1 || true
+    fi
+    check_dt
+    echo "plutosat-firmware: $(cat $SHARE/cores.txt | grep -v '^#' | tr '\n' ' ')"
+    echo "plutosat-firmware: the bitstream loads at the next boot (plutosat-pl-load.service); to load it now: plutosat-pl-load"
+    ;;
+esac
+exit 0

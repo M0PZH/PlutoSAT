@@ -1,0 +1,11 @@
+#!/bin/sh
+# plutosat-firmware prerm
+set -e
+case "$1" in
+remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+        systemctl disable plutosat-pl-load.service > /dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

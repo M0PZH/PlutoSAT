@@ -1,0 +1,22 @@
+#!/bin/sh
+# plutosat-boot preinst: refuse early on a board this is not for (the full
+# preflight runs in postinst, before anything on the boot partition changes)
+set -e
+case "$1" in
+install|upgrade)
+    if [ "$PLUTOSAT_BOOT_FORCE" = 1 ]; then exit 0; fi
+    model=$(tr -d '\000' < /proc/device-tree/model 2> /dev/null || true)
+    case "$model" in
+    *"FISH Ball"*Z7020*) ;;
+    *)
+        echo "plutosat-boot: REFUSED: not a fishball Zynq-7020 board (device tree model \"$model\")." >&2
+        echo "  Nothing was installed. PLUTOSAT_BOOT_FORCE=1 overrides (at your own risk)." >&2
+        exit 1 ;;
+    esac
+    if [ ! -b /dev/mmcblk0p1 ]; then
+        echo "plutosat-boot: REFUSED: no /dev/mmcblk0p1 (SD card boot partition). Nothing was installed." >&2
+        exit 1
+    fi
+    ;;
+esac
+exit 0

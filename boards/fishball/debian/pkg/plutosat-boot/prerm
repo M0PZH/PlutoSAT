@@ -1,0 +1,16 @@
+#!/bin/sh
+# plutosat-boot prerm: the boot partition stays as it is
+set -e
+case "$1" in
+remove)
+    cat <<MSG
+plutosat-boot: removing the package does not change the boot partition.
+  To go back to the boot files from before plutosat-boot wrote them, run
+  plutosat-boot-rollback BEFORE removing the package (or reinstall it), or
+  by hand on the SD card's first partition (FAT): copy
+  BOOT.bin.plutosat-prev, devicetree.dtb.plutosat-prev, uEnv.txt.plutosat-prev
+  over BOOT.bin, devicetree.dtb, uEnv.txt.
+MSG
+    ;;
+esac
+exit 0

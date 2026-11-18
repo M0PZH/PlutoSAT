@@ -5,9 +5,13 @@
 #
 #   plutosat-pl-load [--iio-dma] [FILE]   FILE in /lib/firmware, default plutosat.bit.bin
 #
+# The plutosat-firmware package runs it at every boot
+# (plutosat-pl-load.service, before plutosatd); loading over the same
+# bitstream (BOOT.bin already loaded it) is harmless.
+#
 # The PlutoSAT PL has no IIO streaming DMAs (axi_ad9361_adc_dma at
 # 0x7C400000, axi_ad9361_dac_dma at 0x7C420000): the device tree must not
-# have them either (deploy.sh --boot), else binding their driver to the empty
+# have them either (deploy.sh --boot, or the plutosat-boot package), else binding their driver to the empty
 # address range would hang the bus, and the ADC core driver would wait for
 # its "rx" DMA forever. --iio-dma: FILE is an older bitstream that still has
 # them, and the device tree still lists them: unbind and bind them as well.
@@ -41,7 +45,11 @@ SVC=0
 if command -v systemctl > /dev/null && systemctl -q is-active plutosatd 2> /dev/null; then
   systemctl stop plutosatd && SVC=1 && echo "stopped plutosatd"
 fi
-restart_svc() { if [ $SVC = 1 ]; then systemctl start plutosatd && echo "started plutosatd"; fi; }
+# inside plutosat-pl-load.service (INVOCATION_ID set), which plutosatd is
+# ordered after, a blocking start would wait for this very unit: queue it
+NOBLOCK=
+[ -n "$INVOCATION_ID" ] && NOBLOCK=--no-block
+restart_svc() { if [ $SVC = 1 ]; then systemctl $NOBLOCK start plutosatd && echo "started plutosatd"; fi; }
 trap restart_svc EXIT
 
 sync

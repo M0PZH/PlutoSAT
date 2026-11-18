@@ -1,0 +1,4 @@
+#!/bin/sh
+# Restore the boot files plutosat-boot replaced (the *.plutosat-prev set on
+# the SD card's boot partition): plutosat-boot rollback.
+exec /usr/sbin/plutosat-boot rollback "$@"

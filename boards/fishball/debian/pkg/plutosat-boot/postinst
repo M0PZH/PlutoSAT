@@ -1,0 +1,16 @@
+#!/bin/sh
+# plutosat-boot postinst: preflight, then the boot files (plutosat-boot install)
+set -e
+case "$1" in
+configure)
+    if ! /usr/sbin/plutosat-boot install; then
+        cat >&2 <<MSG
+plutosat-boot: the boot partition was NOT changed. The package stays
+unconfigured: fix the above and run  dpkg --configure plutosat-boot,
+or remove it:  apt remove plutosat-boot
+MSG
+        exit 1
+    fi
+    ;;
+esac
+exit 0

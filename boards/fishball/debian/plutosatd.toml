@@ -1,7 +1,10 @@
 # plutosatd on a fishball board (Debian); every key not set here has the
-# default of station/docs/api.md section 5. deploy.sh --station installs
-# this as /etc/plutosat/plutosatd.toml only when that file does not exist
-# yet, with ADMIN_PASSWORD replaced by a random password it prints.
+# default of /usr/share/doc/plutosatd/api.md (station/docs/api.md) section 5.
+# The plutosatd package installs this as /etc/plutosat/plutosatd.toml (a
+# conffile: your edits are kept on upgrades), and its postinst replaces
+# ADMIN_PASSWORD by a random password it prints once; deploy.sh --station
+# (without packages) does the same when the file does not exist yet.
+# After editing: systemctl restart plutosatd
 
 [http]
 # HTTPS on every interface: browsers give WebCodecs and the camera only to a
@@ -42,5 +45,13 @@ wf_max_db = -48
 occupancy_threshold_db = 3.0
 occupancy_hysteresis_db = 2.0
 
+# Transmitting is off on a new installation. To transmit, set enabled = true
+# (in [tx] for DATV, in [nbtx] for narrowband: SSB, CW, FT8 / FT4, RADE),
+# check the band limits and your licence, and restart plutosatd. Off, the
+# daemon leaves the transmit cores alone and refuses to arm (api.md 7, 8.1).
 [tx]
+enabled = false
 callsign = "N0CALL"
+
+[nbtx]
+enabled = false

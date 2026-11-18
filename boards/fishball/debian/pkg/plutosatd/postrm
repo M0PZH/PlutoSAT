@@ -1,0 +1,30 @@
+#!/bin/sh
+# plutosatd postrm
+set -e
+CONF=/etc/plutosat/plutosatd.toml
+KEEP=/etc/plutosat/plutosatd.toml.plutosat-keep
+
+case "$1" in
+remove)
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+    ;;
+purge)
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+    # dpkg removes the conffile; the rest of /etc/plutosat is the daemon's
+    # (the self-signed certificate of tls = "auto")
+    rm -f /etc/plutosat/plutosatd-tls-cert.pem /etc/plutosat/plutosatd-tls-key.pem \
+          /etc/plutosat/plutosatd-tls-names.txt "$CONF" "$KEEP" \
+          "$CONF.dpkg-old" "$CONF.dpkg-new" "$CONF.dpkg-dist" "$CONF.dpkg-bak"
+    if [ -d /etc/plutosat ] && ! rmdir /etc/plutosat 2> /dev/null; then
+        echo "plutosatd: /etc/plutosat kept, it holds files of your own: $(ls -A /etc/plutosat | tr '\n' ' ')"
+    fi
+    if [ -d /var/lib/plutosat ]; then
+        echo "plutosatd: recordings and other data in /var/lib/plutosat are kept; delete them by hand if unwanted"
+    fi
+    ;;
+abort-install)
+    # preinst moved an existing config aside: put it back
+    if [ -f "$KEEP" ]; then mv -f "$KEEP" "$CONF"; fi
+    ;;
+esac
+exit 0

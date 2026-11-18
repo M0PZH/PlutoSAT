@@ -1,0 +1,9 @@
+#!/bin/sh
+# plutosat-boot postrm: never touches the boot partition
+set -e
+case "$1" in
+purge)
+    echo "plutosat-boot: the boot partition is left as it is; its *.plutosat-prev and *.pre-plutosat-* backups stay there."
+    ;;
+esac
+exit 0

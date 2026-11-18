@@ -1,0 +1,12 @@
+#!/bin/sh
+# plutosatd prerm
+set -e
+case "$1" in
+remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+        systemctl stop plutosatd.service || true
+        systemctl disable plutosatd.service > /dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

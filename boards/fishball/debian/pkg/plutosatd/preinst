@@ -1,0 +1,17 @@
+#!/bin/sh
+# plutosatd preinst
+set -e
+CONF=/etc/plutosat/plutosatd.toml
+KEEP=/etc/plutosat/plutosatd.toml.plutosat-keep
+
+case "$1" in
+install)
+    # A first installation over a config no package owns (e.g. one written
+    # by deploy.sh, or by hand): move it aside, so that dpkg installs the
+    # conffile without asking; postinst puts it back over the default.
+    if [ -z "$2" ] && [ -f "$CONF" ] && [ ! -L "$CONF" ] && ! dpkg-query -S "$CONF" > /dev/null 2>&1; then
+        mv -f "$CONF" "$KEEP"
+    fi
+    ;;
+esac
+exit 0
