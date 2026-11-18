@@ -675,7 +675,9 @@ M_LK2):
   search again around the current frequency. CARRIER_ACQ.FALSE_LOCK counts
   the steps (pilots off). 8PSK keeps the search off (s^2 of 8PSK has no such
   mean; s^4 would need two more multipliers).
-* Cost: 2 DSPs (s^2), ~100 context bits per slot.
+* Cost: 2 DSPs (s^2), ~100 context bits per slot. Full build (Vivado 2026.1,
+  with 8PSK): 47194 LUT (88.7 %, +273), 134 of 140 BRAM tiles, 172 DSP (+2),
+  WNS +0.039 ns (before +0.057), WHS +0.048 ns.
 
 Starts that decode at most half of their frames / frames lost (model, QPSK
 1/4, 80 starts):
