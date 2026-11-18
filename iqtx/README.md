@@ -164,3 +164,20 @@ Registers 0x7C550000 (`ad_cpu_interconnect`), interrupt ps-12, ring reader
 on S_AXI_HP0 (64-bit). Device tree: `iqtx-buffer@3e700000` (1 MB,
 `no-map`) and the UIO node `iqtx@7c550000` (`boards/fishball/linux/`,
 `boards/fishball/debian/dtb-add-plutosat.py`).
+
+**Measured** (pluto2, 2026-11-18, the `iqtx` tool; TX1 cabled to RX1
+through 40 dB, TX LO 2320 MHz, captured with the `nbiq` tool at 1 MS/s):
+
+| | |
+|---|---|
+| Frequency | the tone where set to within 1 mHz at R 8, 25, 50, 200 and 400, offsets -3.9 .. +2.5 MHz and baseband tones -2 .. +100 kHz (TX and RX share the reference) |
+| Level | `GAIN` -30 .. 0 dB: linear to 0.3 dB; TX attenuation 10 .. 40 dB: dB for dB |
+| Spurs of the core | the FIR images at the carrier ± 48 kHz and the CIC images at ± 240 kHz: at or below the loop's limit (-71 .. -81 dBc) |
+| The AD9363 (analog, not the core) | image -41 dBc (at 100 and 350 kHz; a TX quadrature calibration did not change it), LO leakage -30 dBc below a -6 dBFS tone, the modulator's "-3f" product -60 dBc at -6 dBFS and -42 dBc at full scale; two tones at PEP -1 / -6 dBFS: IMD3 -51 / -66 dBc |
+| Ramp | 3.05 / 3.19 ms 10-90 % up / down for 2^8 samples at 48 kS/s (raised cosine of 5.33 ms: 3.15 ms), the same at 12 kS/s with `-R 6`; no clicks: the start and stop spectra are 50 dB down beyond 300 Hz, 54 dB beyond 1 kHz |
+| Underrun | an input stall gives silence, counted in `UNDERRUNS` (3066 samples for a 64 ms gap), playing goes on with the next samples; `DAC_UNDERRUNS` 0 throughout |
+| Source mux | with DVB-S2 TX sending (`dvbs2-tx -T`), `TX_SRC` 1 stays pending and the tool gives up; a DVB-S2 start while IQ TX plays does not reach the DAC; after IQ TX stops, `TX_SRC` 0 waits (`PENDING`) until DVB-S2 is silent; afterwards `dvbs2-selftest` (digital loopback, 1 MS/s): 1631 / 1631 frames |
+
+With RX LO = TX LO the receiver's quadrature tracking corrects the TX
+image too, now well, now badly (-25 .. -78 dBc from start to start):
+measure images with the LOs at least 100 kHz apart.
