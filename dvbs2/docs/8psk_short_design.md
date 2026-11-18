@@ -208,8 +208,8 @@ first candidates are the BCH decoder's 8-position GF(2^16) Chien search
 
 nbiq with eight channels (nbiq 2.1, +2.1k LUT, +1.5 tiles, +6 DSP) did not
 place on this base (post-opt 50.8k LUT, 95.4 %: the placer needed 8170 of
-7986 free slices), so the slimmer BCH went in (RX 2.1.1, VERSION
-0x0002_0101): the Chien search for normal frames does 4 positions per clock,
+7986 free slices), so the slimmer BCH went in (RX 2.1.2, VERSION
+0x0002_0102): the Chien search for normal frames does 4 positions per clock,
 two clocks per byte, about n/8 = 8.1k clocks more per frame (n/4 + Kbch/4 +
 500, at most ~33k clocks against a frame time of ~1M clocks at 2.27 MBd).
 
