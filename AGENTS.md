@@ -163,8 +163,8 @@ These keep the board safe and shared.
   - **Combined symbol rate** of both slots: at most about 2.27 MBd; software refuses anything above 2.28 MS/s.
   - **History:** 1.4/1.4.1 PLS-confirmed frame sync (fixed the false lock on repeating frames such as a TS of null packets); 1.4.2 LDPC channel LLR clip ±61.
   - Full design notes: `dvbs2/README.md` ("Receiver", "Two receive slots"), `dvbs2/docs/rx2_design.md`.
-- **Utilisation and timing** (master 2026-11-18: RX 2.1.2, nbiq 2.1, iqtx): 47.75k LUT (89.8 %, slices 99.99 %), 136.5 of 140 BRAM tiles, 178 DSP; WNS +0.116 ns at 100 MHz. The FPGA is full: anything new must free space first.
-  - Fallbacks already used: the slimmer BCH (RX 2.1.2), the nbiq staging buffer in BRAM. Still available: the recovery items in rx2_design.md §8; relaxing the rx_clk constraint (250 MHz, the real l_clk is 48 MHz at 12 MS/s).
+- **Utilisation and timing** (master 2026-11-18: RX 2.1.3, nbiq 2.1, iqtx): 46.8k LUT (88.0 %, slices 99.65 %), 137.5 of 140 BRAM tiles, 166 DSP; WNS +0.047 ns at 100 MHz. The FPGA is full: anything new must free space first. At 100 % slices a build failed to route (251 nets) although the netlist was only a few hundred LUT larger.
+  - Fallbacks already used: the slimmer BCH (RX 2.1.2), the nbiq staging buffer in BRAM, axi_ad9361 without its ADC DC filters and ADC/DAC IQ correction (the driver programs them as identity; saved ~1.0k LUT, 2.8k FF, 20 DSP; writing `calibscale`/`calibphase` now has no effect). Still available: the recovery items in rx2_design.md §8; relaxing the rx_clk constraint (250 MHz, the real l_clk is 48 MHz at 12 MS/s).
   - A false-path constraint for the slot-enable synchroniser (`en_a`) is still to be added.
 - **Station protocol 1.6** (`station/docs/api.md`):
   - one `RxDevice` owner demultiplexes the two slots by packet header bit 55;
@@ -196,13 +196,15 @@ What worked:
 - Before blaming the radio for video stutter, check the TX key-frame budget and the mux queue. Hardware encoders' key frames are 8–20× the average frame.
 - At high SNR the LLR gain saturates every |LLR| at 127, above any check message (≤ 62), so a full-scale wrong parity bit never converged; the decoder now clips the channel LLRs to ±61.
 - The board's wall clock was wrong until NTP was installed. Use the monotonic stamps (`clock.mono_us` in `/api/info`) for latency.
+- `ts-prbs` needs its `gen` subcommand; piped without it, `dvbs2-tx -i -` sends only dummy frames, and those processes survived `pkill -x` (SIGTERM) and held the board lock through the inherited fd: check with `pgrep -x dvbs2-tx` and use `pkill -KILL -x`.
+- The ad9361 `out_voltage0_hardwaregain` takes the attenuation as a negative gain: `echo -89.75`.
 - `plutosat tx` rejects 333000 S/s (not 12e6/integer); use 333333.
 
 ## Status and open items (2026-11-18)
 
-**On master and on the board** (debs 0.39+183, BOOT.bin from `plutosat-boot`):
+**On master and on the board** (debs 0.39+190, BOOT.bin from `plutosat-boot`):
 
-- RX 2.1.2: two slots, 8PSK and short frames, the pilots-off carrier fix of 2.1.1 (no PLL drive from the headers, lock detector + frequency search), the slimmer BCH;
+- RX 2.1.3: two slots, 8PSK and short frames, the pilots-off carrier fix of 2.1.1 (no PLL drive from the headers, lock detector + frequency search), the slimmer BCH (2.1.2), MODCOD detection from any configured frame length (2.1.3: frame-sync probes and the PLS energy rule; PLS_LAST/PLS_DATA bit 10 PROBE);
 - nbiq 2.1: eight channels (7 users around the overview on channel 4), FIR taps allocated by `allocate()` (190 taps for 7×48k + 600k), ring base + offset;
 - iqtx and narrowband transmit (SSB, CW, FT8/FT4, RADE, tones), board-validated over the cable;
 - station protocol 1.15: TX key-frame buffer auto/manual, MODCOD auto by PLS hints, narrowband TX, beacon lock, the background recorder, 8PSK/short, eight nbiq channels, TX1 to the idle attenuation at start;
@@ -210,7 +212,7 @@ What worked:
 
 **Open:**
 
-- **MODCOD auto for 8PSK and short frames:** with a QPSK-normal hypothesis the frame sync tags data as headers and the PLS "confident" test passes on them (metric 160–285 vs about 1950 for a real header), so the hints name random codes. Fixed MODCOD works. A fix (RX 2.1.3) is in progress.
+- **MODCOD auto in plutosatd with RX 2.1.3** is expected to converge for 8PSK/short (the C tools detect every code from qpsk2/3 in 0.1–0.8 s); not yet measured through the daemon (`examples/scanclient.rs`). The pilots must still alternate.
 - **Not tested on air:** QO-100 has not been received or transmitted on air.
 - **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only); a proper rx1 RF input; the beacon lock's F1A tone direction.
 - **Not started:** the buildroot firmware image with RX, FFT, plutosatd and web; RADE EOO callsign.
