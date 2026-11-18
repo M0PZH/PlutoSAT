@@ -196,7 +196,7 @@ ADC ─► DDC ─► timing ─► frame sync ─┬─► carrier + demap ─�
 | `dvbs2_ldpc_dec` | layered offset min-sum (offset 1 LSB), 18 lanes over the 360x360 circulants, APP 9 bit, messages 6 bit; phase A reads a check's edges, phase B writes L += R_new - R_old (circulants of one column group sharing a layer, which the DVB-S2 tables have, update in turn); stops when an iteration has no unsatisfied check and no APP sign change; ping-pong APP memories; output the Kldpc hard decisions and the channel's hard decisions of the same bits |
 | `dvbs2_bch_dec` | GF(2^16), t = 12/10/8: odd syndromes 8 bits per clock while the frame comes in, simplified inversionless Berlekamp-Massey, Chien search 8 positions per clock writing the corrected, BB-descrambled bits back into the frame buffer; ok = deg Lambda roots found; counts the pre-FEC bit errors (channel decisions vs. decoder output) |
 | `dvbs2_rx_pls` | PLS code (MODCOD, frame size, pilots) of every tagged PLHEADER, whatever MODCOD/pilots are configured: maximum likelihood over the 128 codes for an unknown phase, per frequency hypothesis (the carrier's frequency, then a grid); see [PLS decoder](#pls-decoder) |
-| `dvbs2_rx_carrier` | PL descrambling; frequency acquisition from 4 headers each confirmed by the next one being detected exactly a data or dummy frame length later, which also gives the header's type (staged Kay / Luise-Reggiannini with 1, 6 and 45 lags, correlations summed over the 4), re-acquisition if 2 of the next 3 (pilots on) or 8 later headers in a row are far off; then the NCO frequency from every PLHEADER (gain 1/4 .. 1/8); frame type (data/dummy) decided coherently from both headers and reported to the frame sync; pilots on: CORDIC phase per header/pilot block, linear phase interpolation across each data segment, pilot-to-pilot frequency loop (gain 1/4), dummy frame bodies as 36 known blocks (block-to-block frequency loop, no 1/1476 ambiguity), and the 1/1476 false lock of the pilot loop corrected from the averaged header estimates; pilots off: decision-directed PLL (soft decisions, data-aided on headers and dummy bodies) whose phase is reset from every header, its integral gain narrowing to 1/4 and 1/16 two and four headers after the acquisition, the NCO frequency from its integrator (header estimates not used after the acquisition), see [Pilots off](#pilots-off); amplitude/noise from the known blocks; max-log LLRs, 4 LSBs per unit |
+| `dvbs2_rx_carrier` | PL descrambling; frequency acquisition from 4 headers each confirmed by the next one being detected exactly a data or dummy frame length later, which also gives the header's type (staged Kay / Luise-Reggiannini with 1, 6 and 45 lags, correlations summed over the 4), re-acquisition if 2 of the next 3 (pilots on) or 8 later headers in a row are far off; then the NCO frequency from every PLHEADER (gain 1/4 .. 1/8); frame type (data/dummy) decided coherently from both headers and reported to the frame sync; pilots on: CORDIC phase per header/pilot block, linear phase interpolation across each data segment, pilot-to-pilot frequency loop (gain 1/4), dummy frame bodies as 36 known blocks (block-to-block frequency loop, no 1/1476 ambiguity), and the 1/1476 false lock of the pilot loop corrected from the averaged header estimates; pilots off: decision-directed PLL (soft decisions; data-aided on dummy bodies whose type was decided coherently; not driven by the headers) whose phase is reset from every header, its integral gain narrowing to 1/4 and 1/16 two and four headers after the acquisition, the NCO frequency from its integrator (header estimates not used after the acquisition), QPSK: a lock detector on the data (s^2) and a frequency search in steps of 2^-12 cycles/symbol after the acquisition, see [Pilots off](#pilots-off) and [Acquisition without pilots near the threshold](#acquisition-without-pilots-near-the-threshold); amplitude/noise from the known blocks; max-log LLRs, 4 LSBs per unit |
 
 `model/rxfixed.py`, `model/ldpcdec.py` and `model/bchdec.py` are the bit-exact models of this
 RTL (`model/rxmodel.py` is the earlier floating-point prototype); they
@@ -624,6 +624,94 @@ board).
   large numbers) and the PLL's phase jitter within the 90 header symbols.
   Above ~25 dB use the MER from the constellation snapshot instead; not
   worth wider registers for a receiver that works below 10 dB.
+
+### Acquisition without pilots near the threshold
+
+Board finding with VERSION 0x0002_0000 / 0x0002_0100 (pluto2, digital
+loopback with the PL noise source, `dvbs2-selftest -m qpsk1/4 -e "-1 -2"`,
+1 MS/s, pilots off): 2 of 8 starts (2.0) and 1 of 4 at -1 dB (2.1) decoded
+nothing, the carrier tracking -643, -309 and -1208 Hz; the other starts
+PER 0. With pilots, and at higher SNR, no failures.
+
+Cause (model, `adc_signal()` with a PRBS stream of data frames only, as
+`dvbs2-selftest` sends, the receiver started at a random symbol; 80 starts
+per point, 13-15 frames after the acquisition each):
+
+* The acquisition estimate from 4 headers (360 known symbols) has ~2.6e-4
+  cycles/symbol rms at -1 dB (~3e-4 at -2 dB, near the Cramer-Rao bound),
+  while the decision-directed loop pulls in ~1.5-2e-4 within a frame at
+  these SNRs (wider gains were tried: they slip at -2 dB, and at 0 offset
+  too).
+* The 90 header symbols drove the PLL data-aided. The header's phase resets
+  the loop at the header's end anyway; the data-aided error, measured before
+  that reset, is a phase step to the PI loop. After a 90 degree slip in the
+  frame before, or while the loop was not yet locked, it kicked the
+  integrator by up to ~1.5e-4 cycles/symbol, and the loop settled where every
+  header saw the same phase: k / 32490 cycles/symbol, k x 30.8 Hz at 1 MS/s
+  (the board's -309, -643, -1208 Hz are k = -10, -21, -39; model: -308.5e-6
+  = -10 / 32490 in 2 of 80 starts; with ideal symbols a loop locked for two
+  frames slipped by 90 degrees and settled at -5 / 32490).
+* The frame of the acquisition header has the frame sync's type (QPSK 1/4's
+  header is a differential away from the dummy header): a data frame taken
+  for a dummy one fed the loop 3240 data symbols as if they were the known
+  dummy body, ~1e-4 cycles/symbol of random kick right after the acquisition.
+
+Fix (VERSION 0x0002_0101; model `PLL_HDR_DA`, `PLL_DUMMY_COH`, `LK_*`; RTL M_SYM, M_LK,
+M_LK2):
+
+* The headers do not drive the PLL; a dummy body does only when its type was
+  decided coherently.
+* QPSK: lock detector per data frame on the symbols after the PLL,
+  D = sum(|Im s^2| - |Re s^2|), N = sum(|Im s^2| + |Re s^2|) (each >> 20).
+  s^2 of a locked QPSK symbol is +-j|s|^2; D has mean 0 for noise and for a
+  loop that is not locked, and does not see 90 degree slips. Locked: D >
+  N / 64 (-2 dB: D/N 0.024-0.037 locked, |D/N| <= 0.009 not locked; decided
+  at each header once N covers ~3000 symbols).
+* Frequency search: after the acquisition (f0) a frame that is not locked
+  moves the NCO to the next hypothesis f0 + k 2^-12 cycles/symbol (2.44e-4),
+  k = 1, -1, 2, -2 .. -4, the PLL integrator cleared and its gears back to
+  the start; the first locked frame ends the search; after 9 hypotheses the
+  carrier acquires again. Locked, 4 frames in a row not locked start the
+  search again around the current frequency. CARRIER_ACQ.FALSE_LOCK counts
+  the steps (pilots off). 8PSK keeps the search off (s^2 of 8PSK has no such
+  mean; s^4 would need two more multipliers).
+* Cost: 2 DSPs (s^2), ~100 context bits per slot.
+
+Starts that decode at most half of their frames / frames lost (model, QPSK
+1/4, 80 starts):
+
+| Es/N0 | 2.0 / 2.1 | headers and dummy fix only | + lock detector and search (2.1.1) |
+| --- | --- | --- | --- |
+| -1 dB | 15 / 253 of 1164 | 7 / 123 | 0 / 52 |
+| -2 dB | 29 / 447 of 1102 | 25 / 368 | 3 / 121 |
+
+At -2 dB the 3 starts left had acquired late (9 frames sent) and were still
+searching (one re-acquired); 1 MS/s spends ~33 ms per hypothesis. A smaller
+step (2^-13, 17 hypotheses) or a lower threshold (N / 128) did worse (7-8 and
+5 of 80 at -2 dB).
+With ideal symbols and tags (`pilotless_experiment.make_symbols`, data
+frames only, 40 starts, the 5 frames after the acquisition): 129 -> 165 of
+200 frames at -1 dB, 74 -> 108 at -2 dB (a few starts search away from a
+right hypothesis 0 whose loop had not locked within its frame; giving
+hypothesis 0 a second frame was not better: through the ADC chain 54 and 135
+frames lost instead of 52 and 121).
+Other codes, pilots off (model; frames lost before / after): QPSK 1/2 at 2.0
+dB (ADC chain, 48 starts) 4 / 0 of 715; QPSK 2/3 at 4.0 dB 0 / 0 of 713, no
+search step in either (at 1.0 and 3.0 dB both versions decode nothing in
+this chain). 8PSK 3/5 at 7 dB (`rxfixed_experiment.run_x`, data frames
+only, 40 starts): 130 / 183 of 194 frames, starts with at most half decoded
+14 / 1: the header fix alone; the 8PSK loops had settled up to ~3.5e-4
+cycles/symbol off. A search for 8PSK with an s^4 lock metric (two more
+multipliers) gave 184 of 194, so it is not in the RTL.
+
+Tests: `model/test_model.py` `test_rx_acq_search_np14` (ADC and DDC, seeds
+7 and 26 at -1 dB: 1 and 5 search steps, then every frame decodes; before:
+none of the 18), `sim/rx/test_rx.py` `test_carrier_search` (RTL = model
+through the search, QPSK 1/4 data frames only, ideal tags: -1 dB seed 12, 3
+steps; -2 dB seed 31, 1 step; before: no frame, the loop at -558e-6 and
+-311.9e-6 = -10 / 32490),
+`sim/rx/test_rx2.py` `test_carrier2` case `search` (the same in both slots
+of the shared engine).
 
 ### DDC
 

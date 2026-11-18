@@ -177,6 +177,30 @@ def test_rx_esn0_restart():
     assert len(est) >= 5 and all(18.5 < e < 22 for e in est), est
 
 
+@pytest.mark.parametrize("seed,nfa,ndec", [(7, 1, 8), (26, 5, 5)])
+def test_rx_acq_search_np14(seed, nfa, ndec):
+    """Board finding (RX 2.0/2.1, dvbs2-selftest QPSK 1/4 without pilots at
+    -1 dB, digital loopback, 1 MS/s: 1 in 4-8 starts decoded nothing, the
+    carrier tracking -309 / -643 / -1208 Hz, i.e. -10, -21, -39 x 1/32490
+    cycles/symbol). Through the ADC and DDC (PRBS data frames only, started
+    at a random symbol): the 4-header acquisition missed by more than the PLL
+    pulls in, the header's data-aided PLL update kicked the loop, and it
+    settled where every header saw the same phase (k / frame length; seed 7:
+    -311e-6). Now the headers do not drive the PLL, and the lock detector's
+    frequency search (nfa steps) finds the frequency: the frames after it
+    decode (up to 0x0002_0100: none of the 18)."""
+    import falselock_experiment as fe
+    import rxfixed as fx
+    import rxfixed_experiment as ex
+    x, bb, _ = fe.adc_signal(0, False, 18, seed, payload="prbs", esn0=-1.0)
+    r = fx.receive(x, 1, False)
+    cr = r["carrier"]
+    res = ex.decode_model(r["frames"], 1)
+    dec = [any(ok and np.array_equal(o, b) for o, _, ok in res) for b in bb]
+    assert cr.n_acq == 1 and cr.n_fa == nfa and not cr.srch and abs(cr.fhat) < (1 << 14)
+    assert sum(dec) >= ndec and all(dec[-ndec - 1:-1]), dec
+
+
 def test_rx_falselock_cycle():
     """Board finding (RX 1.4 as first built, QPSK 1/4 without pilots, null
     packets, digital loopback at 1 MS/s: half the starts acquired +374 kHz,

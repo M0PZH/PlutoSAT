@@ -247,6 +247,13 @@ def carrier_case(kw):
         esn0, seed = kw.pop("pn")
         sym, tags, found, _, _ = pe.make_symbols(0, False, 3, esn0, 0.001, 0.002, seed, lead=8)
         modcod, pilots = 1, False
+    elif "search" in kw:
+        # test_rx.test_carrier_search's input: data frames only near the threshold
+        import pilotless_experiment as pe
+        from test_rx import SEARCH_NFR
+        esn0, seed = kw.pop("search")
+        sym, tags, found, _, _ = pe.make_symbols(0, False, SEARCH_NFR, esn0, 0.0, 0.0, seed, lead=0)
+        modcod, pilots = 1, False
     else:
         pilots = kw["pilots"]
         modcod = kw.get("rate_idx", 3) + 1
@@ -267,6 +274,8 @@ def carrier_case(kw):
     return sym, tags, found, modcod, pilots, cr, want
 
 
+SEARCH_S0, SEARCH_S1 = (-1.0, 12), (-2.0, 31)    # (Es/N0, seed): test_rx.SEARCH_CASES
+
 CR2_CASES = [
     ("p_np", (dict(pilots=True, esn0=6.0), dict(pilots=False, esn0=4.0, cfo=-0.003, rate_idx=6, seed=3)),
      (0, 20), 5, (None, None)),
@@ -283,6 +292,8 @@ CR2_CASES = [
     ("reset0_np", (dict(pilots=False, esn0=4.0, rate_idx=2, nframes=3, seed=9), dict(pilots=True, esn0=5.0)),
      (5, 0), 0, (70000, None)),
     ("idle1", (dict(pilots=False, esn0=6.0, seed=2), None), (0, 0), 5, (None, None)),
+    # pilots off, the lock detector's frequency search in both slots at once
+    ("search", (dict(search=SEARCH_S0), dict(search=SEARCH_S1)), (0, 7), 3, (None, None)),
 ]
 
 
@@ -320,6 +331,8 @@ def test_carrier2(carrier2_exe, name, kws, stall, ostall, rst_at):
             log.split(f"slot {s}: ")[1].split("\n")[0], (s, cr.n_acq, cr.n_fa, cr.n_retype)
         if name == "falselock_pn" and s == 0:
             assert cr.n_fa >= 1
+        if name == "search":
+            assert cr.n_fa >= 1 and not cr.srch
         assert len(segs) == (1 if rst_at[s] is None else 2)
         if rst_at[s] is not None:
             g = segs[0]

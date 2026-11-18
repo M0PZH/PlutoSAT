@@ -247,6 +247,11 @@ def test_carrier(carrier_exe, name, stall, kw, drop):
                    np.asarray(want).reshape(-1, 64800)) or drop == "untag"
 
 
+# (Es/N0, seed, search steps): QPSK 1/4, data frames only, ideal tags
+SEARCH_NFR = 10
+SEARCH_CASES = [(-1.0, 12, 3), (-2.0, 31, 1)]
+
+
 @pytest.mark.parametrize("esn0,seed", [(0.0, 3), (-1.0, 4)])
 def test_carrier_pilotless_pn(carrier_exe, esn0, seed):
     """Pilots off at low SNR with phase noise (QPSK 1/4, symbol-level
@@ -271,6 +276,45 @@ def test_carrier_pilotless_pn(carrier_exe, esn0, seed):
     xa, xb = m.gold_init(0)
     log = rxsim.run(carrier_exe, modcod=1, pilots=0, xa=xa, xb=xb, kp=cr.kp_p, ki=cr.ki_p,
                     stall=10, **{"in": fin, "out": fout})
+    assert f"acq {cr.n_acq} fa {cr.n_fa} retype {cr.n_retype}" in log
+    got = rxsim.read_hex_cols(fout, (-8, -8, 1, 1))
+    assert len(got) == len(want), (len(got), len(want))
+    bad = np.nonzero(np.any(got[:, :2] != want, axis=1))[0]
+    assert len(bad) == 0, f"{len(bad)} mismatches, first at word {bad[0]}: {got[bad[0], :2]} vs {want[bad[0]]}"
+
+
+@pytest.mark.parametrize("esn0,seed,nfa", SEARCH_CASES)
+def test_carrier_search(carrier_exe, esn0, seed, nfa):
+    """Pilots off (VERSION 0x0002_0101): QPSK 1/4 near the threshold, data
+    frames only (no dummy frames, as dvbs2-selftest sends), ideal tags. The
+    acquisition from 4 headers misses by more than the PLL pulls in; the lock
+    detector rejects the frame and the frequency search steps the NCO until a
+    frame is locked (nfa steps). Up to 0x0002_0100 the header's data-aided PLL
+    update then kicked the loop to a false lock at k / frame length and these
+    starts decoded nothing. RTL = model (search steps, LLRs), the frames after
+    the search decode."""
+    import ldpcdec as ld
+    import pilotless_experiment as pe
+    import txmodel as m
+    os.makedirs(WORK, exist_ok=True)
+    sym, tags, found, cws, _ = pe.make_symbols(0, False, SEARCH_NFR, esn0, 0.0, 0.0, seed, lead=0)
+    cr = fx.Carrier(1, False)
+    want = cr.run(sym, tags, found)
+    print("acq", cr.n_acq, "search steps", cr.n_fa, "f", cr.fhat / 2 ** 32)
+    assert cr.n_acq == 1 and cr.n_fa == nfa and not cr.srch
+    dec = ld.Decoder(0)
+    sent = cws[len(cws) - len(want):]
+    ok = [bool(np.array_equal(dec.decode(f)[0], cw)) for f, cw in zip(want, sent)]
+    print("decoded", ok)
+    assert all(ok[-3:])
+    want = np.concatenate(want).reshape(-1, 2)
+    name = f"search_{seed}"
+    fin = os.path.join(WORK, f"c_in_{name}.hex")
+    fout = os.path.join(WORK, f"c_out_{name}.hex")
+    write_tagged(fin, sym, tags, found)
+    xa, xb = m.gold_init(0)
+    log = rxsim.run(carrier_exe, modcod=1, pilots=0, xa=xa, xb=xb, kp=cr.kp_p, ki=cr.ki_p,
+                    stall=7, **{"in": fin, "out": fout})
     assert f"acq {cr.n_acq} fa {cr.n_fa} retype {cr.n_retype}" in log
     got = rxsim.read_hex_cols(fout, (-8, -8, 1, 1))
     assert len(got) == len(want), (len(got), len(want))
@@ -811,7 +855,7 @@ def rx_axi_exe():
 AXI_SLOT_ARGS = {"ddccoef", "rrccoef", "modcod", "pilots", "xa", "xb", "finc", "dec", "ntaps", "shift", "cicr",
                  "cicshift", "tkp", "tki", "tinteg0", "thresh", "pkp", "pki", "maxit", "plscfg"}
 SLOT_BANK = 0x100                       # register map v2: slot s at 0x100 s, shared at 0x200
-VERSION = 0x0002_0100
+VERSION = 0x0002_0101
 
 
 def axi_args(slot, **kw):
