@@ -39,7 +39,7 @@ the build host is not accepted. If a push fails, commit locally and say so.
 
 ## Build and test
 
-Host: Ubuntu 24.04, 96 cores. Only Vivado/Vitis **2026.1** is installed
+Host: Ubuntu 26.04 (Python 3.14: the old `dvbs2/.venv` is broken; make one with `python3 -m venv --without-pip --system-site-packages V && python3 -m pip --python V/bin/python install pytest cocotb==1.9.2`), 96 cores. Full builds share `flock /home/peter/plutosdr-fw-wt/.vivado-build.lock`. Only Vivado/Vitis **2026.1** is installed
 (`/opt/Xilinx/2026.1`), and there is no `xsct`. The disk is nearly full (about 15–20 GB free):
 
 - delete the Vivado build outputs of worktrees once you are done;
@@ -94,7 +94,8 @@ As set up on 2026-11-05:
   - no `mwipcore@43c00000` (not in our PL).
   
   Every PL node in the tree must exist in the bitstream when the PL is loaded before the kernel.
-- **Backups on the FAT partition:** `*.pre-plutosat`, `*.pre-axiports`, `*.pre-llrq`, `*.pre-bitload`, `*.pre-bootbin`.
+- **Since 2026-11-18 the boot files come from the `plutosat-boot` package** (`/root/boot-undo.txt` on the board has the latest undo: `plutosat-boot-rollback`, or `BOOT.bin.plutosat-prev` from the card).
+- **Backups on the FAT partition:** `*.plutosat-prev`, `*.pre-plutosat-VERSION-DATE`, `*.pre-plutosat`, `*.pre-axiports`, `*.pre-llrq`, `*.pre-bitload`, `*.pre-bootbin`.
 
 ### Software on the board
 
@@ -162,8 +163,8 @@ These keep the board safe and shared.
   - **Combined symbol rate** of both slots: at most about 2.27 MBd; software refuses anything above 2.28 MS/s.
   - **History:** 1.4/1.4.1 PLS-confirmed frame sync (fixed the false lock on repeating frames such as a TS of null packets); 1.4.2 LDPC channel LLR clip ±61.
   - Full design notes: `dvbs2/README.md` ("Receiver", "Two receive slots"), `dvbs2/docs/rx2_design.md`.
-- **Utilisation and timing:** about 44.3k LUT (83.3 %), 135 of 140 BRAM tiles, 165 DSP; WNS +0.147 ns at 100 MHz (with iqtx: +2.5k LUT, +10 DSP, no BRAM).
-  - BRAM is the limit. The fallback order (the user's decision): put the carrier's seg/zbuf back in LUTRAM, then the recovery items in rx2_design.md §8, then a slimmer BCH.
+- **Utilisation and timing** (master 2026-11-18: RX 2.1.2, nbiq 2.1, iqtx): 47.75k LUT (89.8 %, slices 99.99 %), 136.5 of 140 BRAM tiles, 178 DSP; WNS +0.116 ns at 100 MHz. The FPGA is full: anything new must free space first.
+  - Fallbacks already used: the slimmer BCH (RX 2.1.2), the nbiq staging buffer in BRAM. Still available: the recovery items in rx2_design.md §8; relaxing the rx_clk constraint (250 MHz, the real l_clk is 48 MHz at 12 MS/s).
   - A false-path constraint for the slot-enable synchroniser (`en_a`) is still to be added.
 - **Station protocol 1.6** (`station/docs/api.md`):
   - one `RxDevice` owner demultiplexes the two slots by packet header bit 55;
@@ -199,27 +200,27 @@ What worked:
 
 ## Status and open items (2026-11-18)
 
-**Done and on master:**
+**On master and on the board** (debs 0.39+183, BOOT.bin from `plutosat-boot`):
 
-- RX 2.0 (two slots), board-validated with the C tools and plutosatd;
-- RX 1.4.x fixes;
-- the stutter fixes;
-- the plutosatd systemd service;
-- BOOT.bin with the bitstream;
-- station protocol 1.9–1.11 (not yet on the board): TX key-frame buffer auto/manual and the output power estimate with optional dBm calibration; MODCOD auto searches the PLS headers (pilots on/off, fallback sweep); narrowband transmit (SSB, RADE, CW, FT8/FT4, tones) in the daemon and web; RADE V1 digital voice in the browser (wasm);
-- the `iqtx` core (narrowband IQ transmit on HP0, exclusive with DVB-S2 TX through a source mux), simulated and timing-clean, **not yet on the board** (needs the DT node + its bitstream).
+- RX 2.1.2: two slots, 8PSK and short frames, the pilots-off carrier fix of 2.1.1 (no PLL drive from the headers, lock detector + frequency search), the slimmer BCH;
+- nbiq 2.1: eight channels (7 users around the overview on channel 4), FIR taps allocated by `allocate()` (190 taps for 7×48k + 600k), ring base + offset;
+- iqtx and narrowband transmit (SSB, CW, FT8/FT4, RADE, tones), board-validated over the cable;
+- station protocol 1.15: TX key-frame buffer auto/manual, MODCOD auto by PLS hints, narrowband TX, beacon lock, the background recorder, 8PSK/short, eight nbiq channels, TX1 to the idle attenuation at start;
+- the Debian packages (`plutosatd`, `plutosat-firmware`, `plutosat-tools`, `plutosat-boot`).
 
 **Open:**
 
+- **MODCOD auto for 8PSK and short frames:** with a QPSK-normal hypothesis the frame sync tags data as headers and the PLS "confident" test passes on them (metric 160–285 vs about 1950 for a real header), so the hints name random codes. Fixed MODCOD works. A fix (RX 2.1.3) is in progress.
 - **Not tested on air:** QO-100 has not been received or transmitted on air.
-- **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only); a proper rx1 RF input; iqtx and narrowband transmit.
-- **In progress (Nov 2026):** 8PSK and short frames (TX and RX, if the FPGA has room); a general background narrowband recorder (RADE with batch decoding, SSB, CW); QO-100 beacon lock (receive only); a theatre mode for the DATV RX view.
-- **Decided, not started:** nbiq to 8 channels (5 user + 3 background), to be assessed after 8PSK and iqtx have taken their resources; the buildroot firmware image with RX, FFT, plutosatd and web.
+- **Not tested on the board:** two different simultaneous DVB-S2 signals (simulation only); a proper rx1 RF input; the beacon lock's F1A tone direction.
+- **Not started:** the buildroot firmware image with RX, FFT, plutosatd and web; RADE EOO callsign.
 - **Dropped:** PL zoom (the 48 kHz zoom FFT stays on the ARM: resolution and rate are bound by the data, and it would starve the shared PL FFT).
 - **Known limits:**
   - with sound on, the browser plays about 1.0–1.35 s behind (the audio buffer covers arrival jitter);
   - constellation updates drop to about 2.5 Hz per slot when both slots are viewed;
-  - a PL reload under a running plutosatd is not detected (`plutosat-pl-load` stops the service for that reason).
+  - a PL reload under a running plutosatd is not detected (`plutosat-pl-load` stops the service for that reason);
+  - the RADE recorder costs about 0.36 of a core per channel;
+  - the station's beacon e2e test sometimes fails under a fully parallel `cargo test` (passes alone).
 - **Housekeeping:**
   - the 33 kS/s test stream should be re-encoded at ≤ 16.6 kbit/s;
   - the planning document (the user's Claude Doc "software and system plan", in Chinese) is behind this file.
