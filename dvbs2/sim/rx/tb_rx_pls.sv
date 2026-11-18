@@ -1,7 +1,7 @@
 // File-driven testbench for dvbs2_rx_pls.
 //   +in=<file> "iiii qqqq sof fhat(hex) acquired", one symbol every +period= clocks
 //   +out=<file> one line per decode: "code conf car grid best second freq"
-//   +modcod= +pilots= +h= +step=
+//   +modcod= +pilots= +short= +h= +step=
 // At the end: "tb_rx_pls: count .. data .. dcode .. diff .. .. seen .. .. grids .. skipped .."
 `timescale 1ns/1ps
 module tb_rx_pls;
@@ -9,7 +9,7 @@ module tb_rx_pls;
   always #5 clk = ~clk;
 
   logic [4:0] modcod;
-  logic pilots;
+  logic pilots, short_fr;
   logic [5:0] cfg_h;
   logic [9:0] cfg_step;
   logic s_v = 0, s_sof = 0, acquired = 0;
@@ -39,6 +39,8 @@ module tb_rx_pls;
     modcod = 5'(tmp);
     if (!$value$plusargs("pilots=%d", tmp)) tmp = 1;
     pilots = tmp[0];
+    if (!$value$plusargs("short=%d", tmp)) tmp = 0;
+    short_fr = tmp[0];
     if (!$value$plusargs("h=%d", tmp)) tmp = 32;
     cfg_h = 6'(tmp);
     if (!$value$plusargs("step=%d", tmp)) tmp = 262;

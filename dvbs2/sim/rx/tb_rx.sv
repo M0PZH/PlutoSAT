@@ -7,7 +7,7 @@
 //   +bytes<s>=   BBFRAME bytes "dd last ok iters ldpc_ok nerr raw rate modcod pilots slot";
 //                "reset" likewise
 //   +pls<s>=     PLS decodes "code conf car grid best second freq"; "reset" likewise
-//   +modcod<s>= +pilots<s>= +thresh<s>= +xa<s>= +xb<s>= +tkp<s>= +tki<s>= +tinteg0<s>=
+//   +modcod<s>= +pilots<s>= +short<s>= +thresh<s>= +xa<s>= +xb<s>= +tkp<s>= +tki<s>= +tinteg0<s>=
 //   +pkp<s>= +pki<s>= +plsh<s>= +plsstep<s>= +maxit<s>=
 //   +rst<s>at=<n> reset slot s (rst_s) after n of its samples; its input starts again
 //                 from the beginning
@@ -29,7 +29,7 @@ module tb_rx;
   logic [15:0] timing_kp [2], timing_ki [2];
   logic signed [31:0] timing_integ0 [2];
   logic [4:0] modcod [2];
-  logic [1:0] pilots;
+  logic [1:0] pilots, short_fr;
   logic [31:0] fs_thresh [2];
   logic [17:0] gold_xa [2], gold_xb [2], pll_kp [2], pll_ki [2];
   logic [5:0] ldpc_max_it [2], pls_h [2];
@@ -97,6 +97,8 @@ module tb_rx;
   endfunction
 
   string fin [2], fout [2], fbytes [2], fpls [2], fcoef [2], nm;
+  int wz;
+  initial wz = $test$plusargs("wz");          // LLR words with the third LLR (8PSK)
   int fi [2], fo [2], fb [2], fp [2], fc, stall, period [2], ph [2], n_in [2], n_out [2], n_bytes [2];
   int rst_at [2], rst_cnt [2], rc;
   logic [1:0] act = 0, eof = 0;
@@ -114,6 +116,7 @@ module tb_rx;
       period[s]   = arg($sformatf("period%0d", s), 24);
       modcod[s]   = 5'(arg($sformatf("modcod%0d", s), 4));
       pilots[s]   = arg($sformatf("pilots%0d", s), 1) != 0;
+      short_fr[s] = arg($sformatf("short%0d", s), 0) != 0;
       fs_thresh[s] = 32'(arg($sformatf("thresh%0d", s), 0));
       gold_xa[s]  = 18'(arg($sformatf("xa%0d", s), 1));
       gold_xb[s]  = 18'(arg($sformatf("xb%0d", s), 0));
@@ -191,7 +194,8 @@ module tb_rx;
   // carrier LLRs (tap inside the core)
   always @(posedge clk)
     if (dut.l_valid && dut.l_ready) begin
-      $fdisplay(fo[dut.l_slot], "%02h %02h %0d %0d", dut.l_i, dut.l_q, dut.l_first, dut.l_last);
+      if (wz) $fdisplay(fo[dut.l_slot], "%02h %02h %0d %0d %02h", dut.l_i, dut.l_q, dut.l_first, dut.l_last, dut.l_z);
+      else    $fdisplay(fo[dut.l_slot], "%02h %02h %0d %0d", dut.l_i, dut.l_q, dut.l_first, dut.l_last);
       n_out[dut.l_slot]++;
     end
 

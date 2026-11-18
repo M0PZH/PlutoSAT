@@ -439,17 +439,18 @@ FS_CHK2 = 10
 L_DUMMY = 90 + 36 * 90
 
 
-def frame_len(pilots):
-    return 90 + 32400 + (22 * 36 if pilots else 0)
+def frame_len(pilots, modcod=1, short=False):
+    """Symbols of a data PLFRAME (default: QPSK normal)."""
+    return m.plframe_len(modcod, pilots, short)
 
 
-def header_bits(modcod, pilots):
-    return [sq for _, sq in m.plheader_signs(modcod, pilots)]
+def header_bits(modcod, pilots, short=False):
+    return [sq for _, sq in m.plheader_signs(modcod, pilots, short)]
 
 
-def diff_coefs(modcod, pilots):
+def diff_coefs(modcod, pilots, short=False):
     """c[i] (i = 1..89, +-1): |sum c_i d_(n-89+i)| is the header correlation."""
-    b = [1 - 2 * y for y in header_bits(modcod, pilots)]
+    b = [1 - 2 * y for y in header_bits(modcod, pilots, short)]
     return np.array([b[i] * b[i - 1] * (-1 if i & 1 else 1) for i in range(1, 90)], np.int64)
 
 
@@ -486,11 +487,11 @@ def fs_metrics(sym, coefs):
 class FrameSync:
     SEARCH, CHECK, LOCKED = range(3)
 
-    def __init__(self, modcod, pilots, thresh=None):
-        self.coefs = [diff_coefs(modcod, pilots), diff_coefs(0, False)]
-        self.L = [frame_len(pilots), L_DUMMY]
+    def __init__(self, modcod, pilots, thresh=None, short=False):
+        self.coefs = [diff_coefs(modcod, pilots, short), diff_coefs(0, False)]
+        self.L = [frame_len(pilots, modcod, short), L_DUMMY]
         self.T = fs_threshold() if thresh is None else thresh
-        self.code = pls_code(modcod, 0, pilots)
+        self.code = pls_code(modcod, int(short), pilots)
 
     def pls_ok(self, d):
         """(ok, dummy) of a PLS decode: confident, and the configured code or
@@ -773,16 +774,81 @@ def descramble(i, q, r):
     return neg16(q), i
 
 
+# ---------------------------------------------------------------------------
+# 8PSK soft demapping and phase detector (EN 302 307-1 5.4.2 mapping)
+# ---------------------------------------------------------------------------
+#
+# The 8 correlations with the unit-radius points p = 0..7 (exp(j pi p / 4)),
+# scaled by 1/sqrt2: C_p = Re(s1 exp(-j pi p / 4)) / sqrt2 =
+#   ci, u, cq, v, -ci, -u, -cq, -v,
+#   ci = rnd(I * PSK8_K, 15), cq = rnd(Q * PSK8_K, 15) (PSK8_K = 1/sqrt2 in Q15),
+#   u = (I + Q) >> 1, v = (Q - I) >> 1.
+# Max-log LLR of bit b (positive: 0) = max over the points with b = 0 minus
+# max over b = 1, in units of the QPSK LLR (QPSK: G * I is the max-log
+# difference sqrt2 I scaled the same way), so LLR = sat8(rnd(D * G, 20)):
+#   D0 = max(|ci|, |u|) - max(|cq|, |v|)               (b0 = 0: p 0, 1, 4, 5)
+#   D1 = max(X) + min(X), X = (u, ci, cq, -v)          (b1 = 0: p 0, 1, 2, 7)
+#   D2 = max(Y) + min(Y), Y = (u, -ci, cq, v)          (b2 = 0: p 1, 2, 3, 4)
+# Phase detector (pilots off): the nearest point p = argmax C_p (the first
+# largest |X_k|, X = (ci, u, cq, v), its sign: p = k or k + 4), e = Im(s1
+# conj(point)) / sqrt2 = C_(p+2), times 2 (the QPSK detector's gain at high
+# SNR: e ~ sqrt2 |s1| phase).
+
+PSK8_K = 23170
+
+
+def psk8_corr(i, q):
+    ci = (i * PSK8_K + (1 << 14)) >> 15
+    cq = (q * PSK8_K + (1 << 14)) >> 15
+    u = (i + q) >> 1
+    v = (q - i) >> 1
+    return ci, cq, u, v
+
+
+def psk8_metrics(i, q):
+    """(D0, D1, D2) for the LLRs of the symbol's bits b0 b1 b2."""
+    ci, cq, u, v = psk8_corr(i, q)
+    d0 = max(abs(ci), abs(u)) - max(abs(cq), abs(v))
+    x = (u, ci, cq, -v)
+    y = (u, -ci, cq, v)
+    return d0, max(x) + min(x), max(y) + min(y)
+
+
+def psk8_pll_error(i, q):
+    ci, cq, u, v = psk8_corr(i, q)
+    x = (ci, u, cq, v)
+    k = 1 if abs(u) > abs(ci) else 0
+    k2 = 3 if abs(v) > abs(cq) else 2
+    if abs(x[k2]) > abs(x[k]):
+        k = k2
+    e = x[k + 2] if k < 2 else -x[k - 2]
+    return 2 * (e if x[k] >= 0 else -e)
+
+
+def llr_bit_order(frame, modcod, short=False):
+    """A carrier output frame (word order) -> the decoder's bit order: 8PSK
+    symbol k's LLRs (b0 b1 b2) are bits k, k + N/3, k + 2N/3 (rate 3/5,
+    MODCOD 12: the other way round); QPSK: unchanged."""
+    f = np.asarray(frame)
+    if modcod < 12:
+        return f
+    w = f.reshape(-1, 3)
+    cols = [w[:, 2], w[:, 1], w[:, 0]] if modcod == 12 else [w[:, 0], w[:, 1], w[:, 2]]
+    return np.concatenate(cols)
+
+
 class Carrier:
     """Streaming carrier recovery + LLR output; see the module docstring."""
 
-    def __init__(self, modcod, pilots, gold=0, pll=None):
+    def __init__(self, modcod, pilots, gold=0, pll=None, short=False):
         self.pilots = pilots
-        self.hdr = [m.plheader_signs(modcod, pilots), m.plheader_signs(0, False)]
+        self.psk8 = modcod >= 12
+        self.N = m.nldpc(short)             # LLRs per frame
+        self.hdr = [m.plheader_signs(modcod, pilots, short), m.plheader_signs(0, False)]
         self.hdiff = [a != b for a, b in zip(*self.hdr)]
-        self.L = [frame_len(pilots), L_DUMMY]
+        self.L = [frame_len(pilots, modcod, short), L_DUMMY]
         xa, xb = m.gold_init(gold)
-        self.scr = m.pl_scramble_seq(frame_len(pilots) - 90, xa, xb).astype(int).tolist()
+        self.scr = m.pl_scramble_seq(self.L[0] - 90, xa, xb).astype(int).tolist()
         self.kp_p, self.ki_p = pll_gains() if pll is None else pll
         self.phi = 0            # NCO phase / frequency (turns * 2^32)
         self.fhat = 0
@@ -793,7 +859,7 @@ class Carrier:
         self.stat_rst = False       # acquisition: restart the amplitude/noise average
         self.in_frame = False
         self.typ = 1
-        self.frames = []        # finished LLR frames (int8, 64800)
+        self.frames = []        # finished LLR frames (int8, Nldpc, in output word order)
         self.n_muted = 0        # frames not sent (begun before the acquisition)
         self.cur = None         # output frame of the data frame being received
         self.seg = []           # pilots on: data symbols waiting for the next block
@@ -820,6 +886,10 @@ class Carrier:
 
     # ---- output ------------------------------------------------------------
     def _llr(self, buf, y):
+        if self.psk8:
+            for d in psk8_metrics(y[0], y[1]):
+                buf["llr"].append(sat(rnd(d * self.G, G_LLR_FRAC), 8))
+            return
         buf["llr"].append(sat(rnd(y[0] * self.G, G_LLR_FRAC), 8))
         buf["llr"].append(sat(rnd(y[1] * self.G, G_LLR_FRAC), 8))
 
@@ -832,9 +902,9 @@ class Carrier:
         # LDPC decoder its full iterations and the carrier the padding of a
         # data frame (32400 words, one per clock: an input overflow at ~1 MS/s)
         llr = buf["llr"]
-        llr.extend([0] * (64800 - len(llr)))
+        llr.extend([0] * (self.N - len(llr)))
         if not buf["mute"]:
-            self.frames.append(np.array(llr[:64800], np.int8))
+            self.frames.append(np.array(llr[:self.N], np.int8))
         else:
             self.n_muted += 1
 
@@ -1057,10 +1127,13 @@ class Carrier:
                 self.seg.append(s1)
             else:
                 self._llr(self.cur, s1)
-                c = (1 << PLL_SOFT_SH) - 1
-                ci = max(-c, min(c, s1[0]))
-                cq = max(-c, min(c, s1[1]))
-                self._pll((s1[1] * ci - s1[0] * cq) >> PLL_SOFT_SH)
+                if self.psk8:
+                    self._pll(psk8_pll_error(s1[0], s1[1]))
+                else:
+                    c = (1 << PLL_SOFT_SH) - 1
+                    ci = max(-c, min(c, s1[0]))
+                    cq = max(-c, min(c, s1[1]))
+                    self._pll((s1[1] * ci - s1[0] * cq) >> PLL_SOFT_SH)
         self.p += 1
         if self.p == self.L[typ]:
             self.in_frame = False
@@ -1326,8 +1399,8 @@ def pls_decode(r, fhat=0, acquired=False, cfg_code=None, H=PLS_H_DEFAULT, step=P
 class PlsDecoder:
     """Streaming PLS decoder (see above); results in self.results."""
 
-    def __init__(self, modcod, pilots, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT):
-        self.cfg = (modcod, int(pilots))
+    def __init__(self, modcod, pilots, H=PLS_H_DEFAULT, step=PLS_STEP_DEFAULT, short=False):
+        self.cfg = (modcod, int(pilots), int(short))
         self.H, self.step_ = H, step
         self.buf = None
         self.results = []
@@ -1339,7 +1412,7 @@ class PlsDecoder:
         if self.buf is not None:
             self.buf.append((pls_quant(si), pls_quant(sq)))
             if len(self.buf) == 90:
-                d = pls_decode(self.buf, self.f0, self.acq, pls_code(self.cfg[0], 0, self.cfg[1]),
+                d = pls_decode(self.buf, self.f0, self.acq, pls_code(self.cfg[0], self.cfg[2], self.cfg[1]),
                                self.H, self.step_)
                 self.results.append(d)
                 self.buf = None
@@ -1366,16 +1439,18 @@ class PlsDecoder:
 # whole receiver
 # ---------------------------------------------------------------------------
 
-def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None, integ0=0):
+def receive(x, modcod, pilots, rolloff=0.35, gold=0, bw=None, pls=None, integ0=0, short=False):
     """pls: dict(H=, step=) of the PLS decoder (default: the defaults);
-    integ0: timing integrator start value (TIMING_INTEG write)."""
+    integ0: timing integrator start value (TIMING_INTEG write); short:
+    short FECFRAMEs. The frames are in the carrier's word order (8PSK:
+    llr_bit_order() gives the decoder's)."""
     bw = TIMING_BW if bw is None else bw
     kp, ki = timing_gains(bw)
     tr = Timing(timing_coefs(rolloff), kp, ki, integ0=integ0)
     sym = tr.run(x)
-    fs = FrameSync(modcod, pilots)
-    cr = Carrier(modcod, pilots, gold)
-    cr.pls = PlsDecoder(modcod, pilots, **(pls or {}))
+    fs = FrameSync(modcod, pilots, short=short)
+    cr = Carrier(modcod, pilots, gold, short=short)
+    cr.pls = PlsDecoder(modcod, pilots, short=short, **(pls or {}))
     tags, nout = fs.run(sym, cr)
     return dict(sym=sym, tags=tags[:nout], frames=cr.frames, timing=tr, fs=fs, carrier=cr, pls=cr.pls)
 

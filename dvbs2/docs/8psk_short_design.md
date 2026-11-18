@@ -176,34 +176,31 @@ TX VERSION 0x0001_0002 (1.2).
 
 ## 4. Resources
 
-Out of context, xc7z020-2, 100 MHz (`syn/ooc.tcl`); "before" = master
-f49cfa9 synthesized the same way.
+Out of context, xc7z020-2, 100 MHz (`syn/ooc.tcl`; "before" = master
+f49cfa9 the same way; BRAM in tiles):
 
-| Module | LUT before | LUT after | BRAM tiles before / after | DSP before / after | WNS after |
-| --- | ---: | ---: | --- | --- | ---: |
-| `dvbs2_bch_dec` | 3802 | 4582 | 2 / 2 | 0 / 0 | 1.03 |
-| `dvbs2_ldpc_dec` | (in rx_axi: 7657) | 7458 | 80.5 / 80.5 | 0 / 0 | 1.12 |
+| Module | LUT before | LUT after | BRAM before / after | DSP before / after | WNS after (before) |
+| --- | ---: | ---: | --- | --- | --- |
+| `dvbs2_tx` | 1368 | 1582 | 13.5 / 12.5 | 16 / 16 | 3.02 (3.18) |
+| `dvbs2_bch_dec` | 3802 | 4582 | 2 / 2 | 0 / 0 | 1.03 (1.75) |
+| `dvbs2_ldpc_dec` | 7321 | 7458 | 80.5 / 80.5 | 0 / 0 | 1.12 (1.34) |
+| `dvbs2_rx_axi` (whole RX) | 25646 | 27525 | 102.5 / 102.5 | 89 / 94 | 0.41 (0.80) |
 
-(Further rows and the full-build numbers: section 6.)
+Inside `dvbs2_rx_axi`: carrier2 6037 -> 7075 LUT (+5 DSP: the 8PSK
+demapper's 1/sqrt2 products and the third gain multiplier; Vivado's
+mapping of the wider products), BCH 4145 -> 4638, LLR queue 826 -> 1117,
+frame sync 2383 -> 2558, LDPC 7657 -> 7450 (the smaller edge ROM).
 
-Estimate for the whole design before the RTL work (board: 41.8k LUT =
-78.6 %, 135/140 BRAM tiles, 155 DSP, WNS +0.164 ns):
+A first version of the carrier failed OOC timing at -2.9 ns: the 8PSK phase
+detector's argmax in one clock and the demapper's max/min trees feeding the
+LLR multiplier. Both are now pipelined (detector: three states, M_SYM4..6,
+for 8PSK data symbols without pilots only; demapper: stages a, b, c before
+the multiplier, the output FIFO's room checks one word lower); the BCH's
+Chien start multiplier takes registered operands. Result above.
 
-| Change | LUT | BRAM tiles | DSP |
-| --- | ---: | ---: | ---: |
-| BCH dual field | +780 (measured) | 0 | 0 |
-| LDPC short codes, padding, generated parity edges | ~0 (measured) | 0 | 0 |
-| carrier: 8PSK demapper, detector, per-slot lengths | +400 | 0 | +3 |
-| frame sync, PLS: per-slot lengths, short bit | +100 | 0 | 0 |
-| LLR queue: byte packer, 3-pass reader, sizes | +300 | 0 | 0 |
-| TX: frame FIFO, framer, tables | +200 | 0..+0.5 | 0 |
-| **Sum** | **~+1.8k (82 %)** | **0..+0.5** | **+3** |
-
-So it fits without any BRAM fallback; LUT goes to about 82 %, where timing
-closure gets harder (the 78.6 % build closed at +0.164 ns). If BRAM ran
-out, the user's fallback order applies (carrier seg/zbuf to LUTRAM, then
-rx2_design.md section 8, then a slimmer BCH: the 8-position GF(2^16) Chien
-search is the largest single item of the BCH decoder).
+Whole design, estimate from the OOC deltas: ~41.8k + 2.1k = ~43.9k LUT
+(82.5 %), BRAM unchanged (135 of 140), DSP 155 + 5 = 160. No BRAM
+fallback needed. Full build: section 6.
 
 ## 5. Software (station) changes needed
 
@@ -215,4 +212,28 @@ the `supported` flags in api.md.
 
 ## Implementation status
 
-(Filled in at the end of the work.)
+Implemented (model first, then RTL, bit exact), all simulation tests green:
+
+* Model: `txmodel` (short codes, phase-index symbols, 8PSK interleaver and
+  mapping; against gr-dtv), `ldpcdec` (short codes, padded layers),
+  `bchdec` (GF(2^14)), `rxfixed` (frame lengths, short header bit, 8PSK
+  demapper `psk8_metrics`, detector `psk8_pll_error`, `llr_bit_order`),
+  `rxfixed_experiment.run_x` (any MODCOD and frame size, decoded with the
+  LDPC/BCH models).
+* TX 1.2, RX 2.1, `regs/` (TX HDR.SHORT/PSK8, VERSION_8PSK; RX MODCOD.SHORT,
+  HDR.SHORT, VERSION_8PSK), `dvbs2-tx` (`-m 8psk..`, `-S`), `dvbs2-rx`
+  (`-m 8psk..`, `--short`, `--detect` follows 8PSK and short codes, the
+  iteration budget per code, packets with HDR.SHORT), `dvbs2-selftest -S`.
+* Tests: see the README section "8PSK and short FECFRAMEs". The RX
+  suites (`test_rx.py`, `test_rx2.py`, `test_llrq.py`, `test_rx_8psk.py`):
+  131 passed. gr-dvbs2rx is not available for the host's Python 3.14, so
+  `rxmodel.gr_ldpc_decode_llr` falls back to the LDPC/BCH models (the
+  independent decoder check is lost until gr-dvbs2rx is rebuilt).
+
+Not done / open:
+
+* Board: nothing measured on the board (no bitstream load allowed in this
+  work); the 8PSK thresholds, phase noise without pilots and the TX clipping
+  are model results only.
+* 1/1476 false-lock check for 8PSK normal frames (section 3.2).
+* The station (Rust) side: see the hand-back list.

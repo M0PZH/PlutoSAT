@@ -1,6 +1,6 @@
 // File-driven testbench for dvbs2_rx_framesync.
 //   +in=<file> symbols "iiii qqqq"; +out=<file> "iiii qqqq sof dummy"
-//   +modcod= +pilots= +thresh= +stall=<percent>
+//   +modcod= +pilots= +short= +thresh= +stall=<percent>
 //   +plsbusy=<clocks> (0: no PLS decoder) +plscode= +plsconf=: a PLS decoder
 //   stand-in that is busy for that many clocks after the 90th symbol of each
 //   tagged header, then reports that code
@@ -10,7 +10,7 @@ module tb_rx_framesync;
   always #5 clk = ~clk;
 
   logic [4:0] modcod;
-  logic pilots;
+  logic pilots, short_fr;
   logic [31:0] thresh;
   logic s_valid = 0, s_ready;
   logic signed [15:0] s_i, s_q;
@@ -38,6 +38,8 @@ module tb_rx_framesync;
     modcod = 5'(tmp);
     if (!$value$plusargs("pilots=%d", tmp)) tmp = 1;
     pilots = tmp[0];
+    if (!$value$plusargs("short=%d", tmp)) tmp = 0;
+    short_fr = tmp[0];
     if (!$value$plusargs("thresh=%d", thresh)) thresh = 0;
     if (!$value$plusargs("stall=%d", stall)) stall = 0;
     if (!$value$plusargs("plsbusy=%d", pls_clk)) pls_clk = 0;

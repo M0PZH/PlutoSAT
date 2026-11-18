@@ -16,7 +16,7 @@
 //   IN    bytes into the buffer, odd syndromes S_1..S_2t-1 8 bits/clock
 //   SQ    S_2k = S_k^2
 //   BM    simplified inversionless Berlekamp-Massey, t steps (~30 clocks each)
-//   CI    Chien start terms Lambda_j alpha^(-j(n-1))
+//   CI    Chien start terms Lambda_j alpha^(-j(n-1)) (13 clocks)
 //   CH    Chien search 8 positions/clock (short: 1), corrections and BB descrambling
 //         written back into the buffer
 //   OUT   Kbch/8 bytes, one per 2 clocks
@@ -106,6 +106,9 @@ module dvbs2_bch_dec
   logic [4:0]  L;
   logic [3:0]  r, j;
   logic [15:0] term [12];
+  logic [15:0] ci_a, ci_b;                  // CI: operands of the next start term
+  logic [3:0]  ci_w;
+  logic        ci_v;
   logic [15:0] k;                            // byte index
   logic        ch_v;                         // CH: byte k-1 read, its mask in ch_mask
   logic [7:0]  ch_mask;
@@ -146,6 +149,7 @@ module dvbs2_bch_dec
     if (rst) begin
       st <= B_IN;
       k <= '0;
+      ci_v <= 1'b0;
       m_valid <= 1'b0;
       st_frames <= '0; st_corrected <= '0; st_failed <= '0;
       for (int i = 1; i <= 24; i++) S[i] <= '0;
@@ -230,9 +234,16 @@ module dvbs2_bch_dec
         end
 
         // ---------------------------------------------------- Chien search
+        // (the operands registered first: one multiplier stage per clock)
         B_CI: begin
-          term[j - 4'd1] <= gmul(lam[j], cinit[j - 4'd1], f14);
-          if (j == 4'd12) begin
+          if (j <= 4'd12) begin
+            ci_a <= lam[j];
+            ci_b <= cinit[j - 4'd1];
+            ci_w <= j - 4'd1;
+          end
+          ci_v <= j <= 4'd12;
+          if (ci_v) term[ci_w] <= gmul(ci_a, ci_b, f14);
+          if (j == 4'd13) begin
             k <= '0;
             ch_v <= 1'b0;
             cb <= '0;

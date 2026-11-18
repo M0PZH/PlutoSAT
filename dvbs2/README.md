@@ -1,7 +1,9 @@
 # DVB-S2 transmitter and receiver (SystemVerilog)
 
-QPSK, normal FECFRAMEs, all 11 code rates (1/4 to 9/10), pilots on or off per
-frame, any Gold code, dummy PLFRAMEs when no data is queued, and polyphase RRC
+QPSK (all 11 code rates, 1/4 to 9/10) and 8PSK (3/5 to 9/10), normal and
+short FECFRAMEs (short: no 9/10), pilots on or off, all per frame (TX 1.2, RX
+2.1: [8PSK and short frames](#8psk-and-short-fecframes)), any Gold code,
+dummy PLFRAMEs when no data is queued, and polyphase RRC
 interpolation to an integer multiple of the symbol rate (with a CIC behind it
 for the low rates) followed by an NCO. Verified against GNU Radio gr-dtv.
 
@@ -62,7 +64,8 @@ samples per symbol; the tests take every other sample.
 ## Interface
 
 * Input: one BBFRAME per AXI-Stream packet, Kbch/8 bytes, MSB first.
-  `s_user = {pilots, rate_idx}`, where rate_idx 0..10 is MODCOD 1..11. It is
+  `s_user = {psk8, short, pilots, rate_idx}`, where rate_idx 0..10 is the code
+  rate 1/4 .. 9/10 (QPSK: MODCOD 1..11). It is
   sampled on the first byte and can change every frame. A wrong `s_last`
   position is counted in `cnt_len_errors`.
 * Output: 16-bit I/Q at P x R samples per symbol, pulled with `m_ready`.
@@ -161,8 +164,9 @@ the input for a future IQ transmitter, see `boards/fishball/README.md`).
 The core runs on `sys_cpu_clk` (100 MHz) and crosses to `l_clk` with a Gray
 FIFO pulled by `dac_valid`.
 
-DMA packet = one BBFRAME: header word `0xB500_0000 | pilots<<4 | rate_idx`,
-then Kbch/8 bytes, padded to 8 bytes.
+DMA packet = one BBFRAME: header word `0xB500_0000 | psk8<<6 | short<<5 |
+pilots<<4 | rate_idx`, then Kbch/8 bytes, padded to 8 bytes (codes that do
+not exist are bad headers).
 
 Linux: the device tree exports registers, DMA and a 16 MB reserved buffer
 (0x3F000000) as UIO device `dvbs2-tx`; `dvbs2-tx` (buildroot package from
@@ -986,17 +990,17 @@ with the headers of the other pilots is weak) but finds the headers of any
 QPSK MODCOD with them, and with the wrong ones it tags symbols that are not
 headers, whose decodes can look confident. So `--detect` starts with the
 configured `-m`/`-p` and reconfigures the core (soft reset) to what the
-decodes say: to a confidently decoded QPSK normal-frame data header that is
-not the configured one (the first such decode since the last
+decodes say: to a confidently decoded data header it can receive (QPSK; from
+core 2.1 also 8PSK and short frames) that is not the configured one (the first such decode since the last
 reconfiguration, or the same one twice in a row), and to the other pilots
 after 10 frames (at least 0.5 s) without a decode of the configured one. It
 prints the MODCOD and pilots after `--detect-count` (3) equal confident
 decodes of the configured one in a row (stdout: `MODCOD name pilots short
 offset_Hz`, the offset being the signal's frequency from the LO: `-o` plus
 the carrier's or the PLS decoder's estimate) and exits 0, or exits 1 after
-`--detect-timeout` (30 s). Codes the receiver cannot demodulate (8PSK..,
-short frames) are reported after 2 x `--detect-count` equal decodes in a
-row. `--pls-grid H` sets the grid (default 32; 2H + 2 hypotheses must fit
+`--detect-timeout` (30 s). Codes the receiver cannot demodulate (16APSK..,
+or 8PSK and short frames on an older core) are reported after 2 x
+`--detect-count` equal decodes in a row. `--pls-grid H` sets the grid (default 32; 2H + 2 hypotheses must fit
 in a dummy frame).
 
 ```
@@ -1056,6 +1060,34 @@ them distributed RAM: staging 2 x 32, read FIFO 64 beats), 490 FFs, no
 block RAM, no DSP, WNS +2.66 ns. The whole wrapper (`dvbs2_rx_axi`): 21367
 -> 22105 LUTs, 12877 -> 13361 FFs, 98 BRAM tiles and 73 DSPs as before, WNS
 +0.82 -> +0.76 ns.
+
+## 8PSK and short FECFRAMEs
+
+Study, design and measurements: [docs/8psk_short_design.md](docs/8psk_short_design.md).
+In short:
+
+* TX (VERSION 0x0001_0002): the short codes in the BCH/LDPC encoders, the
+  FECFRAME buffer as three bit banks (the 8PSK block interleaver: bit c N/3 +
+  k at ring bit 3k + c, a symbol is one row), symbols as phase indices
+  (exp(j pi p / 4)) through the framer, the PL scrambler adding 2R.
+  `dvbs2-tx -m 8psk3/5 .. 8psk9/10`, `-S` short frames.
+* RX (VERSION 0x0002_0100): MODCOD register [9] SHORT, MODCOD 12..17; the
+  frame sync, PLS confirmation and carrier take the frame length and header
+  of the configured code; the carrier's max-log 8PSK demapper (3 LLRs a
+  word) and, without pilots, an 8PSK decision-directed phase detector; the
+  LLR queue deinterleaves 8PSK in its reader (three passes over the frame);
+  the LDPC decoder's short codes (irregular layers padded with absent
+  edges, the parity edges generated instead of stored); the BCH decoder in
+  GF(2^14) for short frames (Chien search one position per clock); the
+  packet header's [38] SHORT. `dvbs2-rx -m 8psk..`, `--short`;
+  `dvbs2-selftest -S`.
+* Tests: `model/test_model.py` (`test_fec_short`, `test_plframe_phases`:
+  gr-dtv), `sim/test_fec.py` (`fec_short`), `sim/test_tx.py`
+  (`tx_8psk_short`), `sim/test_tx_axi.py`, `sim/rx/test_rx.py`
+  (`test_ldpc_short`, `test_bch` short codes), `sim/rx/test_llrq.py`
+  (`test_llrq_8psk_short`), `sim/rx/test_rx_8psk.py` (frame sync, carrier,
+  two-slot carrier and the whole core with 8PSK and short frames, RTL =
+  model, every frame decoded), `sw/test_bbframe.py` (short BBFRAMEs).
 
 ## Loopback self-test on the board
 

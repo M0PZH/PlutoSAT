@@ -528,19 +528,31 @@ def rx_exe():
     return rxsim.build("tb_rx", RX_SOURCES + [os.path.join(HERE, "tb_rx.sv")])
 
 
-def ldpc_bch_model(llr, rate_idx, max_it=30):
-    """The decoders' model output for one LLR frame: (bytes, iterations, converged, BCH ok, nerr, raw)."""
+def ldpc_bch_model(llr, rate_idx, max_it=30, short=False):
+    """The decoders' model output for one LLR frame (bit order): (bytes, iterations, converged, BCH ok, nerr, raw)."""
     import bchdec
     import ldpcdec as ld
-    dec = ld.Decoder(rate_idx)
+    dec = ld.Decoder(rate_idx, short)
     hard, it, conv = dec.decode(llr, max_it=max_it)
     K = dec.code.K
-    out, ok, L = bchdec.decode(hard[:K], rate_idx)
+    out, ok, L = bchdec.decode(hard[:K], rate_idx, short)
     return np.packbits(out), it, conv, ok, L, int(np.sum((llr[:K] < 0) != hard[:K]))
 
 
+def llr_words(frames, modcod):
+    """Carrier output frames (model, word order) -> words (i, q, z): QPSK z = 0."""
+    if not frames:
+        return np.zeros((0, 3), np.int64)
+    a = np.concatenate(frames).astype(np.int64)
+    if modcod >= 12:
+        return a.reshape(-1, 3)
+    a = a.reshape(-1, 2)
+    return np.column_stack([a, np.zeros(len(a), np.int64)])
+
+
 def core_run(exe, name, slots, stall=5, **common):
-    """slots: per slot None (idle) or dict(x=samples, rate_idx=, pilots=, period=, rst_at=, maxit=).
+    """slots: per slot None (idle) or dict(x=samples, rate_idx=, pilots=, period=, rst_at=, maxit=;
+    modcod= (default rate_idx + 1; 8PSK 12..17), short=).
     Runs the whole two-slot core; per slot the carrier's LLR frames and PLS decodes
     must equal fx.receive() of its samples (after a reset: the run from there,
     before it a prefix), and the decoded frames (tagged with the slot) equal the
@@ -551,6 +563,10 @@ def core_run(exe, name, slots, stall=5, **common):
     os.makedirs(WORK, exist_ok=True)
     plus, res = {"stall": stall, "axistall": 20, "axilat": 100}, []
     plus.update(common)
+    wz = any(sl is not None and sl.get("modcod", 0) >= 12 for sl in slots)
+    if wz:
+        plus["wz"] = 1
+    cols = (-8, -8, 1, 1, -8) if wz else (-8, -8, 1, 1)
     kp, ki = fx.timing_gains()
     xa, xb = m.gold_init(0)
     for s in range(2):
@@ -562,9 +578,11 @@ def core_run(exe, name, slots, stall=5, **common):
         write_coefs(cf, fx.timing_coefs(0.35))
         fin, fout, fpls, fb = (os.path.join(WORK, f"core_{name}_{k}{s}.hex") for k in ("in", "out", "pls", "bytes"))
         rxsim.write_iq(fin, sl["x"])
-        r = fx.receive(sl["x"], sl["rate_idx"] + 1, sl["pilots"])
+        mc = sl.get("modcod", sl["rate_idx"] + 1)
+        r = fx.receive(sl["x"], mc, sl["pilots"], short=sl.get("short", False))
         plus.update({f"coef{s}": cf, f"in{s}": fin, f"out{s}": fout, f"pls{s}": fpls, f"bytes{s}": fb,
-                     f"period{s}": sl["period"], f"modcod{s}": sl["rate_idx"] + 1, f"pilots{s}": int(sl["pilots"]),
+                     f"period{s}": sl["period"], f"modcod{s}": mc, f"pilots{s}": int(sl["pilots"]),
+                     f"short{s}": int(sl.get("short", False)),
                      f"thresh{s}": fx.fs_threshold(), f"xa{s}": xa, f"xb{s}": xb, f"tkp{s}": kp, f"tki{s}": ki,
                      f"pkp{s}": r["carrier"].kp_p, f"pki{s}": r["carrier"].ki_p, f"maxit{s}": sl.get("maxit", 30)})
         if sl.get("rst_at") is not None:
@@ -580,7 +598,11 @@ def core_run(exe, name, slots, stall=5, **common):
             assert line.startswith("0 samples,") and " 0 LLR words," in line and " 0 bytes," in line, line
             out.append(None)
             continue
-        segs = read_segments(plus[f"out{s}"], (-8, -8, 1, 1))
+        mc, short = sl.get("modcod", sl["rate_idx"] + 1), sl.get("short", False)
+        nw = (16200 if short else 64800) // (3 if mc >= 12 else 2)      # words per frame
+        segs = read_segments(plus[f"out{s}"], cols)
+        segs = [g[:, [0, 1, 4, 2, 3]] if wz else np.column_stack([g[:, :2], np.zeros(len(g), np.int64), g[:, 2:]])
+                for g in segs]                                          # (i, q, z, first, last)
         psegs = [[]]
         for ln in open(plus[f"pls{s}"]):
             if ln.startswith("reset"):
@@ -589,25 +611,26 @@ def core_run(exe, name, slots, stall=5, **common):
                 psegs[-1].append(tuple(int(v, 16) for v in ln.split()))
         nseg = 1 if sl.get("rst_at") is None else 2
         assert len(segs) == nseg and len(psegs) == nseg
-        want = np.concatenate(r["frames"]).reshape(-1, 2) if r["frames"] else np.zeros((0, 2), np.int64)
+        want = llr_words(r["frames"], mc)
         want_p = [pls_line(d) for d in r["pls"].results]
         if nseg == 2:
             g = segs[0]
-            assert len(g) > 0 and np.array_equal(g[:, :2], want[:len(g)]), f"slot {s} before the reset"
+            assert len(g) > 0 and np.array_equal(g[:, :3], want[:len(g)]), f"slot {s} before the reset"
             assert psegs[0] == want_p[:len(psegs[0])]
         got = segs[-1]
         assert "overflows 0," in line and "skipped 0," in line, line
         cr = r["carrier"]
         assert f"amp {cr.A}, energy {cr.E}, gain {cr.G}," in line, (s, cr.A, cr.E, cr.G)
         assert psegs[-1] == want_p, f"slot {s}: PLS decodes"
-        assert len(want) <= len(got) < len(want) + 32400, (s, len(got), len(want))
-        bad = np.nonzero(np.any(got[:len(want), :2] != want, axis=1))[0]
+        assert len(want) <= len(got) < len(want) + nw, (s, len(got), len(want))
+        bad = np.nonzero(np.any(got[:len(want), :3] != want, axis=1))[0]
         assert len(bad) == 0, f"slot {s}: {len(bad)} mismatches, first at word {bad[0]}"
-        # the frames sent to the decoder: the complete ones of every segment
-        segf = [[g[k * 32400:(k + 1) * 32400, :2].astype(np.int8).reshape(64800) for k in range(len(g) // 32400)]
-                for g in segs]
+        # the frames sent to the decoder: the complete ones of every segment, in bit order
+        nb3 = 3 if mc >= 12 else 2
+        segf = [[fx.llr_bit_order(g[k * nw:(k + 1) * nw, :nb3].astype(np.int8).reshape(-1), mc, short)
+                 for k in range(len(g) // nw)] for g in segs]
         # decoded frames of the slot, per segment (split where the slot was reset)
-        bsegs = read_segments(plus[f"bytes{s}"], (8, 1, 1, 8, 1, 8, 16, 4, 8, 1, 1))
+        bsegs = read_segments(plus[f"bytes{s}"], (8, 1, 1, 8, 1, 8, 16, 5, 8, 1, 1))
         assert len(bsegs) == nseg
         gsegs = []
         for rows in bsegs:
@@ -629,7 +652,7 @@ def core_run(exe, name, slots, stall=5, **common):
             frames, got_f = segf[0], gsegs[0]
             pre = None
         rate_idx = sl["rate_idx"]
-        assert all(np.all(g[:, 7:] == (rate_idx, rate_idx + 1, int(sl["pilots"]), s)) for g in got_f)
+        assert all(np.all(g[:, 7:] == (rate_idx + 16 * int(short), mc, int(sl["pilots"]), s)) for g in got_f)
         drops = int(line.split("llrq dropped ")[1].split(",")[0])
         if sl.get("drops") is None:
             assert drops == 0 and len(got_f) == len(frames), (s, drops, len(got_f), len(frames))
@@ -643,7 +666,7 @@ def core_run(exe, name, slots, stall=5, **common):
             while True:
                 assert k < len(frames), f"slot {s}: decoded frame not among the LLR frames"
                 wb, it, conv, ok, L, raw = ldpc_bch_model(frames[k], rate_idx, max_it=it_got if sl.get("cap") else
-                                                           sl.get("maxit", 30))
+                                                           sl.get("maxit", 30), short=short)
                 k += 1
                 if len(wb) == len(g) and np.array_equal(g[:, 0], wb):
                     break

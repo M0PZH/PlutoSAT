@@ -37,6 +37,7 @@ module dvbs2_rx_pls
 
   input  logic [4:0]         modcod,         // configured
   input  logic               pilots,
+  input  logic               short_fr,       // configured frame size
   input  logic [5:0]         cfg_h,          // grid -H..H
   input  logic [9:0]         cfg_step,       // turns * 2^16 per symbol
 
@@ -85,7 +86,7 @@ module dvbs2_rx_pls
   logic [15:0] f_car;
   logic        acq_l;
   logic [4:0]  cmc;
-  logic        cpil;
+  logic        cpil, csh;
   logic [5:0]  ch;
   logic [9:0]  cstep;
 
@@ -126,6 +127,7 @@ module dvbs2_rx_pls
           acq_l <= acquired;
           cmc   <= modcod;
           cpil  <= pilots;
+          csh   <= short_fr;
           ch    <= cfg_h;
           cstep <= cfg_step;
         end
@@ -205,7 +207,7 @@ module dvbs2_rx_pls
   logic              gcar;
   wire               m_busy = m_run || t_v || u_v || w_v || z_v;
 
-  wire [6:0] cfg_code = {cmc, 1'b0, cpil};
+  wire [6:0] cfg_code = {cmc, csh, cpil};
   // confident: best > 2 second and best > 2^16 (M < 2^25.1)
   wire       gconf = 19'(gbest) > {gsecond, 1'b0} && gbest > 18'h100;
   // grid frequency: -H steps at the start, then +1 step per hypothesis
@@ -432,7 +434,7 @@ module dvbs2_rx_pls
             data_code <= gcode; data_conf <= conf; data_car <= gcar; data_grid <= used_grid;
             data_valid <= 1'b1;
             st_data <= st_data + 16'd1;
-            if (gcode[6:1] != {cmc, 1'b0}) st_diff_modcod <= st_diff_modcod + 16'd1;
+            if (gcode[6:1] != {cmc, csh}) st_diff_modcod <= st_diff_modcod + 16'd1;
             if (gcode[0] != cpil)          st_diff_pilots <= st_diff_pilots + 16'd1;
           end
           st <= D_IDLE;

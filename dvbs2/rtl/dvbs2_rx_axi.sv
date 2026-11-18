@@ -8,7 +8,7 @@
 //
 // Packet (PKT_WORDS 64-bit words, tlast on the last; byte 0 = tdata[7:0]):
 //   word 0  [15:0] BBFRAME length in bytes (Kbch/8), [31:16] frame counter of
-//           the slot, [36:32] MODCOD, [37] pilots (both: the frame's, as decoded),
+//           the slot, [36:32] MODCOD, [37] pilots, [38] short frame (the frame's, as decoded),
 //           [45:40] LDPC iterations, [48] LDPC converged, [49] BCH ok (the
 //           BBFRAME is a codeword after <= t corrections: use it), [54:50] BCH
 //           errors located, [55] receive slot, [63:56] 0xB5
@@ -23,7 +23,8 @@
 // adds 0x100 s to the 1.x offsets; VERSION, ID and SCRATCH read the same in
 // every bank. The slot's settings are static while it runs: change them with
 // the slot disabled or in its soft reset.
-//   0x200 VERSION     RO  0x0002_0000: two receive slots, register map v2, the DDR LLR
+//   0x200 VERSION     RO  0x0002_0100: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD
+//                         [9], packet header [38]) (0x0002_0000: two receive slots, register map v2, the DDR LLR
 //                         queue in the path (on once LLRQ_BASE is set), a slot's reset
 //                         drops everything of the slot from before it (0x0001_0500: DDR LLR queue (0xDC..0xF0), the
 //                         packet header's MODCOD/pilots are the frame's own; 0x0001_0402:
@@ -36,7 +37,7 @@
 //                         sync checks every search peak at the data length; 0x0001_0200:
 //                         PLS decoder and TIMING_INTEG preset; 0x0001_0100: neither,
 //                         0xB8.. read 0, a TIMING_INTEG write is ignored; 0x0001_0000: no
-//                         CIC, DDC_CIC reads 0))
+//                         CIC, DDC_CIC reads 0)))
 //   0x204 ID          RO  "DVR2" (0x44565232)
 //   0x208 SCRATCH     RW
 //   0x210 CTRL        RW  [1] soft reset of the whole receiver (both slots, the decoders,
@@ -75,7 +76,8 @@
 //                         slot (self-clearing): its DDC, input FIFO, state in the shared
 //                         engines, PLS decoder and counters; the other slot runs on.
 //                         Reads [1] 1 while in progress
-//   +0x14 MODCOD      RW  [4:0] MODCOD (QPSK: 1..11), [8] pilots
+//   +0x14 MODCOD      RW  [4:0] MODCOD (QPSK: 1..11, 8PSK: 12..17), [8] pilots, [9] short
+//                         FECFRAMEs (from 0x0002_0100)
 //   +0x18 GOLD_XA     RW  [17:0]
 //   +0x1C GOLD_XB     RW  [17:0]
 //   +0x20 DDC_FINC    RW  NCO phase increment per ADC sample (2^32 = ADC rate)
@@ -216,7 +218,7 @@ module dvbs2_rx_axi #(
   output logic        m_axi_rready
 );
 
-  localparam logic [31:0] VERSION = 32'h0002_0000;
+  localparam logic [31:0] VERSION = 32'h0002_0100;
   wire clk = s_axi_aclk;
 
   // ---------------------------------------------------------------- registers
@@ -231,7 +233,7 @@ module dvbs2_rx_axi #(
   // per slot
   logic [31:0] ddc_finc [2], fs_thresh [2], t_integ0 [2], pls_seen_clr [2];
   logic [4:0]  modcod [2];
-  logic [1:0]  pilots;
+  logic [1:0]  pilots, short_fr;
   logic [17:0] gold_xa [2], gold_xb [2], pll_kp [2], pll_ki [2];
   logic [5:0]  ddc_dec [2], max_it [2];
   logic [9:0]  ddc_ntaps [2];
@@ -297,7 +299,7 @@ module dvbs2_rx_axi #(
       llrq_base <= '0;                       // queue off until software sets the region
       llrq_nfr <= 5'd16; llrq_qhi <= 6'd63; llrq_it_lo <= 6'd10;
       for (int s = 0; s < 2; s++) begin
-        modcod[s] <= 5'd4; pilots[s] <= 1'b1;
+        modcod[s] <= 5'd4; pilots[s] <= 1'b1; short_fr[s] <= 1'b0;
         gold_xa[s] <= 18'h00001; gold_xb[s] <= 18'h01008;
         ddc_finc[s] <= '0; ddc_dec[s] <= 6'd1; ddc_ntaps[s] <= 10'd2; ddc_shift[s] <= 5'd16;
         ddc_cic_r[s] <= '0; ddc_cic_shift[s] <= '0;
@@ -336,7 +338,7 @@ module dvbs2_rx_axi #(
           case (awaddr_q[7:2])
             6'h02: scratch <= wdata_q;
             6'h04: begin slot_en[s] <= wdata_q[0]; slot_req[s] <= wdata_q[1]; end
-            6'h05: begin modcod[s] <= wdata_q[4:0]; pilots[s] <= wdata_q[8]; end
+            6'h05: begin modcod[s] <= wdata_q[4:0]; pilots[s] <= wdata_q[8]; short_fr[s] <= wdata_q[9]; end
             6'h06: gold_xa[s] <= wdata_q[17:0];
             6'h07: gold_xb[s] <= wdata_q[17:0];
             6'h08: ddc_finc[s] <= wdata_q;
@@ -450,7 +452,7 @@ module dvbs2_rx_axi #(
     .clk, .rst(core_rst), .rst_s(slot_rst),
     .in_valid(d_valid), .in_i(d_i), .in_q(d_q), .in_overflows(in_ovf),
     .coef_we(rrc_cwe), .coef_slot(rrc_cslot), .coef_addr(rrc_caddr[rrc_cslot]), .coef_data(cdata),
-    .timing_kp(t_kp), .timing_ki(t_ki), .timing_integ0(t_integ0_s), .modcod, .pilots, .fs_thresh, .gold_xa, .gold_xb,
+    .timing_kp(t_kp), .timing_ki(t_ki), .timing_integ0(t_integ0_s), .modcod, .pilots, .short_fr, .fs_thresh, .gold_xa, .gold_xb,
     .pll_kp, .pll_ki, .ldpc_max_it(max_it),
     .pls_h, .pls_step, .pls_seen_clr,
     .axi_rst(!aresetn_q), .llrq_en(llrq_on), .llrq_base({llrq_base_q, 21'd0}), .llrq_nfr(llrq_nfr_q), .llrq_qhi, .llrq_it_lo,
@@ -596,7 +598,7 @@ module dvbs2_rx_axi #(
           w_drop <= 1'b0;
           if (act) begin
             hdr_pending <= 1'b1;
-            hdr_word <= {8'hB5, b_slot, b_nerr, b_ok, b_ldpc_ok, 2'd0, b_iters, 2'd0, b_pilots, b_modcod,
+            hdr_word <= {8'hB5, b_slot, b_nerr, b_ok, b_ldpc_ok, 2'd0, b_iters, 1'b0, b_rate[4], b_pilots, b_modcod,
                          pkt_cnt[b_slot], len + 16'd1};
             slot_nw[wslot] <= (PW+1)'(wd) + (PW+1)'(1);
             slot_rx[wslot] <= b_slot;
@@ -727,7 +729,7 @@ module dvbs2_rx_axi #(
           6'h01: rd_slot <= 32'h4456_5232;
           6'h02: rd_slot <= scratch;
           6'h04: rd_slot <= {30'd0, slot_rst[s], slot_en[s]};
-          6'h05: rd_slot <= {23'd0, pilots[s], 3'd0, modcod[s]};
+          6'h05: rd_slot <= {22'd0, short_fr[s], pilots[s], 3'd0, modcod[s]};
           6'h06: rd_slot <= {14'd0, gold_xa[s]};
           6'h07: rd_slot <= {14'd0, gold_xb[s]};
           6'h08: rd_slot <= ddc_finc[s];

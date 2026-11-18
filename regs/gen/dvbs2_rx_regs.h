@@ -6,12 +6,14 @@
 #define DVBS2_RX_UIO "dvbs2-rx"
 #define DVBS2_RX_SIZE 0x00010000u
 #define DVBS2_RX_ID_VALUE 0x44565232u
-#define DVBS2_RX_VERSION_VALUE 0x00020000u
+#define DVBS2_RX_VERSION_VALUE 0x00020100u
 #define DVBS2_RX_MAP_REGS 0
 #define DVBS2_RX_MAP_DMAC 1
 #define DVBS2_RX_MAP_BUFFER 2
 #define DVBS2_RX_MAP_LLRQ 3
 
+/* First core version with 8PSK and short FECFRAMEs */
+#define DVBS2_RX_VERSION_8PSK 131328
 /* Receive slots (register banks SLOT[0..1], packet header bit SLOT) */
 #define DVBS2_RX_SLOTS 2
 /* LLR queue ring region (LLRQ_BASE, 2 MB aligned): slot s frame f at LLRQ_BASE + s x 1 MB + f x 64 KB */
@@ -35,7 +37,7 @@
 /* Symbols per constellation snapshot */
 #define DVBS2_RX_SNAP_SYMBOLS 1024
 
-/* VERSION (ro): Core version, 0x0002_0000 = 2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC) */
+/* VERSION (ro): Core version, 0x0002_0100 = 2.1: 8PSK (MODCOD 12..17) and short FECFRAMEs (MODCOD.SHORT, HDR.SHORT) (2.0: two receive slots, register map v2 (a bank per slot, shared registers at 0x200), the DDR LLR queue in the path (on once LLRQ_BASE is set), a slot's reset drops everything of the slot from before it (no stale frames or packets) (1.5: DDR LLR queue at 0xDC..0xF0, the packet header's MODCOD/pilots are the frame's own; 1.4.2 (0x0001_0402): the LDPC decoder clips channel LLRs to +-61; 1.4.1 (0x0001_0401): a whole-frame search after a PLS drop; 1.4: the frame sync confirms headers by their PLS decode (no false lock on repeating frames, e.g. a TS of null packets; frame type from the decode), acquisition headers typed by the frame length, pilots off: no header-estimate kicks after the acquisition; 1.3: pilots-off carrier tracking and the PLS fix; 1.2: PLS decoder and TIMING_INTEG preset; 1.1: neither; 1.0: no CIC)) */
 #define DVBS2_RX_VERSION 0x200
 /*   [15:0] MINOR: Minor version */
 #define DVBS2_RX_VERSION_MINOR_SHIFT 0
@@ -181,7 +183,7 @@
 /* +0x14 MODCOD (rw): Expected MODCOD */
 #define DVBS2_RX_SLOT_MODCOD_OFF 0x14
 #define DVBS2_RX_SLOT_MODCOD(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_MODCOD_OFF)
-/*   [4:0] MODCOD: MODCOD (QPSK: 1..11) */
+/*   [4:0] MODCOD: MODCOD (QPSK: 1..11, 8PSK: 12..17 from 2.1) */
 #define DVBS2_RX_SLOT_MODCOD_MODCOD_SHIFT 0
 #define DVBS2_RX_SLOT_MODCOD_MODCOD_WIDTH 5
 #define DVBS2_RX_SLOT_MODCOD_MODCOD_MASK 0x0000001Fu
@@ -189,6 +191,10 @@
 #define DVBS2_RX_SLOT_MODCOD_PILOTS_SHIFT 8
 #define DVBS2_RX_SLOT_MODCOD_PILOTS_WIDTH 1
 #define DVBS2_RX_SLOT_MODCOD_PILOTS_MASK 0x00000100u
+/*   [9] SHORT: Short FECFRAMEs (16200 bits; no 9/10), from 2.1 */
+#define DVBS2_RX_SLOT_MODCOD_SHORT_SHIFT 9
+#define DVBS2_RX_SLOT_MODCOD_SHORT_WIDTH 1
+#define DVBS2_RX_SLOT_MODCOD_SHORT_MASK 0x00000200u
 /* +0x18 GOLD_XA (rw): PL descrambler x sequence start (x LFSR advanced by the Gold code n) */
 #define DVBS2_RX_SLOT_GOLD_XA_OFF 0x18
 #define DVBS2_RX_SLOT_GOLD_XA(i) (DVBS2_RX_SLOT_BASE + DVBS2_RX_SLOT_STRIDE * (i) + DVBS2_RX_SLOT_GOLD_XA_OFF)
@@ -582,6 +588,10 @@
 #define DVBS2_RX_PKT_HDR_PILOTS_SHIFT 37
 #define DVBS2_RX_PKT_HDR_PILOTS_WIDTH 1
 #define DVBS2_RX_PKT_HDR_PILOTS_MASK 0x0000002000000000ULL
+/*   [38] SHORT: Short FECFRAME (from 2.1) */
+#define DVBS2_RX_PKT_HDR_SHORT_SHIFT 38
+#define DVBS2_RX_PKT_HDR_SHORT_WIDTH 1
+#define DVBS2_RX_PKT_HDR_SHORT_MASK 0x0000004000000000ULL
 /*   [45:40] ITERATIONS: LDPC iterations */
 #define DVBS2_RX_PKT_HDR_ITERATIONS_SHIFT 40
 #define DVBS2_RX_PKT_HDR_ITERATIONS_WIDTH 6

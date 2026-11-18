@@ -1,13 +1,14 @@
 // File-driven testbench for dvbs2_rx_carrier.
 //   +in=<file> "iiii qqqq sof dummy found"; +out=<file> "ll qq first last"
-//   +modcod= +pilots= +xa= +xb= +kp= +ki= +stall=<percent>
+//   +modcod= +pilots= +short= +xa= +xb= +kp= +ki= +stall=<percent>
+//   +wz: also write the third LLR (8PSK): "ll qq first last zz"
 `timescale 1ns/1ps
 module tb_rx_carrier;
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
 
   logic [4:0] modcod;
-  logic pilots;
+  logic pilots, short_fr;
   logic [17:0] gold_xa, gold_xb, pll_kp, pll_ki;
   logic s_valid = 0, s_ready;
   logic signed [15:0] s_i, s_q;
@@ -18,7 +19,7 @@ module tb_rx_carrier;
   logic snap_v;
   logic signed [15:0] snap_i, snap_q;
   logic m_valid, m_ready = 0;
-  logic [7:0] m_llr_i, m_llr_q;
+  logic [7:0] m_llr_i, m_llr_q, m_llr_z;
   logic m_first, m_last;
   logic [31:0] st_freq, st_amp;
   logic [35:0] st_energy;
@@ -28,7 +29,7 @@ module tb_rx_carrier;
   dvbs2_rx_carrier #(.LUT_FILE("../../rtl/gen/nco_lut.mem")) dut (.*);
 
   string fin, fout;
-  int fi, fo, stall, n_in, n_out, rc, tmp, a, b, c;
+  int fi, fo, stall, n_in, n_out, rc, tmp, a, b, c, wz;
   logic [15:0] vi, vq;
   logic eof = 0;
 
@@ -39,6 +40,9 @@ module tb_rx_carrier;
     modcod = 5'(tmp);
     if (!$value$plusargs("pilots=%d", tmp)) tmp = 1;
     pilots = tmp[0];
+    if (!$value$plusargs("short=%d", tmp)) tmp = 0;
+    short_fr = tmp[0];
+    wz = $test$plusargs("wz");
     if (!$value$plusargs("xa=%d", tmp)) tmp = 1;
     gold_xa = 18'(tmp);
     if (!$value$plusargs("xb=%d", tmp)) tmp = 0;
@@ -81,7 +85,8 @@ module tb_rx_carrier;
   always @(posedge clk) begin
     m_ready <= ($urandom % 100) >= stall;
     if (m_valid && m_ready) begin
-      $fdisplay(fo, "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
+      if (wz) $fdisplay(fo, "%02h %02h %0d %0d %02h", m_llr_i, m_llr_q, m_first, m_last, m_llr_z);
+      else    $fdisplay(fo, "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
       n_out++;
       idle = 0;
     end else idle++;

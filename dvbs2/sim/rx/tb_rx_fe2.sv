@@ -14,6 +14,8 @@
 //                    of its samples; its input starts again from the beginning
 `timescale 1ns/1ps
 module tb_rx_fe2;
+  int wz;
+  initial wz = $test$plusargs("wz");          // LLR words with the third LLR (8PSK)
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
 
@@ -24,7 +26,7 @@ module tb_rx_fe2;
   logic [15:0] t_kp [2], t_ki [2];
   logic signed [31:0] t_integ [2];
   logic [4:0] modcod2 [2];
-  logic [1:0] pilots2;
+  logic [1:0] pilots2, short_fr2;
   logic [31:0] thresh2 [2];
   logic [17:0] gold_xa2 [2], gold_xb2 [2], pll_kp2 [2], pll_ki2 [2];
   logic [5:0] pls_h [2];
@@ -66,7 +68,7 @@ module tb_rx_fe2;
   logic [1:0] fs_state2 [2];
   logic [15:0] cnt_found2 [2], cnt_flywheel2 [2], cnt_lost2 [2];
   dvbs2_rx_framesync2 u_fs (
-    .clk, .rst, .rst_s, .modcod2, .pilots2, .thresh2,
+    .clk, .rst, .rst_s, .modcod2, .pilots2, .short_fr2, .thresh2,
     .s_valid2(t_valid), .s_ready2(t_ready), .s_i2(t_i), .s_q2(t_q),
     .m_valid(y_valid), .m_ready(y_ready), .m_i(y_i), .m_q(y_q), .m_sof(y_sof), .m_dummy(y_dummy),
     .m_found(y_found), .m_slot(y_slot), .ty_v2, .ty_dummy, .pls_v2, .pls_conf2, .pls_code2, .pls_busy2,
@@ -75,7 +77,7 @@ module tb_rx_fe2;
   // ---------------------------------------------------------------- carrier
   logic [1:0] c_valid, c_ready;
   logic m_valid, m_ready = 0, m_first, m_last, m_slot;
-  logic [7:0] m_llr_i, m_llr_q;
+  logic [7:0] m_llr_i, m_llr_q, m_llr_z;
   logic [31:0] st_freq2 [2], st_amp2 [2];
   logic [35:0] st_energy2 [2];
   logic [17:0] st_gain2 [2];
@@ -89,10 +91,10 @@ module tb_rx_fe2;
   assign c_valid = {y_valid && y_slot, y_valid && !y_slot};
   assign y_ready = c_ready[y_slot];
   dvbs2_rx_carrier2 #(.LUT_FILE("../../rtl/gen/nco_lut.mem")) u_carrier (
-    .clk, .rst, .rst_s, .modcod2, .pilots2, .gold_xa2, .gold_xb2, .pll_kp2, .pll_ki2,
+    .clk, .rst, .rst_s, .modcod2, .pilots2, .short_fr2, .gold_xa2, .gold_xb2, .pll_kp2, .pll_ki2,
     .s_valid2(c_valid), .s_ready2(c_ready), .s_i2(y_i2), .s_q2(y_q2),
     .s_sof2({2{y_sof}}), .s_dummy2({2{y_dummy}}), .s_found2({2{y_found}}),
-    .ty_v2, .ty_dummy, .m_valid, .m_ready, .m_llr_i, .m_llr_q, .m_first, .m_last, .m_slot,
+    .ty_v2, .ty_dummy, .m_valid, .m_ready, .m_llr_i, .m_llr_q, .m_llr_z, .m_first, .m_last, .m_slot,
     .st_freq2, .st_amp2, .st_energy2, .st_gain2, .st_frames2, .st_acq2, .st_fa2, .st_retype2, .st_acquired2,
     .snap_v, .snap_i, .snap_q, .snap_slot);
 
@@ -104,7 +106,7 @@ module tb_rx_fe2;
   logic [31:0] p_seen [2];
   for (genvar s = 0; s < 2; s++) begin : g_pls
     dvbs2_rx_pls u_pls (
-      .clk, .rst(srst[s]), .modcod(modcod2[s]), .pilots(pilots2[s]), .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
+      .clk, .rst(srst[s]), .modcod(modcod2[s]), .pilots(pilots2[s]), .short_fr(short_fr2[s]), .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
       .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof),
       .fhat(st_freq2[s]), .acquired(st_acquired2[s]), .seen_clr(32'd0),
       .res_v(pls_v2[s]), .res_code(pls_code2[s]), .res_conf(pls_conf2[s]), .res_car(p_car[s]),
@@ -132,6 +134,7 @@ module tb_rx_fe2;
       nm = $sformatf("period%0d=%%d", s); if (!$value$plusargs(nm, period[s])) period[s] = 40;
       nm = $sformatf("modcod%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 4; modcod2[s] = 5'(tmp);
       nm = $sformatf("pilots%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 1; pilots2[s] = tmp[0];
+      nm = $sformatf("short%0d=%%d", s);  if (!$value$plusargs(nm, tmp)) tmp = 0; short_fr2[s] = tmp[0];
       nm = $sformatf("thresh%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 0; thresh2[s] = 32'(tmp);
       nm = $sformatf("xa%0d=%%d", s);     if (!$value$plusargs(nm, tmp)) tmp = 1; gold_xa2[s] = 18'(tmp);
       nm = $sformatf("xb%0d=%%d", s);     if (!$value$plusargs(nm, tmp)) tmp = 0; gold_xb2[s] = 18'(tmp);
@@ -216,7 +219,8 @@ module tb_rx_fe2;
     if (u_timing.state != 0) busy_t++;
     m_ready <= ($urandom % 100) >= stall;
     if (m_valid && m_ready) begin
-      $fdisplay(fo[m_slot], "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
+      if (wz) $fdisplay(fo[m_slot], "%02h %02h %0d %0d %02h", m_llr_i, m_llr_q, m_first, m_last, m_llr_z);
+      else    $fdisplay(fo[m_slot], "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
       n_out[m_slot]++;
     end
     if (m_valid || |f_valid || |t_valid || y_valid || |pls_busy2 || eof != 2'b11) idle = 0;

@@ -10,7 +10,7 @@
 //
 //
 // d[n] = s[n] * conj(s[n-1]) (12 bit) is correlated with the 89 header
-// differentials of two candidates, the data MODCOD (+pilots) and the dummy
+// differentials of two candidates, the data MODCOD (+pilots, frame size) and the dummy
 // header: A = sum c_i d[n-89+i], c_i = +-1, metric |A|^2 >> 8. This is
 // insensitive to the carrier frequency (the header differentials are +-j).
 //
@@ -64,6 +64,7 @@ module dvbs2_rx_framesync2
 
   input  logic [4:0]         modcod2 [2],
   input  logic [1:0]         pilots2,
+  input  logic [1:0]         short_fr2,
   input  logic [31:0]        thresh2 [2],
 
   input  logic [1:0]         s_valid2,
@@ -104,7 +105,7 @@ module dvbs2_rx_framesync2
   logic [1:0]  srs;                         // a slot is in reset (its output is dropped)
   logic        cur_rst;                     // the loaded slot is in reset
   logic        av_cur, av_oth;              // the loaded / other slot can take a symbol
-  logic        s_valid, s_ready, ty_v, pls_v, pls_conf, pls_busy, pilots;
+  logic        s_valid, s_ready, ty_v, pls_v, pls_conf, pls_busy, pilots, short_fr;
   logic [4:0]  modcod;
   logic [6:0]  pls_code;
   logic [31:0] thresh;
@@ -113,6 +114,7 @@ module dvbs2_rx_framesync2
   logic [15:0] cnt_found, cnt_flywheel, cnt_lost;
   assign modcod   = modcod2[cur];
   assign pilots   = pilots2[cur];
+  assign short_fr = short_fr2[cur];
   assign thresh   = thresh2[cur];
   assign s_i      = s_i2[cur];
   assign s_q      = s_q2[cur];
@@ -146,8 +148,8 @@ module dvbs2_rx_framesync2
     logic [89:1] nd;
     logic [31:0] ld;
     always_ff @(posedge clk) begin
-      h  <= plheader(modcod2[s], pilots2[s]);
-      ld <= pilots2[s] ? 32'd33282 : 32'd32490;
+      h  <= plheader(modcod2[s], pilots2[s], short_fr2[s]);
+      ld <= 32'(plframe_len(modcod2[s], pilots2[s], short_fr2[s]));
       for (int i = 1; i < 90; i++) nd[i] <= h[89 - i] ^ h[90 - i] ^ i[0];
     end
     assign neg_ds[s] = nd;
@@ -372,7 +374,7 @@ module dvbs2_rx_framesync2
         if (pls_v2[cur]) begin
           pr_v_sh     <= 1'b1;
           pr_dummy_sh <= pls_code2[cur][6:2] == 5'd0;
-          pr_ok_sh    <= pls_conf2[cur] && (pls_code2[cur][6:2] == 5'd0 || pls_code2[cur] == {modcod2[cur], 1'b0, pilots2[cur]});
+          pr_ok_sh    <= pls_conf2[cur] && (pls_code2[cur][6:2] == 5'd0 || pls_code2[cur] == {modcod2[cur], short_fr2[cur], pilots2[cur]});
         end
       end
     end else begin
@@ -383,7 +385,7 @@ module dvbs2_rx_framesync2
       if (pls_v2[!cur]) begin
         pr_v_sh     <= 1'b1;
         pr_dummy_sh <= pls_code2[!cur][6:2] == 5'd0;
-        pr_ok_sh    <= pls_conf2[!cur] && (pls_code2[!cur][6:2] == 5'd0 || pls_code2[!cur] == {modcod2[!cur], 1'b0, pilots2[!cur]});
+        pr_ok_sh    <= pls_conf2[!cur] && (pls_code2[!cur][6:2] == 5'd0 || pls_code2[!cur] == {modcod2[!cur], short_fr2[!cur], pilots2[!cur]});
       end
     end
   end
@@ -418,7 +420,7 @@ module dvbs2_rx_framesync2
       if (pls_v) begin
         pr_v     <= 1'b1;
         pr_dummy <= pls_code[6:2] == 5'd0;
-        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, 1'b0, pilots});
+        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, short_fr, pilots});
       end
       // correlator read stage (rd[] is read in g_lane)
       rd_v <= iss;
@@ -729,7 +731,7 @@ module dvbs2_rx_framesync2
       if (pls_v2[!cur]) begin
         pr_v     <= 1'b1;
         pr_dummy <= pls_code2[!cur][6:2] == 5'd0;
-        pr_ok    <= pls_conf2[!cur] && (pls_code2[!cur][6:2] == 5'd0 || pls_code2[!cur] == {modcod2[!cur], 1'b0, pilots2[!cur]});
+        pr_ok    <= pls_conf2[!cur] && (pls_code2[!cur][6:2] == 5'd0 || pls_code2[!cur] == {modcod2[!cur], short_fr2[!cur], pilots2[!cur]});
       end
 `ifdef RX2_SCRAMBLE
       Ad_i <= $bits(Ad_i)'({$urandom, $urandom});

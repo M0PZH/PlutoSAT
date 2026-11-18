@@ -1,7 +1,7 @@
 // DVB-S2 RX PLHEADER detection (model: model/rxfixed.py, class FrameSync).
 //
 // d[n] = s[n] * conj(s[n-1]) (12 bit) is correlated with the 89 header
-// differentials of two candidates, the data MODCOD (+pilots) and the dummy
+// differentials of two candidates, the data MODCOD (+pilots, frame size) and the dummy
 // header: A = sum c_i d[n-89+i], c_i = +-1, metric |A|^2 >> 8. This is
 // insensitive to the carrier frequency (the header differentials are +-j).
 //
@@ -54,6 +54,7 @@ module dvbs2_rx_framesync
 
   input  logic [4:0]         modcod,
   input  logic               pilots,
+  input  logic               short_fr,      // short FECFRAMEs
   input  logic [31:0]        thresh,
 
   input  logic               s_valid,
@@ -95,9 +96,9 @@ module dvbs2_rx_framesync
   localparam logic [31:0] LEN_Z = 32'd3330;
 
   always_ff @(posedge clk) begin
-    hdr_d <= plheader(modcod, pilots);
+    hdr_d <= plheader(modcod, pilots, short_fr);
     hdr_z <= plheader(5'd0, 1'b0);
-    len_d <= pilots ? 32'd33282 : 32'd32490;
+    len_d <= 32'(plframe_len(modcod, pilots, short_fr));
     for (int i = 1; i < 90; i++) begin
       // y_k = hdr[89 - k]; c_i = b_i b_(i-1) (-1 if i odd)
       neg_d[i] <= hdr_d[89 - i] ^ hdr_d[90 - i] ^ i[0];
@@ -212,7 +213,7 @@ module dvbs2_rx_framesync
       if (pls_v) begin
         pr_v     <= 1'b1;
         pr_dummy <= pls_code[6:2] == 5'd0;
-        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, 1'b0, pilots});
+        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, short_fr, pilots});
       end
       // correlator read stage (rd[] is read in g_lane)
       rd_v <= iss;

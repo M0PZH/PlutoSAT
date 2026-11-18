@@ -6,9 +6,13 @@
 //         flywheel). After each PLHEADER, ty_v pulses with the frame type
 //         decided here (coherently, once the frequency is acquired) for the
 //         frame sync's next prediction.
-// Output: one word per data symbol, LLR(b0) from I and LLR(b1) from Q, int8,
-//         4 LSBs per unit LLR; exactly 32400 words per data frame (symbols
-//         missing from a frame cut short are sent as 0), m_first / m_last.
+// (8PSK, MODCOD 12..17, and short FECFRAMEs too: docs/8psk_short_design.md)
+// Output: one word per data symbol, int8 LLRs, 4 LSBs per unit LLR: QPSK
+//         LLR(b0) from I and LLR(b1) from Q (m_llr_i, m_llr_q); 8PSK the
+//         max-log LLRs of the symbol's bits b0 b1 b2 (m_llr_i, m_llr_q,
+//         m_llr_z; model: rxfixed.psk8_metrics); exactly Nldpc / 2 (QPSK) or
+//         Nldpc / 3 (8PSK) words per data frame (symbols missing from a frame
+//         cut short are sent as 0), m_first / m_last.
 //
 // Sequential datapath: ~8 clocks per symbol, ~900 more per PLHEADER
 // (frequency estimate) and ~100 per known block. With pilots each data
@@ -27,6 +31,7 @@ module dvbs2_rx_carrier
 
   input  logic [4:0]         modcod,
   input  logic               pilots,
+  input  logic               short_fr,
   input  logic [17:0]        gold_xa,
   input  logic [17:0]        gold_xb,
   input  logic [17:0]        pll_kp,
@@ -47,6 +52,7 @@ module dvbs2_rx_carrier
   input  logic               m_ready,
   output logic [7:0]         m_llr_i,
   output logic [7:0]         m_llr_q,
+  output logic [7:0]         m_llr_z,      // 8PSK: LLR(b2)
   output logic               m_first,
   output logic               m_last,
 
@@ -66,15 +72,21 @@ module dvbs2_rx_carrier
 );
 
   localparam logic [8:0]  SEG_TIMEOUT = 9'd256;
-  localparam logic [15:0] FLEN_DATA_P = 16'd33282, FLEN_DATA_N = 16'd32490, FLEN_DUMMY = 16'd3330;
+  localparam logic [15:0] FLEN_DUMMY = 16'd3330;
   localparam logic [17:0] YA_INIT = dvbs2_tables_pkg::PLS_YA_INIT;
   localparam logic [17:0] YB_INIT = dvbs2_tables_pkg::PLS_YB_INIT;
 
   // ---------------------------------------------------------------- config
   logic [89:0] hdr_d, hdr_z;
+  logic [15:0] flen_d;                      // data PLFRAME symbols
+  logic [14:0] owords;                      // LLR words of a data frame
   always_ff @(posedge clk) begin
-    hdr_d <= plheader(modcod, pilots);
+    hdr_d <= plheader(modcod, pilots, short_fr);
     hdr_z <= plheader(5'd0, 1'b0);
+  end
+  always_ff @(posedge clk) begin
+    flen_d <= plframe_len(modcod, pilots, short_fr);
+    owords <= llr_words(modcod, short_fr);
   end
   assign hdiff = hdr_d ^ hdr_z;
 
@@ -116,11 +128,11 @@ module dvbs2_rx_carrier
   always_ff @(posedge clk) if (sw_v) seg[sw_a] <= sw_d;
 
   // ---------------------------------------------------------------- output FIFO
-  logic [15:0] ofifo [32];
+  logic [23:0] ofifo [32];
   logic [5:0]  of_wp, of_rp;
   wire  [5:0]  of_cnt = of_wp - of_rp;
   logic        of_push;
-  logic [15:0] of_din;
+  logic [23:0] of_din;
   logic [14:0] oc_out;
 
   always_ff @(posedge clk) begin
@@ -138,11 +150,11 @@ module dvbs2_rx_carrier
       if (m_valid && m_ready) m_valid <= 1'b0;
       if ((!m_valid || m_ready) && of_cnt != 0) begin
         m_valid <= 1'b1;
-        {m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]];
+        {m_llr_z, m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]];
         m_first <= (oc_out == 0);
-        m_last  <= (oc_out == 15'd32399);
+        m_last  <= (oc_out == owords - 15'd1);
         of_rp <= of_rp + 6'd1;
-        if (oc_out == 15'd32399) begin
+        if (oc_out == owords - 15'd1) begin
           oc_out <= '0;
           st_frames <= st_frames + 16'd1;
         end else oc_out <= oc_out + 15'd1;
@@ -171,12 +183,26 @@ module dvbs2_rx_carrier
   endfunction
 
   // LLR pipeline (all output words go through it, in order):
-  // symbol * gain -> round/saturate -> output FIFO
-  logic               lp_v, lp_zero;
+  // symbol -> (8PSK: the max-log metrics D0..D2, two stages; QPSK: I, Q) ->
+  // * gain -> round/saturate -> output FIFO
+  logic               lp_v, lp_zero, lp_p8;
   logic signed [15:0] lp_i, lp_q;
   logic [17:0]        lp_g;
+  logic               la_v, la_zero, la_p8, la_mute;
+  logic signed [31:0] la_ci, la_cq;
+  logic signed [16:0] la_u, la_v8;
+  logic signed [15:0] la_i, la_q;
+  logic [17:0]        la_g;
+  logic               lb_v, lb_zero, lb_mute, lb_p8;
+  logic signed [17:0] lb_ci, lb_cq, lb_u, lb_v8;
+  logic [17:0]        lb_aci, lb_acq, lb_au, lb_av;
+  logic signed [15:0] lb_i, lb_q;
+  logic [17:0]        lb_g;
+  logic               lc_v, lc_zero, lc_mute;
+  logic signed [17:0] lc_d0, lc_d1, lc_d2;
+  logic [17:0]        lc_g;
   logic               l1_v, l1_zero;
-  logic signed [35:0] l1_pi, l1_pq;
+  logic signed [35:0] l1_pi, l1_pq, l1_pz;
   // pilots off, a data frame that began before the frequency acquisition is not sent
   // (model: _finish): its words go through the pipeline but are not pushed,
   // and its padding is skipped
@@ -187,24 +213,96 @@ module dvbs2_rx_carrier
   assign snap_i = lp_i;
   assign snap_q = lp_q;
 
+  // 8PSK metrics (model: rxfixed.psk8_metrics): ci = rnd(I K, 15), cq =
+  // rnd(Q K, 15), K = 1/sqrt2, u = (I + Q) >> 1, v = (Q - I) >> 1;
+  // D0 = max(|ci|, |u|) - max(|cq|, |v|), D1 = max + min of (u, ci, cq, -v),
+  // D2 = max + min of (u, -ci, cq, v)
+  localparam logic signed [15:0] PSK8_K = 16'sd23170;
+  function automatic logic signed [17:0] abs18(input logic signed [17:0] a);
+    abs18 = a < 0 ? -a : a;
+  endfunction
+  function automatic logic signed [17:0] max18(input logic signed [17:0] a, input logic signed [17:0] b);
+    max18 = a > b ? a : b;
+  endfunction
+  function automatic logic signed [17:0] min18(input logic signed [17:0] a, input logic signed [17:0] b);
+    min18 = a < b ? a : b;
+  endfunction
+  function automatic logic signed [17:0] mm4(input logic signed [17:0] a, input logic signed [17:0] b,
+                                             input logic signed [17:0] c, input logic signed [17:0] d);
+    mm4 = max18(max18(a, b), max18(c, d)) + min18(min18(a, b), min18(c, d));
+  endfunction
+
   always_ff @(posedge clk) begin
     if (rst) begin
+      la_v    <= 1'b0;
+      lb_v    <= 1'b0;
+      lc_v    <= 1'b0;
       l1_v    <= 1'b0;
       of_push <= 1'b0;
     end else begin
-      l1_mute <= lp_mute;
-      l1_v    <= lp_v;
-      l1_zero <= lp_zero;
-      l1_pi   <= 36'(lp_i) * 36'($signed({1'b0, lp_g}));
-      l1_pq   <= 36'(lp_q) * 36'($signed({1'b0, lp_g}));
+      // stage a: the 1/sqrt2 products, u, v
+      la_v    <= lp_v;
+      la_zero <= lp_zero;
+      la_mute <= lp_mute;
+      la_p8   <= lp_p8;
+      la_g    <= lp_g;
+      la_i    <= lp_i;
+      la_q    <= lp_q;
+      la_ci   <= 32'(lp_i) * 32'(PSK8_K);
+      la_cq   <= 32'(lp_q) * 32'(PSK8_K);
+      la_u    <= (17'(lp_i) + 17'(lp_q)) >>> 1;
+      la_v8   <= (17'(lp_q) - 17'(lp_i)) >>> 1;
+      // stage b: ci, cq rounded, u, v and their magnitudes
+      lb_v    <= la_v;
+      lb_zero <= la_zero;
+      lb_mute <= la_mute;
+      lb_p8   <= la_p8;
+      lb_g    <= la_g;
+      lb_i    <= la_i;
+      lb_q    <= la_q;
+      begin : m8b
+        logic signed [17:0] ci, cq;
+        ci = 18'((la_ci + 32'sd16384) >>> 15);
+        cq = 18'((la_cq + 32'sd16384) >>> 15);
+        lb_ci  <= ci;
+        lb_cq  <= cq;
+        lb_u   <= 18'(la_u);
+        lb_v8  <= 18'(la_v8);
+        lb_aci <= abs18(ci);
+        lb_acq <= abs18(cq);
+        lb_au  <= abs18(18'(la_u));
+        lb_av  <= abs18(18'(la_v8));
+      end
+      // stage c: the metrics (QPSK: I, Q)
+      lc_v    <= lb_v;
+      lc_zero <= lb_zero;
+      lc_mute <= lb_mute;
+      lc_g    <= lb_g;
+      if (lb_p8) begin
+        lc_d0 <= max18(lb_aci, lb_au) - max18(lb_acq, lb_av);
+        lc_d1 <= mm4(lb_u, lb_ci, lb_cq, -lb_v8);
+        lc_d2 <= mm4(lb_u, -lb_ci, lb_cq, lb_v8);
+      end else begin
+        lc_d0 <= 18'(lb_i);
+        lc_d1 <= 18'(lb_q);
+        lc_d2 <= '0;
+      end
+      // * gain
+      l1_mute <= lc_mute;
+      l1_v    <= lc_v;
+      l1_zero <= lc_zero;
+      l1_pi   <= 36'(lc_d0) * 36'($signed({1'b0, lc_g}));
+      l1_pq   <= 36'(lc_d1) * 36'($signed({1'b0, lc_g}));
+      l1_pz   <= 36'(lc_d2) * 36'($signed({1'b0, lc_g}));
       of_push <= l1_v && !l1_mute;
-      of_din  <= l1_zero ? 16'd0 : {llr8(l1_pq), llr8(l1_pi)};
+      of_din  <= l1_zero ? 24'd0 : {llr8(l1_pz), llr8(l1_pq), llr8(l1_pi)};
     end
   end
 
   // ---------------------------------------------------------------- state
   typedef enum logic [5:0] {
-    M_IDLE, M_START, M_INIT, M_NOFR, M_DESC, M_ROTW, M_SYM, M_SYM2, M_SYM3, M_PLL, M_PLL2, M_NEXT,
+    M_IDLE, M_START, M_INIT, M_NOFR, M_DESC, M_ROTW, M_SYM, M_SYM2, M_SYM3, M_SYM4, M_SYM5, M_SYM6, M_PLL,
+    M_PLL2, M_NEXT,
     M_FLL_ROT, M_FLL_ACC0, M_FLL_ACC1, M_FLL_ACC2, M_FLL_COR, M_FLL_CORW, M_FLL_CORW2,
     M_FLL_END, M_FLL_END2, M_FLL_NOUPD,
     M_BLK_COR, M_BLK_CORW, M_BLK_ST1, M_BLK_ST1B, M_BLK_ST2, M_BLK_ST3, M_BLK_ST3B, M_BLK_DIVW,
@@ -236,6 +334,14 @@ module dvbs2_rx_carrier
   logic               z_soft;
   logic signed [11:0] ci, cq;
   logic signed [17:0] pll_e;
+  // pilots off, 8PSK data symbol: decision-directed detector (model:
+  // rxfixed.psk8_pll_error): ci, cq (the products on the squarers of
+  // M_SYM2), u, v; the nearest point is the largest of |ci|, |u|, |cq|, |v|
+  // with its sign, e = 2 C_(p+2)
+  logic               z_p8;
+  logic signed [17:0] e8_ci, e8_cq, e8_u, e8_v;
+  logic [17:0]        e8_a [4];             // |ci|, |u|, |cq|, |v|
+  logic [1:0]         e8_k;
 
   // estimators
   logic [31:0]        A;
@@ -414,9 +520,9 @@ module dvbs2_rx_carrier
   logic signed [17:0] hz2_i, hz2_q;
   logic [5:0] inflight;                      // segment words issued, not yet out of the rotator
   // seg read port: the word M_SEG_EMIT issues (same condition as there)
-  wire seg_issue = (st == M_SEG_EMIT) && (sk != nd) && (6'(of_cnt) + inflight < 6'd22);
+  wire seg_issue = (st == M_SEG_EMIT) && (sk != nd) && (6'(of_cnt) + inflight < 6'd19);
   always_ff @(posedge clk) if (seg_issue) seg_rd <= seg[sk];
-  wire        room1 = of_cnt < 6'd26;            // FIFO 32 - LLR pipeline in flight
+  wire        room1 = of_cnt < 6'd23;            // FIFO 32 - LLR pipeline in flight
 
   always_ff @(posedge clk) begin
     rot_v     <= 1'b0;
@@ -472,8 +578,8 @@ module dvbs2_rx_carrier
             // either frame length confirms it; the length says the type
             // (before the acquisition the tag's type is the frame sync's
             // differential guess)
-            other = since == (ap_typ ? (pilots ? FLEN_DATA_P : FLEN_DATA_N) : FLEN_DUMMY);
-            ok = ap_v && sfnd && (other || since == (ap_typ ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N)));
+            other = since == (ap_typ ? flen_d : FLEN_DUMMY);
+            ok = ap_v && sfnd && (other || since == (ap_typ ? FLEN_DUMMY : flen_d));
             prev_ok <= ok;
             if (ok) cflip[nconf] <= other;
             // bank of this header: after the confirmed ones (acquired: 0)
@@ -498,7 +604,7 @@ module dvbs2_rx_carrier
           in_frame <= 1'b1;
           smute <= !acquired && !pilots;
           typ  <= sdum;
-          flen <= sdum ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N);
+          flen <= sdum ? FLEN_DUMMY : flen_d;
           p <= '0;
           r_body <= '0;
           Hi <= '0; Hq <= '0; Hai <= '0; Haq <= '0; Esum <= '0;
@@ -555,6 +661,7 @@ module dvbs2_rx_carrier
           z_pil <= 1'b0;
           z_dum <= 1'b0;
           z_soft <= 1'b0;
+          z_p8 <= 1'b0;
           pll_e <= '0;
           if (is_hdr) begin : hdr
             logic signed [17:0] a_i, a_q;
@@ -588,24 +695,31 @@ module dvbs2_rx_carrier
           end else if (room1) begin
             lp_v    <= 1'b1;
             lp_zero <= 1'b0;
+            lp_p8   <= is_psk8(modcod);
             lp_i    <= s1i;
             lp_q    <= s1q;
             lp_g    <= G;
             oc_push <= oc_push + 15'd1;
             lp_mute <= w_mute;
             if (oc_push == '0) fmute <= smute;
-            zi <= 18'(s1q);
-            zq <= 18'(s1i);
-            ci <= s1i > SOFT_C ? 12'(SOFT_C) : s1i < -SOFT_C ? 12'(-SOFT_C) : 12'(s1i);
-            cq <= s1q > SOFT_C ? 12'(SOFT_C) : s1q < -SOFT_C ? 12'(-SOFT_C) : 12'(s1q);
-            z_soft <= 1'b1;
+            if (is_psk8(modcod)) begin
+              zi <= 18'(s1i);
+              zq <= 18'(s1q);
+              z_p8 <= 1'b1;
+            end else begin
+              zi <= 18'(s1q);
+              zq <= 18'(s1i);
+              ci <= s1i > SOFT_C ? 12'(SOFT_C) : s1i < -SOFT_C ? 12'(-SOFT_C) : 12'(s1i);
+              cq <= s1q > SOFT_C ? 12'(SOFT_C) : s1q < -SOFT_C ? 12'(-SOFT_C) : 12'(s1q);
+              z_soft <= 1'b1;
+            end
             st <= M_SYM2;
           end
         end
 
         M_SYM2: begin
-          sq_zi <= 36'(36'(zi) * (z_soft ? 36'(ci) : 36'(zi)));
-          sq_zq <= 36'(36'(zq) * (z_soft ? 36'(cq) : 36'(zq)));
+          sq_zi <= 36'(36'(zi) * (z_soft ? 36'(ci) : z_p8 ? 36'(PSK8_K) : 36'(zi)));
+          sq_zq <= 36'(36'(zq) * (z_soft ? 36'(cq) : z_p8 ? 36'(PSK8_K) : 36'(zq)));
           if (z_hdr) begin
             zw_v <= 1'b1; zw_a <= 10'({wb, 7'(p)}); zw_d <= {s1q, s1i};
             Hi <= Hi + 24'(zi);
@@ -627,6 +741,39 @@ module dvbs2_rx_carrier
           if (z_hdr) Esum <= Esum + e2;
           if (z_pil) Pe <= Pe + e2;
           if (z_soft) pll_e <= 18'(($signed(sq_zi) - $signed(sq_zq)) >>> PLL_SOFT_SH);
+          e8_ci <= 18'(($signed(sq_zi) + 36'sd16384) >>> 15);
+          e8_cq <= 18'(($signed(sq_zq) + 36'sd16384) >>> 15);
+          e8_u  <= (zi + zq) >>> 1;
+          e8_v  <= (zq - zi) >>> 1;
+          st <= z_p8 ? M_SYM4 : M_PLL;
+        end
+
+        // (three clocks: argmax, select, sign)
+        M_SYM4: begin
+          e8_a[0] <= abs18(e8_ci);
+          e8_a[1] <= abs18(e8_u);
+          e8_a[2] <= abs18(e8_cq);
+          e8_a[3] <= abs18(e8_v);
+          st <= M_SYM5;
+        end
+
+        M_SYM5: begin : sym5
+          logic [1:0] k01, k23;
+          k01 = (e8_a[1] > e8_a[0]) ? 2'd1 : 2'd0;
+          k23 = (e8_a[3] > e8_a[2]) ? 2'd3 : 2'd2;
+          e8_k <= (e8_a[k23] > e8_a[k01]) ? k23 : k01;
+          st <= M_SYM6;
+        end
+
+        M_SYM6: begin : sym6
+          logic signed [17:0] x [4];
+          logic signed [17:0] e;
+          logic               neg;
+          x[0] = e8_ci; x[1] = e8_u; x[2] = e8_cq; x[3] = e8_v;
+          // C_(p+2): p = k -> X_(k+2) (k < 2), -X_(k-2); p = k + 4 (X_k < 0): negated
+          e   = x[e8_k ^ 2'd2];
+          neg = e8_k[1] ^ (x[e8_k] < 0);
+          pll_e <= (neg ? -e : e) <<< 1;
           st <= M_PLL;
         end
 
@@ -699,7 +846,7 @@ module dvbs2_rx_carrier
             n_retype <= n_retype + 16'd1;
           end
           typ  <= nt;
-          flen <= nt ? FLEN_DUMMY : (pilots ? FLEN_DATA_P : FLEN_DATA_N);
+          flen <= nt ? FLEN_DUMMY : flen_d;
           ty_v <= 1'b1;
           ty_dummy <= nt;
           fk <= '0;
@@ -1069,7 +1216,7 @@ module dvbs2_rx_carrier
 
         M_SEG_EMIT: begin : emit
           logic issue, push;
-          issue = (sk != nd) && (6'(of_cnt) + inflight < 6'd22);
+          issue = (sk != nd) && (6'(of_cnt) + inflight < 6'd19);
           push  = rot_ov && rot_otag == 8'h80;
           if (issue) begin
             seg_rv  <= 1'b1;
@@ -1087,6 +1234,7 @@ module dvbs2_rx_carrier
           if (push) begin
             lp_v    <= 1'b1;
             lp_zero <= 1'b0;
+            lp_p8   <= is_psk8(modcod);
             lp_i    <= rot_oi;
             lp_q    <= rot_oq;
             lp_g    <= G;
@@ -1109,13 +1257,14 @@ module dvbs2_rx_carrier
 
         // ------------------------------------------------------------ finish an output frame
         M_PAD: begin
-          if (oc_push == 15'd32400 || w_mute) begin
+          if (oc_push == owords || w_mute) begin
             // (a frame that is not sent needs no padding)
             oc_push <= '0;
             st <= ret_pad;
           end else if (room1) begin
             lp_v    <= 1'b1;
             lp_zero <= 1'b1;
+            lp_p8   <= 1'b0;
             oc_push <= oc_push + 15'd1;
             lp_mute <= w_mute;
             if (oc_push == '0) fmute <= smute;

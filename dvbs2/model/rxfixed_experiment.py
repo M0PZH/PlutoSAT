@@ -55,6 +55,63 @@ def run(rate_idx=3, pilots=True, nframes=6, cfo=0.004, ppm=60.0, delay=0.37, esn
     return all(dec), r
 
 
+def make_signal_x(modcod, short, pilots, nframes, cfo, ppm, delay, esn0, seed, lead=8, rms=1500.0,
+                  pn=0.0):
+    """Any MODCOD (QPSK 1..11, 8PSK 12..17), normal or short FECFRAMEs, random
+    BBFRAMEs; pn: Wiener phase noise, rad/symbol (applied at the TX symbols)."""
+    rate_idx, psk8 = m.modcod_info(modcod)
+    kb = m.rate_params(rate_idx, short)[0]
+    rng = np.random.default_rng(seed)
+    bb = rng.integers(0, 2, (nframes, kb)).astype(np.uint8)
+    frames = [m.dummy_plframe_phases()] * lead + \
+             [m.plframe_phases(m.fec_frame(b, rate_idx, short), modcod, pilots, 0, short) for b in bb] + \
+             [m.dummy_plframe_phases()] * 2
+    ph = np.concatenate(frames)
+    iq = m.phases_to_iq(ph)
+    if pn:
+        th = np.cumsum(rng.standard_normal(len(iq)) * pn)
+        z = (iq[:, 0] + 1j * iq[:, 1]) * np.exp(1j * th)
+        iq = np.stack([np.round(z.real), np.round(z.imag)], axis=1).astype(np.int64)
+    sps_tx = 8
+    c = m.rrc_coefs(sps_tx, 0.35, 16)
+    tx = m.rrc_interp(iq, c, sps_tx, 16)
+    y = rf.channel(tx, sps_tx, 2, cfo, ppm, delay, esn0, seed)
+    y *= rms / np.sqrt(np.mean(np.abs(y) ** 2) / 2)
+    x = np.stack([np.round(y.real), np.round(y.imag)], axis=1)
+    return np.clip(x, -32768, 32767).astype(np.int64), bb
+
+
+def decode_model(frames, modcod, short=False, max_it=30):
+    """Carrier output frames -> BBFRAMEs (bits) with the LDPC and BCH
+    decoder models (bit exact to the RTL), [(bbframe, ldpc_ok, bch_ok)]."""
+    import bchdec
+    import ldpcdec as ld
+    rate_idx, _ = m.modcod_info(modcod)
+    dec = ld.Decoder(rate_idx, short)
+    out = []
+    for f in frames:
+        hard, it, conv = dec.decode(fx.llr_bit_order(f, modcod, short), max_it=max_it)
+        bb, ok, _ = bchdec.decode(hard[:dec.code.K], rate_idx, short)
+        out.append((bb, conv, ok))
+    return out
+
+
+def run_x(modcod=12, short=False, pilots=True, nframes=4, cfo=0.004, ppm=60.0, delay=0.37, esn0=8.0, seed=0,
+          verbose=True, **kw):
+    """The fixed-point receiver and the decoder models on any MODCOD / frame
+    size: (frames decoded, frames sent, receive() result)."""
+    x, bb = make_signal_x(modcod, short, pilots, nframes, cfo, ppm, delay, esn0, seed, **kw)
+    r = fx.receive(x, modcod, pilots, short=short)
+    res = decode_model(r["frames"], modcod, short)
+    dec = [any(ok and np.array_equal(o, b) for o, _, ok in res) for b in bb]
+    if verbose:
+        cr = r["carrier"]
+        print(f"MODCOD {modcod} short={short} pilots={pilots} cfo={cfo} Es/N0={esn0}: frames out "
+              f"{len(r['frames'])}, decoded {sum(dec)}/{nframes} {''.join('x.'[d] for d in dec)}, "
+              f"LDPC ok {sum(c for _, c, _ in res)}, f {cr.fhat / 2 ** 32:.5f}")
+    return sum(dec), nframes, r
+
+
 CASES = [dict(), dict(esn0=2.0), dict(cfo=-0.01, ppm=-100), dict(rate_idx=0, esn0=-1.0),
          dict(rate_idx=10, esn0=8.0, pilots=False, cfo=0.0005),
          dict(rate_idx=7, esn0=6.0, pilots=False, cfo=-0.003, ppm=-80),

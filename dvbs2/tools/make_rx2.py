@@ -228,10 +228,10 @@ FS_PULSES = """      if (ty_v) begin
       if (pls_v) begin
         pr_v     <= 1'b1;
         pr_dummy <= pls_code[6:2] == 5'd0;
-        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, 1'b0, pilots});
+        pr_ok    <= pls_conf && (pls_code[6:2] == 5'd0 || pls_code == {modcod, short_fr, pilots});
       end
 """
-FS_PULSE_IN = ["ty_v", "pls_v", "pls_conf", "pls_code", "modcod", "pilots"]
+FS_PULSE_IN = ["ty_v", "pls_v", "pls_conf", "pls_code", "modcod", "pilots", "short_fr"]
 
 
 def make_framesync2():
@@ -260,6 +260,7 @@ def make_framesync2():
 
   input  logic [4:0]         modcod,
   input  logic               pilots,
+  input  logic               short_fr,      // short FECFRAMEs
   input  logic [31:0]        thresh,
 
   input  logic               s_valid,
@@ -272,6 +273,7 @@ def make_framesync2():
 
   input  logic [4:0]         modcod2 [2],
   input  logic [1:0]         pilots2,
+  input  logic [1:0]         short_fr2,
   input  logic [31:0]        thresh2 [2],
 
   input  logic [1:0]         s_valid2,
@@ -322,7 +324,7 @@ def make_framesync2():
   logic [1:0]  srs;                         // a slot is in reset (its output is dropped)
   logic        cur_rst;                     // the loaded slot is in reset
   logic        av_cur, av_oth;              // the loaded / other slot can take a symbol
-  logic        s_valid, s_ready, ty_v, pls_v, pls_conf, pls_busy, pilots;
+  logic        s_valid, s_ready, ty_v, pls_v, pls_conf, pls_busy, pilots, short_fr;
   logic [4:0]  modcod;
   logic [6:0]  pls_code;
   logic [31:0] thresh;
@@ -331,6 +333,7 @@ def make_framesync2():
   logic [15:0] cnt_found, cnt_flywheel, cnt_lost;
   assign modcod   = modcod2[cur];
   assign pilots   = pilots2[cur];
+  assign short_fr = short_fr2[cur];
   assign thresh   = thresh2[cur];
   assign s_i      = s_i2[cur];
   assign s_q      = s_q2[cur];
@@ -343,9 +346,9 @@ def make_framesync2():
     # per-slot header coefficients (registered per slot, selected by cur)
     s.rep("  logic [89:0] hdr_d, hdr_z;\n", "  logic [89:0] hdr_z;\n")
     s.rep("""  always_ff @(posedge clk) begin
-    hdr_d <= plheader(modcod, pilots);
+    hdr_d <= plheader(modcod, pilots, short_fr);
     hdr_z <= plheader(5'd0, 1'b0);
-    len_d <= pilots ? 32'd33282 : 32'd32490;
+    len_d <= 32'(plframe_len(modcod, pilots, short_fr));
     for (int i = 1; i < 90; i++) begin
       // y_k = hdr[89 - k]; c_i = b_i b_(i-1) (-1 if i odd)
       neg_d[i] <= hdr_d[89 - i] ^ hdr_d[90 - i] ^ i[0];
@@ -366,8 +369,8 @@ def make_framesync2():
     logic [89:1] nd;
     logic [31:0] ld;
     always_ff @(posedge clk) begin
-      h  <= plheader(modcod2[s], pilots2[s]);
-      ld <= pilots2[s] ? 32'd33282 : 32'd32490;
+      h  <= plheader(modcod2[s], pilots2[s], short_fr2[s]);
+      ld <= 32'(plframe_len(modcod2[s], pilots2[s], short_fr2[s]));
       for (int i = 1; i < 90; i++) nd[i] <= h[89 - i] ^ h[90 - i] ^ i[0];
     end
     assign neg_ds[s] = nd;
@@ -490,12 +493,13 @@ CR_TEMP = [
     "p_a", "p_e", "a_new", "e_new", "p_aa", "p_acg", "dl_q", "p_dl", "incr", "fa_kp", "fa_big", "fa_k",
     "fa_stepk", "fa_jump", "sph", "sk", "sk_done", "inflight", "p_dd", "ret_pad", "ret_blk", "seg_cont",
     "zrbuf", "hz1_si", "hz1_sq", "hz1_a", "hz2_a", "hz2_i", "hz2_q", "zr2_ph", "zr2_tag",
+    "z_p8", "e8_ci", "e8_cq", "e8_u", "e8_v", "e8_a", "e8_k",
 ]
 # the engine itself: state, unit operands and strobes, buffer write ports, the
 # LLR pipeline input (its words carry the slot), the header z and zbuf read pipelines
 CR_TRANSIENT = [
     "st", "rot_v", "rot_i", "rot_q", "rot_ph", "rot_tag", "cor_start", "cor_x", "cor_y", "div_start",
-    "div_n", "div_d", "lp_v", "lp_zero", "lp_i", "lp_q", "lp_g", "lp_mute", "seg_rv", "seg_rph", "ty_v",
+    "div_n", "div_d", "lp_v", "lp_zero", "lp_p8", "lp_i", "lp_q", "lp_g", "lp_mute", "seg_rv", "seg_rph", "ty_v",
     "ty_dummy",
     "zw_v", "zw_a", "zw_d", "sw_v", "sw_a", "sw_d", "zr_v", "zr_ph", "zr_tag", "zr2_v", "hz1_v", "hz2_v",
 ]
@@ -537,6 +541,7 @@ def make_carrier2():
 
   input  logic [4:0]         modcod2 [2],
   input  logic [1:0]         pilots2,
+  input  logic [1:0]         short_fr2,
   input  logic [17:0]        gold_xa2 [2],
   input  logic [17:0]        gold_xb2 [2],
   input  logic [17:0]        pll_kp2 [2],
@@ -557,6 +562,7 @@ def make_carrier2():
   input  logic               m_ready,
   output logic [7:0]         m_llr_i,
   output logic [7:0]         m_llr_q,
+  output logic [7:0]         m_llr_z,      // 8PSK: LLR(b2)
   output logic               m_first,
   output logic               m_last,
   output logic               m_slot,
@@ -588,7 +594,7 @@ def make_carrier2():
   logic [1:0]  app, app_d;                  // a slot's context is reset in this / the last clock
   logic [1:0]  ep;                          // output epoch per slot (words of an older one are dropped)
   logic [4:0]  modcod;
-  logic        pilots;
+  logic        pilots, short_fr;
   logic [17:0] gold_xa, gold_xb, pll_kp, pll_ki;
   logic        s_valid, s_ready, s_sof, s_dummy, s_found, ty_v;
   logic signed [15:0] s_i, s_q;
@@ -601,16 +607,29 @@ def make_carrier2():
 
     # per-slot header pattern (registered per slot, selected by cur)
     s.rep("""  logic [89:0] hdr_d, hdr_z;
+  logic [15:0] flen_d;                      // data PLFRAME symbols
+  logic [14:0] owords;                      // LLR words of a data frame
   always_ff @(posedge clk) begin
-    hdr_d <= plheader(modcod, pilots);
-    hdr_z <= plheader(5'd0, 1'b0);
-  end""", """  logic [89:0] hdr_d, hdr_z, hdr_ds [2];
-  always_ff @(posedge clk) begin
-    hdr_ds[0] <= plheader(modcod2[0], pilots2[0]);
-    hdr_ds[1] <= plheader(modcod2[1], pilots2[1]);
+    hdr_d <= plheader(modcod, pilots, short_fr);
     hdr_z <= plheader(5'd0, 1'b0);
   end
-  assign hdr_d = hdr_ds[cur];""")
+  always_ff @(posedge clk) begin
+    flen_d <= plframe_len(modcod, pilots, short_fr);
+    owords <= llr_words(modcod, short_fr);
+  end""", """  logic [89:0] hdr_d, hdr_z, hdr_ds [2];
+  logic [15:0] flen_d, flen_ds [2];         // data PLFRAME symbols
+  logic [14:0] owords, owords_s [2];        // LLR words of a data frame
+  always_ff @(posedge clk) begin
+    for (int k = 0; k < 2; k++) begin
+      hdr_ds[k]   <= plheader(modcod2[k], pilots2[k], short_fr2[k]);
+      flen_ds[k]  <= plframe_len(modcod2[k], pilots2[k], short_fr2[k]);
+      owords_s[k] <= llr_words(modcod2[k], short_fr2[k]);
+    end
+    hdr_z <= plheader(5'd0, 1'b0);
+  end
+  assign hdr_d  = hdr_ds[cur];
+  assign flen_d = flen_ds[cur];
+  assign owords = owords_s[cur];""")
 
     # per-slot buffers, the slot as an address bit
     if ZBUF_SPLIT:
@@ -663,12 +682,12 @@ def make_carrier2():
               "always_ff @(posedge clk) if (seg_issue) seg_rd <= seg[{cur, sk}];")
 
     # output FIFO: words carry {epoch, slot}; per-slot output counters
-    s.rep("logic [15:0] ofifo [32];",
-          "logic [17:0] ofifo [32];\n  logic        lp_tag, l1_tag, of_tag, lp_ep, l1_ep, of_ep, hd, stale;")
+    s.rep("logic [23:0] ofifo [32];",
+          "logic [25:0] ofifo [32];\n  logic        lp_tag, la_tag, lb_tag, lc_tag, l1_tag, of_tag, lp_ep, la_ep, lb_ep, lc_ep, l1_ep, of_ep, hd, stale;")
     s.rep("logic [14:0] oc_out;", "logic [14:0] oc_out [2];\n  logic [15:0] st_frames [2];\n"
-          "  assign hd = ofifo[of_rp[4:0]][16];\n"
+          "  assign hd = ofifo[of_rp[4:0]][24];\n"
           "  // a word of a slot in reset, or reset since it was written, is dropped\n"
-          "  assign stale = ofifo[of_rp[4:0]][17] != ep[hd] || srs[hd];")
+          "  assign stale = ofifo[of_rp[4:0]][25] != ep[hd] || srs[hd];")
     s.rep("""      if (m_valid && m_ready) m_valid <= 1'b0;
       if ((!m_valid || m_ready) && of_cnt != 0) begin""", """      if (m_valid && (m_ready || srs[m_slot])) m_valid <= 1'b0;
       if ((!m_valid || m_ready) && of_cnt != 0) begin""")
@@ -678,11 +697,11 @@ def make_carrier2():
     s.rep("ofifo[of_wp[4:0]] <= of_din;", "ofifo[of_wp[4:0]] <= {of_ep, of_tag, of_din};")
     s.rep("""      if ((!m_valid || m_ready) && of_cnt != 0) begin
         m_valid <= 1'b1;
-        {m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]];
+        {m_llr_z, m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]];
         m_first <= (oc_out == 0);
-        m_last  <= (oc_out == 15'd32399);
+        m_last  <= (oc_out == owords - 15'd1);
         of_rp <= of_rp + 6'd1;
-        if (oc_out == 15'd32399) begin
+        if (oc_out == owords - 15'd1) begin
           oc_out <= '0;
           st_frames <= st_frames + 16'd1;
         end else oc_out <= oc_out + 15'd1;
@@ -690,11 +709,11 @@ def make_carrier2():
     end""", """      if ((!m_valid || m_ready) && of_cnt != 0 && stale) of_rp <= of_rp + 6'd1;   // dropped
       else if ((!m_valid || m_ready) && of_cnt != 0) begin
         m_valid <= 1'b1;
-        {m_slot, m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]][16:0];
+        {m_slot, m_llr_z, m_llr_q, m_llr_i} <= ofifo[of_rp[4:0]][24:0];
         m_first <= (oc_out[hd] == 0);
-        m_last  <= (oc_out[hd] == 15'd32399);
+        m_last  <= (oc_out[hd] == owords_s[hd] - 15'd1);
         of_rp <= of_rp + 6'd1;
-        if (oc_out[hd] == 15'd32399) begin
+        if (oc_out[hd] == owords_s[hd] - 15'd1) begin
           oc_out[hd] <= '0;
           st_frames[hd] <= st_frames[hd] + 16'd1;
         end else oc_out[hd] <= oc_out[hd] + 15'd1;
@@ -705,10 +724,16 @@ def make_carrier2():
         st_frames[k] <= '0;
       end
     end""")
-    s.rep("""      l1_v    <= lp_v;""", """      l1_v    <= lp_v;
-      l1_tag  <= lp_tag;
+    s.rep("""      la_v    <= lp_v;""", """      la_v    <= lp_v;
+      la_tag  <= lp_tag;
+      lb_tag  <= la_tag;
+      lc_tag  <= lb_tag;
+      l1_tag  <= lc_tag;
       of_tag  <= l1_tag;
-      l1_ep   <= lp_ep;
+      la_ep   <= lp_ep;
+      lb_ep   <= la_ep;
+      lc_ep   <= lb_ep;
+      l1_ep   <= lc_ep;
       of_ep   <= l1_ep;""")
     s.rep("  assign snap_q = lp_q;", "  assign snap_q = lp_q;\n  assign snap_slot = lp_tag;\n"
           "  // (lp_* are written by the FSM in the clock it runs for cur)\n"
@@ -751,6 +776,7 @@ def make_carrier2():
 """ + "\n".join(stat) + """
   assign modcod   = modcod2[cur];
   assign pilots   = pilots2[cur];
+  assign short_fr = short_fr2[cur];
   assign gold_xa  = gold_xa2[cur];
   assign gold_xb  = gold_xb2[cur];
   assign pll_kp   = pll_kp2[cur];

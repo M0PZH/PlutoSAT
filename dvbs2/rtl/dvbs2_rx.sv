@@ -1,12 +1,12 @@
-// DVB-S2 receiver core, QPSK normal frames, two receive slots
+// DVB-S2 receiver core, QPSK and 8PSK, normal and short frames, two receive slots
 // (docs/rx2_design.md): per slot 2 samples/symbol in, BBFRAMEs of both
 // slots out on one stream, each tagged with its slot.
 //
 //   slot s samples -> FIFO s (512) -> dvbs2_rx_timing2 -> dvbs2_rx_framesync2
-//   -> dvbs2_rx_carrier2 (64800 LLRs per data frame, tagged with the slot)
+//   -> dvbs2_rx_carrier2 (Nldpc LLRs per data frame, tagged with the slot)
 //   -> dvbs2_rx_llrq (DDR frame queue, m_axi) -> dvbs2_ldpc_dec -> dvbs2_bch_dec
 //   -> BBFRAME bytes (Kbch/8 per frame, BB-descrambled), m_slot / m_modcod /
-//   m_pilots: the frame's own; m_ok: BCH codeword (after <= t corrections),
+//   m_pilots, m_rate ({short, rate_idx}): the frame's own; m_ok: BCH codeword (after <= t corrections),
 //   m_ldpc_ok: LDPC converged
 //
 // The timing, frame-sync and carrier engines serve both slots (one context
@@ -57,6 +57,7 @@ module dvbs2_rx #(
   input  logic signed [31:0] timing_integ0 [2],   // timing loop integrator at reset
   input  logic [4:0]         modcod [2],
   input  logic [1:0]         pilots,
+  input  logic [1:0]         short_fr,     // short FECFRAMEs
   input  logic [31:0]        fs_thresh [2],
   input  logic [17:0]        gold_xa [2],
   input  logic [17:0]        gold_xb [2],
@@ -223,7 +224,7 @@ module dvbs2_rx #(
   end
 
   dvbs2_rx_framesync2 u_fs (
-    .clk, .rst, .rst_s, .modcod2(modcod), .pilots2(pilots), .thresh2(fs_thresh),
+    .clk, .rst, .rst_s, .modcod2(modcod), .pilots2(pilots), .short_fr2(short_fr), .thresh2(fs_thresh),
     .s_valid2(t_valid), .s_ready2(t_ready), .s_i2(t_i), .s_q2(t_q),
     .m_valid(y_valid), .m_ready(y_ready), .m_i(y_i), .m_q(y_q), .m_sof(y_sof), .m_dummy(y_dummy),
     .m_found(y_found), .m_slot(y_slot), .ty_v2, .ty_dummy,
@@ -234,7 +235,7 @@ module dvbs2_rx #(
   logic [1:0]         c_in_valid, c_in_ready, c_acquired;
   logic signed [15:0] y_i2 [2], y_q2 [2];
   logic               l_valid, l_ready, l_first, l_last, l_slot;
-  logic [7:0]         l_i, l_q;
+  logic [7:0]         l_i, l_q, l_z;
 
   assign y_i2[0] = y_i; assign y_i2[1] = y_i;
   assign y_q2[0] = y_q; assign y_q2[1] = y_q;
@@ -242,12 +243,12 @@ module dvbs2_rx #(
   assign y_ready = c_in_ready[y_slot];
 
   dvbs2_rx_carrier2 #(.LUT_FILE(LUT_FILE)) u_carrier (
-    .clk, .rst, .rst_s, .modcod2(modcod), .pilots2(pilots), .gold_xa2(gold_xa), .gold_xb2(gold_xb),
+    .clk, .rst, .rst_s, .modcod2(modcod), .pilots2(pilots), .short_fr2(short_fr), .gold_xa2(gold_xa), .gold_xb2(gold_xb),
     .pll_kp2(pll_kp), .pll_ki2(pll_ki),
     .s_valid2(c_in_valid), .s_ready2(c_in_ready), .s_i2(y_i2), .s_q2(y_q2),
     .s_sof2({2{y_sof}}), .s_dummy2({2{y_dummy}}), .s_found2({2{y_found}}),
     .ty_v2, .ty_dummy,
-    .m_valid(l_valid), .m_ready(l_ready), .m_llr_i(l_i), .m_llr_q(l_q), .m_first(l_first), .m_last(l_last),
+    .m_valid(l_valid), .m_ready(l_ready), .m_llr_i(l_i), .m_llr_q(l_q), .m_llr_z(l_z), .m_first(l_first), .m_last(l_last),
     .m_slot(l_slot),
     .st_freq2(st_freq), .st_amp2(st_amp), .st_energy2(st_energy), .st_gain2(st_gain), .st_frames2(st_frames),
     .st_acq2(st_acq), .st_fa2(st_fa), .st_retype2(st_retype), .st_acquired2(c_acquired),
@@ -256,7 +257,8 @@ module dvbs2_rx #(
   // ---------------------------------------------------------------- PLS decoders, one per slot
   for (genvar s = 0; s < 2; s++) begin : g_pls
     dvbs2_rx_pls u_pls (
-      .clk, .rst(srst[s]), .modcod(modcod[s]), .pilots(pilots[s]), .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
+      .clk, .rst(srst[s]), .modcod(modcod[s]), .pilots(pilots[s]), .short_fr(short_fr[s]),
+      .cfg_h(pls_h[s]), .cfg_step(pls_step[s]),
       .s_v(y_valid && y_ready && y_slot == s[0]), .s_i(y_i), .s_q(y_q), .s_sof(y_sof),
       .fhat(st_freq[s]), .acquired(c_acquired[s]), .seen_clr(pls_seen_clr[s]),
       .res_v(st_pls_v[s]), .res_code(st_pls_code[s]), .res_conf(st_pls_flags[s][0]),
@@ -294,7 +296,7 @@ module dvbs2_rx #(
     .max_it0(ldpc_max_it[0]), .max_it1(ldpc_max_it[1]), .qhi(llrq_qhi), .it_lo(llrq_it_lo),
     .clr_dropped(rst_s),
     .s_valid(l_valid && llrq_en), .s_ready(q_ready), .s_llr_i(l_i), .s_llr_q(l_q), .s_first(l_first),
-    .s_llr_z(8'd0), .s_short(1'b0),
+    .s_llr_z(l_z), .s_short(short_fr[l_slot]),
     .s_slot(l_slot), .s_modcod(modcod[l_slot]), .s_pilots(pilots[l_slot]), .s_epoch(epoch[l_slot]),
     .m_valid(d_valid), .m_ready(d_ready), .m_llr_i(d_i), .m_llr_q(d_q), .m_first(d_first),
     .m_rate(d_rate), .m_max_it(d_max_it), .m_slot(d_slot), .m_modcod(d_modcod), .m_pilots(d_pilots), .m_short(), .m_epoch(d_epoch),

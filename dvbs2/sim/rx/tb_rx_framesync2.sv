@@ -15,7 +15,7 @@ module tb_rx_framesync2;
 
   logic [1:0] rst_s = 0;
   logic [4:0] modcod2 [2];
-  logic [1:0] pilots2;
+  logic [1:0] pilots2, short_fr2;
   logic [31:0] thresh2 [2];
   logic [1:0] s_valid2 = 0, s_ready2;
   logic signed [15:0] s_i2 [2], s_q2 [2];
@@ -42,6 +42,7 @@ module tb_rx_framesync2;
       nm = $sformatf("out%0d=%%s", s);    if (!$value$plusargs(nm, fout[s])) $fatal(1, "+out");
       nm = $sformatf("modcod%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 4; modcod2[s] = 5'(tmp);
       nm = $sformatf("pilots%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 1; pilots2[s] = tmp[0];
+      nm = $sformatf("short%0d=%%d", s);  if (!$value$plusargs(nm, tmp)) tmp = 0; short_fr2[s] = tmp[0];
       nm = $sformatf("thresh%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 0; thresh2[s] = 32'(tmp);
       nm = $sformatf("stall%0d=%%d", s);  if (!$value$plusargs(nm, stall[s])) stall[s] = 0;
       nm = $sformatf("plsbusy%0d=%%d", s); if (!$value$plusargs(nm, pls_clk[s])) pls_clk[s] = 0;

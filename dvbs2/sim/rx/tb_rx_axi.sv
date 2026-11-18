@@ -4,7 +4,7 @@
 // registers of both slot banks and the shared bank ("aaa vvvvvvvv").
 //   +in= +out= +regs= +adcdiv= +stall= +hold=
 //   slot s = 0, 1 runs with +en<s>=1 (default: slot 0 only), registers of its bank:
-//     +ddccoef<s>= +rrccoef<s>= (files) +modcod<s>= +pilots<s>= +xa<s>= +xb<s>= +finc<s>=
+//     +ddccoef<s>= +rrccoef<s>= (files) +modcod<s>= +pilots<s>= +short<s>= +xa<s>= +xb<s>= +finc<s>=
 //     +dec<s>= +ntaps<s>= +shift<s>= +cicr<s>= +cicshift<s>= +tkp<s>= +tki<s>= +tinteg0<s>=
 //     +thresh<s>= +pkp<s>= +pki<s>= +maxit<s>= +plscfg<s>= (PLS_CFG, 0: default)
 //     +rst<s>at=<n>: soft reset of the slot (its CTRL = 2, then 1) after n ADC samples
@@ -109,7 +109,7 @@ module tb_rx_axi;
     logic [9:0] b;
     string nm;
     b = 10'(s * 'h100);
-    axi_write(b + 10'h14, sarg("modcod", s, 4) | (sarg("pilots", s, 1) << 8));
+    axi_write(b + 10'h14, sarg("modcod", s, 4) | (sarg("pilots", s, 1) << 8) | (sarg("short", s, 0) << 9));
     axi_write(b + 10'h18, sarg("xa", s, 1));
     axi_write(b + 10'h1C, sarg("xb", s, 0));
     nm = $sformatf("finc%0d=%%d", s);

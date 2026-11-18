@@ -811,7 +811,7 @@ def rx_axi_exe():
 AXI_SLOT_ARGS = {"ddccoef", "rrccoef", "modcod", "pilots", "xa", "xb", "finc", "dec", "ntaps", "shift", "cicr",
                  "cicshift", "tkp", "tki", "tinteg0", "thresh", "pkp", "pki", "maxit", "plscfg"}
 SLOT_BANK = 0x100                       # register map v2: slot s at 0x100 s, shared at 0x200
-VERSION = 0x0002_0000
+VERSION = 0x0002_0100
 
 
 def axi_args(slot, **kw):

@@ -2,7 +2,8 @@
 // two slots from their own files.
 //   +in0= +in1=   "iiii qqqq sof dummy found"
 //   +out0= +out1= "ll qq first last"; a line "reset" where the slot was reset
-//   +modcod0= +pilots0= +xa0= +xb0= +kp0= +ki0= (and slot 1)
+//   +modcod0= +pilots0= +short0= +xa0= +xb0= +kp0= +ki0= (and slot 1)
+//   +wz: also write the third LLR (8PSK): "ll qq first last zz"
 //   +stall0= +stall1= percent of idle input cycles per slot; +ostall= output
 //   +rst<s>at=<n>  reset slot s after n of its symbols; its input starts again
 // At the end, per slot: "slot s: .. frames .. freq .. amp .. energy .. gain .. acq .. fa .. retype .."
@@ -13,14 +14,14 @@ module tb_rx_carrier2;
 
   logic [1:0] rst_s = 0;
   logic [4:0] modcod2 [2];
-  logic [1:0] pilots2;
+  logic [1:0] pilots2, short_fr2;
   logic [17:0] gold_xa2 [2], gold_xb2 [2], pll_kp2 [2], pll_ki2 [2];
   logic [1:0] s_valid2 = 0, s_ready2, s_sof2, s_dummy2, s_found2;
   logic signed [15:0] s_i2 [2], s_q2 [2];
   logic [1:0] ty_v2;
   logic ty_dummy;
   logic m_valid, m_ready = 0, m_first, m_last, m_slot;
-  logic [7:0] m_llr_i, m_llr_q;
+  logic [7:0] m_llr_i, m_llr_q, m_llr_z;
   logic [31:0] st_freq2 [2], st_amp2 [2];
   logic [35:0] st_energy2 [2];
   logic [17:0] st_gain2 [2];
@@ -32,6 +33,7 @@ module tb_rx_carrier2;
   dvbs2_rx_carrier2 #(.LUT_FILE("../../rtl/gen/nco_lut.mem")) dut (.*);
 
   string fin [2], fout [2], nm;
+  int wz;
   int fi [2], fo [2], stall [2], ostall, n_in [2], n_out [2], rst_at [2], rst_cnt [2], rc, tmp, a, b, c, cyc = 0;
   logic [15:0] vi, vq;
   logic [1:0] eof = 0;
@@ -42,6 +44,7 @@ module tb_rx_carrier2;
       nm = $sformatf("out%0d=%%s", s);    if (!$value$plusargs(nm, fout[s])) $fatal(1, "+out");
       nm = $sformatf("modcod%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 4; modcod2[s] = 5'(tmp);
       nm = $sformatf("pilots%0d=%%d", s); if (!$value$plusargs(nm, tmp)) tmp = 1; pilots2[s] = tmp[0];
+      nm = $sformatf("short%0d=%%d", s);  if (!$value$plusargs(nm, tmp)) tmp = 0; short_fr2[s] = tmp[0];
       nm = $sformatf("xa%0d=%%d", s);     if (!$value$plusargs(nm, tmp)) tmp = 1; gold_xa2[s] = 18'(tmp);
       nm = $sformatf("xb%0d=%%d", s);     if (!$value$plusargs(nm, tmp)) tmp = 0; gold_xb2[s] = 18'(tmp);
       nm = $sformatf("kp%0d=%%d", s);     if (!$value$plusargs(nm, tmp)) tmp = 0; pll_kp2[s] = 18'(tmp);
@@ -53,6 +56,7 @@ module tb_rx_carrier2;
       n_in[s] = 0; n_out[s] = 0; rst_cnt[s] = 0;
     end
     if (!$value$plusargs("ostall=%d", ostall)) ostall = 0;
+    wz = $test$plusargs("wz");
     repeat (4) @(posedge clk);
     rst <= 0;
   end
@@ -90,7 +94,8 @@ module tb_rx_carrier2;
     if (dut.stale && dut.of_cnt != 0 && (!m_valid || m_ready)) dropped++;
     m_ready <= ($urandom % 100) >= ostall;
     if (m_valid && m_ready) begin
-      $fdisplay(fo[m_slot], "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
+      if (wz) $fdisplay(fo[m_slot], "%02h %02h %0d %0d %02h", m_llr_i, m_llr_q, m_first, m_last, m_llr_z);
+      else    $fdisplay(fo[m_slot], "%02h %02h %0d %0d", m_llr_i, m_llr_q, m_first, m_last);
       n_out[m_slot]++;
       idle = 0;
     end else idle++;

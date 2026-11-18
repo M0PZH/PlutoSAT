@@ -10,12 +10,14 @@
 #                -a, RX gain -G (default AGC). Without a cable it relies on
 #                coupling between the ports / antennas: it transmits.
 #
-# usage: dvbs2-selftest [-L digital|rf] [-s SYMRATE] [-m MODCOD] [-p]
+# usage: dvbs2-selftest [-L digital|rf] [-s SYMRATE] [-m MODCOD] [-p] [-S]
 #                       [-e "ESN0 ..."] [-t SEC] [-w SEC] [-o NCO_HZ] [-r ROLLOFF]
 #                       [-f LO_HZ] [-d RX_LO_OFFSET_HZ] [-a TX_ATTEN_DB] [-G RX_GAIN_DB]
 #   -s  symbol rate (default 1000000): 12 MS/s / an integer that both
 #       dvbs2-tx and dvbs2-rx support (to 100 ppm: 33333 = 12e6 / 360); down to
 #       33.33 kS/s through the TX and RX CICs
+#   -m  qpsk1/4 .. qpsk9/10, 8psk3/5 .. 8psk9/10 (8PSK: TX core >= 1.2, RX >= 2.1;
+#       set -e to its thresholds, e.g. "off 8 7 6" for 8psk3/5); -S short FECFRAMEs
 #   -e  Es/N0 points in dB, "off" for no added noise (default "off 1 0 -1 -2")
 #   -t  counting time per point (default 10 s, at least 20 frames), -w warm-up
 #       (default 3 s, at least 8 frames + 1 s: the receiver needs ~7 frames to
@@ -27,19 +29,20 @@
 # Prints per point: Es/N0 set, packets ok / bad / lost, packet error rate, and
 # the receiver's last status line.
 
-L=digital SR=1000000 MC=qpsk1/4 P= ES="off 1 0 -1 -2" T= W= NCO=0 RO=0.35
+L=digital SR=1000000 MC=qpsk1/4 P= SHT= SHR= ES="off 1 0 -1 -2" T= W= NCO=0 RO=0.35
 LO=2400250000 DLO=0 ATT=40 GAIN=
 FS=12000000
 
 die() { echo "dvbs2-selftest: $*" >&2; exit 1; }
-usage() { sed -n '2,26s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+usage() { sed -n '2,28s/^# \{0,1\}//p' "$0" >&2; exit 2; }
 
-while getopts "L:s:m:pe:t:w:o:f:d:a:G:r:h" o; do
+while getopts "L:s:m:pSe:t:w:o:f:d:a:G:r:h" o; do
 	case $o in
 	L) L=$OPTARG ;;
 	s) SR=$OPTARG ;;
 	m) MC=$OPTARG ;;
 	p) P=-p ;;
+	S) SHT=-S SHR=--short ;;
 	e) ES=$OPTARG ;;
 	t) T=$OPTARG ;;
 	w) W=$OPTARG ;;
@@ -103,15 +106,15 @@ if [ $L = rf ]; then
 else
 	echo "digital loopback (AD9363 data port TX1 -> RX1)"
 fi
-echo "$MC${P:+ pilots}, $SR S/s, roll-off $RO, fs $FS, TX NCO offset $NCO Hz, $T s per point"
+echo "$MC${P:+ pilots}${SHR:+ short}, $SR S/s, roll-off $RO, fs $FS, TX NCO offset $NCO Hz, $T s per point"
 
 # configure the AD9363 receive side once, then the transmitter for the whole run
-dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $RXOPT -q -O /dev/null 2>/dev/null &
+dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $SHR $RXOPT -q -O /dev/null 2>/dev/null &
 pid=$!
 sleep 1
 kill $pid 2>/dev/null
 wait $pid 2>/dev/null
-ts-prbs gen | dvbs2-tx -F $FS -s $SR -m $MC -r $RO $P -o $NCO $TXOPT -i - 2>"$TMP/tx.log" &
+ts-prbs gen | dvbs2-tx -F $FS -s $SR -m $MC -r $RO $P $SHT -o $NCO $TXOPT -i - 2>"$TMP/tx.log" &
 TXPID=$!
 sleep 1
 kill -0 $TXPID 2>/dev/null || { cat "$TMP/tx.log"; cleanup; die "dvbs2-tx failed"; }
@@ -131,7 +134,7 @@ for e in $ES; do
 	mkfifo "$TMP/ts"
 	ts-prbs check -t $T -w $W < "$TMP/ts" > "$TMP/res" &
 	ck=$!
-	dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $RXOPT -O "$TMP/ts" 2>"$TMP/rx.log" &
+	dvbs2-rx -F $FS -s $SR -m $MC -r $RO $P $SHR $RXOPT -O "$TMP/ts" 2>"$TMP/rx.log" &
 	rx=$!
 	sleep 1
 	loopback                                 # (re)asserted after the receiver's setup

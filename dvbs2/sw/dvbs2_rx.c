@@ -140,6 +140,7 @@
 #define VERSION_PLS 0x00010200   /* first core version with the PLS decoder */
 #define VERSION_LLRQ 0x00010500  /* first core version with the DDR LLR queue */
 #define VERSION_V2   0x00020000  /* two receive slots, register map v2 */
+#define VERSION_8PSK 0x00020100  /* 8PSK (MODCOD 12..17) and short FECFRAMEs */
 /* map v2: slot s's bank at 0x100 s (the 1.x map for the slot: the R_ offsets
  * above), shared registers at 0x200 (the LLR queue's at 0x2E0.., 1.5: 0xE0..) */
 #define SLOT_BANK       0x100
@@ -488,11 +489,6 @@ static int dma_submit(unsigned slot, struct xfer *x)
 }
 
 /* ---------------------------------------------------------------- main */
-static const char *modcods[11] = {
-	"qpsk1/4", "qpsk1/3", "qpsk2/5", "qpsk1/2", "qpsk3/5", "qpsk2/3",
-	"qpsk3/4", "qpsk4/5", "qpsk5/6", "qpsk8/9", "qpsk9/10",
-};
-
 /* all 32 MODCODs (PLS decoder): 0 dummy, 29..31 reserved */
 static const char *pls_names[32] = {
 	"dummy", "qpsk1/4", "qpsk1/3", "qpsk2/5", "qpsk1/2", "qpsk3/5", "qpsk2/3", "qpsk3/4",
@@ -509,7 +505,7 @@ static int llrq;                    /* the LLR queue in use: --llr-queue (1.5), 
 struct rxslot {
 	int used;                       /* configured on the command line (or slot 0 by default) */
 	double sr, rolloff, offset, fs;
-	int rate_idx, pilots, dec, ddc_gain, max_it, pls_h, constel_raw;
+	int modcod, short_fr, pilots, dec, ddc_gain, max_it, pls_h, constel_raw;
 	uint32_t gold;
 	const char *udp, *output, *constel;
 	struct ddc_cfg dc;
@@ -529,7 +525,8 @@ static void usage(const char *p)
 		"  Slot options (for the slot of the last --slot, slot 0 before any):\n"
 		"  -s, --sym-rate S/s   symbol rate (default 500000)\n"
 		"  -d, --decim N        ADC samples per 2 symbols instead (ADC rate 2 x sym-rate x N)\n"
-		"  -m, --modcod M       qpsk1/4 .. qpsk9/10 (default qpsk1/2)\n"
+		"  -m, --modcod M       qpsk1/4 .. qpsk9/10, 8psk3/5 .. 8psk9/10 (default qpsk1/2)\n"
+		"      --short          short FECFRAMEs (16200 bits; no 9/10; core >= 2.1)\n"
 		"  -p, --pilots         frames have pilots\n"
 		"  -r, --rolloff R      0.35, 0.25 or 0.20 (default 0.35)\n"
 		"  -g, --gold N         PL scrambling Gold code (default 0)\n"
@@ -583,8 +580,8 @@ static void status_str(int s, struct rxslot *x, unsigned long ts_pkts, int lng, 
 		if (p & PLS_VALID)
 			snprintf(pls, sizeof(pls), ", PLS %s%s%s%s", pls_names[p & 31], (p >> 8) & 1 ? " pilots" : "",
 				 (p >> 9) & 1 ? " short" : "",
-				 ((p & 31) != (uint32_t)x->rate_idx + 1 || ((p >> 8) & 1) != (uint32_t)x->pilots ||
-				  ((p >> 9) & 1)) ? "!" : "");
+				 ((p & 31) != (uint32_t)x->modcod || ((p >> 8) & 1) != (uint32_t)x->pilots ||
+				  ((p >> 9) & 1) != (uint32_t)x->short_fr) ? "!" : "");
 		else
 			snprintf(pls, sizeof(pls), ", PLS -");
 	}
@@ -607,17 +604,18 @@ static void status_str(int s, struct rxslot *x, unsigned long ts_pkts, int lng, 
 	double ber_post = nb > 0 ? (uint32_t)(bch - x->bch0) / nb : NAN;
 	x->raw0 = raw; x->bits0 = bits; x->bch0 = bch;
 	if (lng)
-		snprintf(buf, n, "%s %s, %+.0f Hz, Es/N0 %.1f dB, BER %.2e (after LDPC %.1e), AGC %.2f, frames %u (LDPC failed %u, BCH corrected %u failed %u, dropped %u), "
+		snprintf(buf, n, "%s%s %s, %+.0f Hz, Es/N0 %.1f dB, BER %.2e (after LDPC %.1e), AGC %.2f, frames %u (LDPC failed %u, BCH corrected %u failed %u, dropped %u), "
 			 "TS %lu (CRC %lu, bad %lu), fs %u/%u/%u, acq %u fa %u retype %u, ovf %u%s%s   ",
-			 modcods[x->rate_idx], st[srd(s, R_FS_STATE) & 3], f, snr, ber_pre, ber_post,
-			 srd(s, R_AGC_GAIN) / 4096.0, srd(s, R_LDPC_FRAMES), srd(s, R_LDPC_FAILED),
+			 dvbs2_modcod_name(x->modcod), x->short_fr ? " short" : "", st[srd(s, R_FS_STATE) & 3], f, snr,
+			 ber_pre, ber_post, srd(s, R_AGC_GAIN) / 4096.0, srd(s, R_LDPC_FRAMES), srd(s, R_LDPC_FAILED),
 			 srd(s, R_BCH) & 0xFFFF, srd(s, R_BCH) >> 16, srd(s, R_PKT_DROPPED),
 			 ts_pkts, x->d.crc_errors, x->bad, srd(s, R_FS_FOUND), srd(s, R_FS_FLYWHEEL),
 			 srd(s, R_FS_LOST), srd(s, R_CARRIER_ACQ) & 0xFFFF, srd(s, R_CARRIER_ACQ) >> 16,
 			 srd(s, R_CARRIER_RETYPE), srd(s, R_IN_OVF) + srd(s, R_DDC_DROPPED), pls, lq);
 	else
-		snprintf(buf, n, "[%d] %s %s %+.0f Hz %.1f dB BER %.1e/%.0e fr %u/%u/%u/%u TS %lu (CRC %lu bad %lu) ovf %u%s%s",
-			 s, modcods[x->rate_idx], st[srd(s, R_FS_STATE) & 3], f, snr, ber_pre, ber_post,
+		snprintf(buf, n, "[%d] %s%s %s %+.0f Hz %.1f dB BER %.1e/%.0e fr %u/%u/%u/%u TS %lu (CRC %lu bad %lu) ovf %u%s%s",
+			 s, dvbs2_modcod_name(x->modcod), x->short_fr ? "s" : "", st[srd(s, R_FS_STATE) & 3], f, snr,
+			 ber_pre, ber_post,
 			 srd(s, R_LDPC_FRAMES), srd(s, R_LDPC_FAILED), srd(s, R_BCH) >> 16, srd(s, R_PKT_DROPPED),
 			 ts_pkts, x->d.crc_errors, x->bad, srd(s, R_IN_OVF) + srd(s, R_DDC_DROPPED), pls, lq);
 }
@@ -625,10 +623,11 @@ static void status_str(int s, struct rxslot *x, unsigned long ts_pkts, int lng, 
 /* --detect. The PLS decoder decodes every header the frame sync tags, but
  * the frame sync needs the right pilots (they set the frame length, and its
  * correlation with the headers of the other pilots is weak); with the right
- * pilots it finds the headers of any QPSK MODCOD. So the core is configured
+ * pilots it finds the headers of any MODCOD. So the core is configured
  * to a hypothesis and then to what the decodes say:
- *  - a confident decode of a QPSK normal-frame data header other than the
- *    configured MODCOD/pilots (the first one since the core was configured,
+ *  - a confident decode of a data header the core can receive (QPSK; 8PSK
+ *    and short frames from core 2.1) other than the configured
+ *    MODCOD/pilots/frame size (the first one since the core was configured,
  *    or the same one twice in a row): configure the core to it;
  *  - `count` equal confident decodes of the configured one in a row: detected
  *    (with the right configuration the frame sync tracks the real headers,
@@ -636,15 +635,18 @@ static void status_str(int s, struct rxslot *x, unsigned long ts_pkts, int lng, 
  *    do not get that far);
  *  - no decode of the configured one for `dwell` (10 frames, >= 0.5 s): the
  *    other pilots;
- *  - codes the receiver cannot demodulate (8PSK.., short frames) are reported
- *    after 2 x count equal decodes in a row.
+ *  - codes the receiver cannot demodulate (16APSK.., or 8PSK and short
+ *    frames on an older core) are reported after 2 x count equal decodes in
+ *    a row.
  * stdout: "MODCOD name pilots short offset_hz".
  * configure(): the slot's soft reset (on a 1.x core: the core's). */
-static void configure(int s, int modcod, int pilots)
+static int has_8psk;                /* core version >= VERSION_8PSK */
+
+static void configure(int s, int modcod, int pilots, int short_fr)
 {
 	swr(s, R_CTRL, CTRL_RESET);
 	usleep(10);
-	swr(s, R_MODCOD, (uint32_t)modcod | ((uint32_t)pilots << 8));
+	swr(s, R_MODCOD, (uint32_t)modcod | ((uint32_t)pilots << 8) | ((uint32_t)short_fr << 9));
 	swr(s, R_CTRL, CTRL_RESET);
 	usleep(10);
 	swr(s, R_CTRL, CTRL_ENABLE);
@@ -657,7 +659,8 @@ static double since(const struct timespec *t)
 	return (now.tv_sec - t->tv_sec) + (now.tv_nsec - t->tv_nsec) * 1e-9;
 }
 
-static int detect(int s, double sr, double offset, int modcod, int pilots, int count, double timeout)
+static int detect(int s, double sr, double offset, int modcod, int pilots, int short_fr, int count,
+		  double timeout)
 {
 	double dwell = fmax(0.5, 10 * 33282 / sr);
 	uint32_t n0 = srd(s, R_PLS_DATA) >> 16, last = 0xFFFF;
@@ -675,7 +678,7 @@ static int detect(int s, double sr, double offset, int modcod, int pilots, int c
 			unsigned mc = c & 31, pc = (c >> 8) & 1, sh = (c >> 9) & 1;
 			rep = c == last ? rep + 1 : 1;
 			last = c;
-			int cfg = mc == (unsigned)modcod && pc == (unsigned)pilots && !sh;
+			int cfg = mc == (unsigned)modcod && pc == (unsigned)pilots && sh == (unsigned)short_fr;
 			n = cfg ? n + 1 : 0;
 			fprintf(stderr, "PLS %s%s%s (%d)\n", pls_names[mc], pc ? " pilots" : "", sh ? " short" : "",
 				cfg ? n : rep);
@@ -684,12 +687,14 @@ static int detect(int s, double sr, double offset, int modcod, int pilots, int c
 				clock_gettime(CLOCK_MONOTONIC, &tc);
 				if (n >= count)
 					break;
-			} else if (mc >= 1 && mc <= 11 && !sh) {
+			} else if (has_8psk ? dvbs2_modcod_valid((int)mc, (int)sh) : (mc >= 1 && mc <= 11 && !sh)) {
 				if (!matched || rep >= 2) {
 					modcod = mc;
 					pilots = pc;
-					fprintf(stderr, "dvbs2-rx: trying %s%s\n", pls_names[modcod], pilots ? " pilots" : "");
-					configure(s, modcod, pilots);
+					short_fr = sh;
+					fprintf(stderr, "dvbs2-rx: trying %s%s%s\n", pls_names[modcod], pilots ? " pilots" : "",
+						short_fr ? " short" : "");
+					configure(s, modcod, pilots, short_fr);
 					n0 = srd(s, R_PLS_DATA) >> 16;
 					n = rep = matched = 0;
 					last = 0xFFFF;
@@ -706,8 +711,9 @@ static int detect(int s, double sr, double offset, int modcod, int pilots, int c
 			break;
 		if (since(&tc) > dwell) {
 			pilots ^= 1;
-			fprintf(stderr, "dvbs2-rx: trying %s%s\n", pls_names[modcod], pilots ? " pilots" : "");
-			configure(s, modcod, pilots);
+			fprintf(stderr, "dvbs2-rx: trying %s%s%s\n", pls_names[modcod], pilots ? " pilots" : "",
+				short_fr ? " short" : "");
+			configure(s, modcod, pilots, short_fr);
 			n0 = srd(s, R_PLS_DATA) >> 16;
 			n = rep = matched = 0;
 			last = 0xFFFF;
@@ -730,7 +736,7 @@ static int detect(int s, double sr, double offset, int modcod, int pilots, int c
 	int32_t fr = (l & PLS_CARRIER) ? (int32_t)srd(s, R_FREQ) : (int32_t)srd(s, R_PLS_FREQ);
 	double off = (l & PLS_CONF) ? offset + fr / 4294967296.0 * sr : offset;
 	fprintf(stderr, "dvbs2-rx: detected %s%s%s, signal at %+.0f Hz from the LO (%.1f s)\n", pls_names[code & 31],
-		(code >> 8) & 1 ? " pilots" : "", (code >> 9) & 1 ? " short frames (not supported)" : "", off,
+		(code >> 8) & 1 ? " pilots" : "", (code >> 9) & 1 ? (has_8psk ? " short" : " short frames (not supported)") : "", off,
 		since(&t0));
 	printf("%u %s %u %u %.0f\n", code & 31, pls_names[code & 31], (code >> 8) & 1, (code >> 9) & 1, off);
 	return 0;
@@ -823,11 +829,16 @@ static int slot_rates(struct rxslot *x, double adc_rate, int adc_set)
 	return 0;
 }
 
-/* LDPC clocks per iteration per code rate (q x S sub-steps of 2 deg + 14,
- * dvbs2_ldpc_dec.sv) and the PLFRAME length in symbols */
-static const unsigned ldpc_clk_it[11] = { 59400, 57600, 56160, 50400, 51840, 40800, 37800, 36000, 34800, 27200,
-					  26640 };
-static const unsigned kldpc[11] = { 16200, 21600, 25920, 32400, 38880, 43200, 48600, 51840, 54000, 57600, 58320 };
+/* LDPC clocks per iteration per code (q x S sub-steps of 2 deg + 14,
+ * dvbs2_ldpc_dec.sv; short codes: the padded degree), normal and short */
+static const unsigned ldpc_clk_it[2][11] = {
+	{ 59400, 57600, 56160, 50400, 51840, 40800, 37800, 36000, 34800, 27200, 26640 },
+	{ 15840, 14400, 14040, 14000, 12960, 10200, 9600, 8000, 8320, 6800, 6800 },
+};
+static const unsigned kldpc[2][11] = {
+	{ 16200, 21600, 25920, 32400, 38880, 43200, 48600, 51840, 54000, 57600, 58320 },
+	{ 3240, 5400, 6480, 7200, 9720, 10800, 11880, 12600, 13320, 14400, 14400 },
+};
 
 /* docs/rx2_design.md 6.2: the iterations per frame the decoder can give every
  * frame of the slots in use (95 % of the clock, per-frame overhead
@@ -839,9 +850,11 @@ static int it_budget(const struct rxslot *sl)
 		if (!sl[s].used)
 			continue;
 		const struct rxslot *x = &sl[s];
-		double fps = x->sr / (x->pilots ? 33282.0 : 32490.0);
-		fps_ovh += fps * (kldpc[x->rate_idx] / 8.0 + dvbs2_kbch_bytes(x->rate_idx) * 2.0 + 500);
-		fps_clk += fps * ldpc_clk_it[x->rate_idx];
+		int r = dvbs2_modcod_rate(x->modcod), sh = x->short_fr;
+		double fps = x->sr / dvbs2_plframe_symbols(x->modcod, x->pilots, sh);
+		/* (the BCH decoder's Chien search: 8 positions a clock, short frames 1) */
+		fps_ovh += fps * (kldpc[sh][r] / (sh ? 1.0 : 8.0) + dvbs2_kbch_bytes_x(r, sh) * 2.0 + 500);
+		fps_clk += fps * ldpc_clk_it[sh][r];
 	}
 	double it = (0.95 * CORE_CLK - fps_ovh) / fps_clk;
 	return it >= 63 ? 63 : it < 1 ? 1 : (int)it;
@@ -851,7 +864,7 @@ static int it_budget(const struct rxslot *sl)
 static void slot_load(int s, struct rxslot *x)
 {
 	const struct ddc_cfg *dc = &x->dc;
-	swr(s, R_MODCOD, (x->rate_idx + 1) | (x->pilots << 8));
+	swr(s, R_MODCOD, (uint32_t)x->modcod | (uint32_t)x->pilots << 8 | (uint32_t)x->short_fr << 9);
 	swr(s, R_GOLD_XA, gold_x(x->gold));
 	swr(s, R_GOLD_XB, gold_x(x->gold + 131072));
 	swr(s, R_DDC_FINC, (uint32_t)(int64_t)llround(-x->offset / x->fs * 4294967296.0));
@@ -915,7 +928,7 @@ int main(int argc, char **argv)
 
 	for (int s = 0; s < 2; s++) {
 		struct rxslot *x = &sl[s];
-		x->sr = 500e3; x->rolloff = 0.35; x->rate_idx = 3; x->ddc_gain = 4; x->max_it = 30;
+		x->sr = 500e3; x->rolloff = 0.35; x->modcod = 4; x->ddc_gain = 4; x->max_it = 30;
 		x->pls_h = -1; x->udp = "127.0.0.1:1234";
 	}
 
@@ -928,6 +941,7 @@ int main(int argc, char **argv)
 		{ "dump-coefs", 0, 0, 1 }, { "constellation", 1, 0, 'C' }, { "constellation-raw", 0, 0, 2 },
 		{ "adc-rate", 1, 0, 'F' }, { "detect", 0, 0, 3 }, { "detect-count", 1, 0, 4 },
 		{ "detect-timeout", 1, 0, 5 }, { "pls-grid", 1, 0, 6 }, { "llr-queue", 0, 0, 7 },
+		{ "short", 0, 0, 9 },
 		{ "slot", 1, 0, 8 },
 		{ 0, 0, 0, 0 },
 	};
@@ -938,13 +952,11 @@ int main(int argc, char **argv)
 		case 's': x->sr = atof(optarg); break;
 		case 'd': x->dec = atoi(optarg); break;
 		case 'm':
-			x->rate_idx = -1;
-			for (int k = 0; k < 11; k++)
-				if (!strcmp(optarg, modcods[k]))
-					x->rate_idx = k;
-			if (x->rate_idx < 0)
+			x->modcod = dvbs2_modcod_parse(optarg);
+			if (!x->modcod)
 				usage(argv[0]);
 			break;
+		case 9: x->short_fr = 1; break;
 		case 'p': x->pilots = 1; break;
 		case 'r': x->rolloff = atof(optarg); break;
 		case 'g': x->gold = strtoul(optarg, NULL, 0); break;
@@ -1065,6 +1077,20 @@ int main(int argc, char **argv)
 		}
 
 	has_pls = ver >= VERSION_PLS;
+	has_8psk = ver >= VERSION_8PSK;
+	for (int s = 0; s < 2; s++) {
+		if (!sl[s].used)
+			continue;
+		if (!dvbs2_modcod_valid(sl[s].modcod, sl[s].short_fr)) {
+			fprintf(stderr, "slot %d: %s has no short FECFRAME\n", s, dvbs2_modcod_name(sl[s].modcod));
+			return 2;
+		}
+		if ((dvbs2_modcod_psk8(sl[s].modcod) || sl[s].short_fr) && !has_8psk) {
+			fprintf(stderr, "slot %d: 8PSK and short FECFRAMEs need core version >= %08x (this one %08x)\n",
+				s, VERSION_8PSK, ver);
+			return 1;
+		}
+	}
 	if ((det || sl[0].pls_h >= 0 || sl[1].pls_h >= 0) && !has_pls) {
 		fprintf(stderr, "--detect / --pls-grid need the PLS decoder (core version %08x < %08x: old bitstream)\n",
 			ver, VERSION_PLS);
@@ -1160,7 +1186,7 @@ int main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 	if (det) {
 		struct rxslot *x = &sl[s0];
-		int r = detect(s0, x->sr, x->offset, x->rate_idx + 1, x->pilots, det_count, det_timeout);
+		int r = detect(s0, x->sr, x->offset, x->modcod, x->pilots, x->short_fr, det_count, det_timeout);
 		if (v2)
 			wr(regs, R_V2_CTRL, 0);
 		else
@@ -1176,9 +1202,10 @@ int main(int argc, char **argv)
 		if (ts_open(&x->out, x->output, x->udp, s == 1 && x->udp == sl[0].udp && nused == 2))
 			usage(argv[0]);
 		bbdeframer_init(&x->d);
-		fprintf(stderr, "dvbs2-rx%s: %s%s, %.0f S/s, ADC %.0f S/s (decimation %d = CIC %d x FIR %d, %d taps), "
+		fprintf(stderr, "dvbs2-rx%s: %s%s%s, %.0f S/s, ADC %.0f S/s (decimation %d = CIC %d x FIR %d, %d taps), "
 			"roll-off %.2f, Gold %u, offset %.0f Hz\n", nused == 2 ? (s ? " [1]" : " [0]") : "",
-			modcods[x->rate_idx], x->pilots ? " pilots" : "", x->sr, x->fs, x->dec, x->dc.R, x->dc.D,
+			dvbs2_modcod_name(x->modcod), x->pilots ? " pilots" : "", x->short_fr ? " short" : "", x->sr, x->fs,
+			x->dec, x->dc.R, x->dc.D,
 			x->dc.ntaps, x->rolloff, x->gold, x->offset);
 	}
 
@@ -1203,6 +1230,7 @@ int main(int argc, char **argv)
 			const volatile uint64_t *src = (const volatile uint64_t *)(dmabuf + q[qh].slot * PKT_BYTES);
 			uint64_t h = src[0];
 			unsigned len = h & 0xFFFF, cnt = (h >> 16) & 0xFFFF, mc = (h >> 32) & 0x1F;
+			int hs = (int)((h >> 38) & 1);   /* short FECFRAME (0 before core 2.1) */
 			int rs = (int)((h >> 55) & 1);   /* receive slot (0 on a 1.x core) */
 			unsigned nw = len + 8 <= PKT_BYTES ? (len + 8 + 7) / 8 : 1;
 			for (unsigned i = 0; i < nw; i++)
@@ -1212,7 +1240,8 @@ int main(int argc, char **argv)
 			struct rxslot *x = &sl[rs];
 			if (!x->used) {
 				stray++;
-			} else if ((h >> 56) != 0xB5 || mc < 1 || mc > 11 || len != dvbs2_kbch_bytes(mc - 1)) {
+			} else if ((h >> 56) != 0xB5 || !dvbs2_modcod_valid((int)mc, hs) ||
+				   len != dvbs2_kbch_bytes_x(dvbs2_modcod_rate((int)mc), hs)) {
 				/* (the frame's own MODCOD, as decoded: the length follows it) */
 				x->bad++;
 				bbdeframer_gap(&x->d);
