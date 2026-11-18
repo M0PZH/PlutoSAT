@@ -247,4 +247,13 @@ Not done / open:
   work); the 8PSK thresholds, phase noise without pilots and the TX clipping
   are model results only.
 * 1/1476 false-lock check for 8PSK normal frames (section 3.2).
+
+Later: detection (RX 2.1.3). The board showed that 8PSK and short frames
+were not identified with a QPSK normal-frame hypothesis (MODCOD auto,
+`--detect`): the frame sync's checks at the configured frame length tagged
+data, never a real header, and the PLS decodes of data passed the
+confidence test ~2 % of the time. The frame sync now probes its search
+peaks for the PLS decoder, and decodes of another code than the configured
+one need best > 3/64 of the window's energy. See the README, "MODCOD
+detection with another frame length".
 * The station (Rust) side: see the hand-back list.

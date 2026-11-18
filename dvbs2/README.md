@@ -191,7 +191,7 @@ ADC ─► DDC ─► timing ─► frame sync ─┬─► carrier + demap ─�
 | Block | Algorithm |
 | --- | --- |
 | `dvbs2_rx_timing` | 32-phase polyphase RRC matched filter (25 taps/phase, loadable), Gardner TED, PI loop; AGC on the filter output (target power 2^25) |
-| `dvbs2_rx_framesync` | differential correlation with the 89 header differentials of the data MODCOD and of the dummy header (any carrier offset); search: the largest metric, checked at the dummy length first and then at the data length, whichever candidate gave it (the type is unreliable at low SNR, and QPSK 1/4..2/5 headers are closer to the dummy header than to the QPSK 1/2 one); lock after 2 checks in a row (each > 4x, both together > 10x the mean metric, i.e. the noise level: at -2 dB a header is only ~8x, the largest noise metric of a frame ~7x); locked: +-2 symbol window, but the predicted position unless beaten 2:1, threshold max(register, 1/4 of the average peak), flywheel; the next header is predicted from the carrier's frame type, or from the PLS decode of the header (below); header confirmation: 3072 symbols after each tag the PLS decode of that header must be confident and the configured code or a dummy header, else CHECK -> SEARCH, LOCKED -> SEARCH after 3 such tags in a row; see [False lock on repeating frames](#false-lock-on-repeating-frames) |
+| `dvbs2_rx_framesync` | differential correlation with the 89 header differentials of the data MODCOD and of the dummy header (any carrier offset); search: the largest metric, checked at the dummy length first and then at the data length, whichever candidate gave it (the type is unreliable at low SNR, and QPSK 1/4..2/5 headers are closer to the dummy header than to the QPSK 1/2 one); lock after 2 checks in a row (each > 4x, both together > 10x the mean metric, i.e. the noise level: at -2 dB a header is only ~8x, the largest noise metric of a frame ~7x); locked: +-2 symbol window, but the predicted position unless beaten 2:1, threshold max(register, 1/4 of the average peak), flywheel; the next header is predicted from the carrier's frame type, or from the PLS decode of the header (below); header confirmation: 3072 symbols after each tag the PLS decode of that header must be confident and the configured code or a dummy header, else CHECK -> SEARCH, LOCKED -> SEARCH after 3 such tags in a row; see [False lock on repeating frames](#false-lock-on-repeating-frames); probes (2.1.3): in SEARCH each new search peak above 8x the mean metric is decoded by the PLS decoder too (status only) when no decode is pending, see [MODCOD detection with another frame length](#modcod-detection-with-another-frame-length) |
 | `dvbs2_rx_ddc` | NCO, optional 3-stage CIC (decimation R = 2..32), decimating FIR (decimation D = 1..63, up to 512 loadable taps, 2 taps per clock): ADC rate -> 2 samples/symbol, total decimation R x D; see [DDC](#ddc) |
 | `dvbs2_ldpc_dec` | layered offset min-sum (offset 1 LSB), 18 lanes over the 360x360 circulants, APP 9 bit, messages 6 bit; phase A reads a check's edges, phase B writes L += R_new - R_old (circulants of one column group sharing a layer, which the DVB-S2 tables have, update in turn); stops when an iteration has no unsatisfied check and no APP sign change; ping-pong APP memories; output the Kldpc hard decisions and the channel's hard decisions of the same bits |
 | `dvbs2_bch_dec` | GF(2^16), t = 12/10/8: odd syndromes 8 bits per clock while the frame comes in, simplified inversionless Berlekamp-Massey, Chien search 4 positions per clock writing the corrected, BB-descrambled bits back into the frame buffer; ok = deg Lambda roots found; counts the pre-FEC bit errors (channel decisions vs. decoder output) |
@@ -371,8 +371,12 @@ the rest of the receive path does not depend on it.
   grid frequency is reported too (PLS_FREQ, +-0.002 cycles/symbol).
 * Confident: best > 2 x the best metric of another code at the same
   frequency, and best > 2^8 (with the AGC a header at -3 dB Es/N0 gives >=
-  ~300, noise alone <= ~220). The counters and the seen mask take
-  confident decodes only.
+  ~300, noise alone <= ~220). From 2.1.3 a probe's decode, or a tag's
+  decode of a code other than the configured one and the dummy code, also
+  needs best > 3/64 of the window's energy (sum of the squared 6-bit
+  symbol values; see [MODCOD detection with another frame
+  length](#modcod-detection-with-another-frame-length)). The counters and
+  the seen mask take confident decodes only.
 * Error rate (`model/rxfixed.py` pls_decode(), random codes and phases,
   AWGN, 10^5 headers per point; "carrier": the carrier's frequency within
   ~2e-4 cycles/symbol and the configured code; "grid": not acquired, the
@@ -422,7 +426,11 @@ the rest of the receive path does not depend on it.
 * Resources (out of context, 100 MHz): 607 LUTs (50 of them distributed
   RAM: the 90 stored symbols and the 64 rotated ones), 828 FFs, 2 DSPs, no
   block RAM, WNS +3.6 ns. The status logic (counters, last decodes, seen
-  mask) is ~70 of the LUTs.
+  mask) is ~70 of the LUTs. From 2.1.3 (synthesis, opt_design): 604 LUTs,
+  846 FFs, 6 DSPs, a RAMB18 (was 637 LUTs, 829 FFs, 2 DSPs the same way):
+  the stored symbols and the rotation table moved into the block RAM (2
+  more clocks per hypothesis), the energy rule's squares, sum and
+  comparison are in the 4 new DSPs.
 * Tests (`sim/rx/test_rx.py`): `test_pls` (RTL = model on the model chain's
   carrier input: TX QPSK 3/4 pilots with the RX told QPSK 1/2 without
   pilots, a different MODCOD at 0.03 cycles/symbol without dummy frames,
@@ -714,6 +722,148 @@ steps; -2 dB seed 31, 1 step; before: no frame, the loop at -558e-6 and
 -311.9e-6 = -10 / 32490),
 `sim/rx/test_rx2.py` `test_carrier2` case `search` (the same in both slots
 of the shared engine).
+
+### MODCOD detection with another frame length
+
+Board finding with RX 2.1 .. 2.1.2 (pluto2, digital loopback, 1 MS/s,
+`plutosat rx --detect` from qpsk2/3, which MODCOD auto starts with too):
+QPSK signals were detected in 0.8 s, but 8PSK 2/3 short frames with pilots
+in 6 of 10 starts (0.3-14 s, 4 not within 25 s), 8PSK 3/5 with pilots in 3
+of 6, QPSK 1/2 short frames with pilots in 5 of 6 (0.75-16 s). With the
+right MODCOD configured they decoded at once. Polling the PLS registers
+with 8PSK 3/5 pilots sent and the slot told qpsk2/3 (pilots on, off) or
+8psk3/5 without pilots: the frame sync stayed in SEARCH, ~10 tags per
+second, about one in ten decoded "confidently" as a random code (8psk5/6,
+32apsk8/9, qpsk8/9, reserved29, ...) with metrics 160-320 and best/second
+1.5-2.5; a real header (metric 1990) once in 36 s.
+
+Cause (`model/plsdetect_experiment.py`: streams of one code through the
+channel or the board's ADC/DDC chain into the model configured to QPSK 2/3,
+every PLS decode with its ground truth):
+
+* The frame sync only tags CHECK windows, which it puts the configured frame
+  length (or the dummy length) after a search peak. With 8PSK or short
+  frames (21690 .. 5490 symbols) those land on data: the search peak (the
+  real header, with the configured pilots its correlation keeps 0.64..1 of
+  the amplitude for every QPSK and 8PSK code, 8PSK 8/9 and 9/10 ~0.3-0.4) is
+  never decoded, the data windows that pass a check by chance are. Model,
+  12 frames per start: no 8PSK or short-frame code decoded in any start
+  (before, 8 starts per case).
+* The PLS decoder's confidence test compares the best metric with the best
+  other code at the *same* frequency, but the best is the maximum over 65
+  frequencies: on data windows (QPSK and 8PSK, -2.4 .. 30 dB, 35k windows)
+  it passed 2.0 %.
+
+Fix (RX 2.1.3, VERSION 0x0002_0103; model `FS_PROBE_K`, `PLS_E_NUM` /
+`PLS_E_SH`):
+
+* Probes: in SEARCH each new search peak above 8 x the mean metric (from
+  symbol 96 on) is tagged for the PLS decoder only (m_probe: not for the carrier,
+  no state change; PLS_LAST / PLS_DATA bit 10 PROBE), when no tag's or
+  probe's decode is pending (3072 symbols, the frame sync waits for a slow
+  decode then, as for tags). The next tag is a check of that peak or of a
+  later one, >= 3328 symbols on, so every probe and tag is decoded (the
+  decoder is never busy at a tag; model and RTL stay bit exact). The
+  probe's decode is status only.
+* Energy rule: a probe's decode, or a tag's decode of a code other than the
+  configured one and the dummy code, is confident only if also best > 3/64
+  Er, Er = sum(ri^2 + rq^2) of the 90 stored 6-bit symbols (a ratio: it holds
+  while the AGC settles; the squares, their sum and the comparison are in 4
+  DSPs per PLS decoder, as LUTs are scarce). Data windows: best/Er below 0.035 in all 35k, 99.9 %
+  below 0.0285, the tail falling ~26 x per 0.005 (~1e-8 above 3/64); real
+  headers (QPSK 1/4 short pilots, 592 per point) below 3/64: 6.9 % at -3 dB,
+  1.4 % at -2.4 dB, 0.7 % at -2 dB, 0.2 % at -1 dB, none from 0 dB. Tag
+  decodes of the configured or dummy code keep the old rule, so QPSK
+  acquisition and the frame sync's PLS confirmation (false lock protection)
+  do not change.
+* Probe threshold 8 x the mean metric: 16 missed 8PSK 8/9 and 9/10 (their
+  headers are ~10-14 x the mean with a QPSK hypothesis), 4 probed data more
+  often (a probe blocks the next one for 3072 symbols) for no gain. Probing
+  every symbol above the threshold (not only new search peaks, when no check
+  is due within 3072 symbols) was not better either.
+* Also fixed: without the carrier's frequency the PLS grid was -(H+1), -H
+  .. H-2 (-H twice; H-1 and H missing) instead of -H .. H (the D_INIT step
+  went down once more); found by the probes' decodes, RTL = model again.
+
+Detection, model, QPSK 2/3 normal configured with the signal's pilots
+(MODCOD auto searches the pilots), random data frames only (no dummy
+frames), the receiver started at a random symbol, 12 frames per start
+(`plsdetect_experiment.py --table`; detected / starts, symbols from the
+start to the first confident decode of the true code, median / max;
+"false": confident decodes of another data code / all decodes):
+
+| MODCOD, frame | Es/N0 | before (AWGN, 8 starts per pilots setting) | 2.1.3 AWGN, 16 starts, pilots off / on | 2.1.3 ADC + DDC, 8 starts, off / on |
+| --- | --- | --- | --- | --- |
+| QPSK 1/4 normal | -2 dB | 8/8, 66k / 8/8, 192k | 16/16 46k / 16/16 77k | 8/8 57k / 8/8 100k |
+| QPSK 2/3 normal | 3.5 dB | 8/8, 57k / 8/8, 68k | 16/16 34k / 16/16 24k | 8/8 43k / 8/8 44k |
+| QPSK 9/10 normal | 7 dB | 8/8, 53k / 8/8, 68k | 16/16 32k / 16/16 34k | 8/8 43k / 8/8 48k |
+| QPSK 1/4 short | -2 dB | 0/8 / 0/8 | 16/16 14k / 15/16 17k | 8/8 58k / 8/8 48k (30 frames) |
+| QPSK 2/3 short | 3.5 dB | 0/8 / 0/8 | 16/16 13k / 16/16 13k | 8/8 43k / 8/8 46k |
+| QPSK 8/9 short | 7 dB | 0/8 / 0/8 | 16/16 13k / 16/16 20k | 8/8 39k / 8/8 40k |
+| 8PSK 3/5 normal | 6 dB | 0/8 / 0/8 | 16/16 22k / 16/16 23k | 8/8 53k / 8/8 61k |
+| 8PSK 2/3 normal | 7 dB | 0/8 / 0/8 | 16/16 26k / 16/16 20k | 8/8 50k / 8/8 51k |
+| 8PSK 9/10 normal | 11 dB | 0/8 / 0/8 | 16/16 26k / 16/16 35k | 8/8 50k / 8/8 51k |
+| 8PSK 3/5 short | 6 dB | 0/8 / 0/8 | 15/16 12k / 16/16 11k | 8/8 46k / 8/8 43k (30 frames) |
+| 8PSK 2/3 short | 7 dB | 0/8 / 0/8 | 15/16 11k / 15/16 9k | 8/8 40k / 8/8 43k (30 frames) |
+| 8PSK 8/9 short | 10.5 dB | 0/8 / 0/8 | 16/16 11k / 15/16 15k | 8/8 43k / 8/8 43k (30 frames) |
+| false confident | | 7 of 499 decodes | 0 of 5529 | 0 of 2387 (+ 0 of 1244) |
+
+The AWGN starts not detected within 12 short frames had no probe on a header
+in time (a data probe just before it).
+Through the ADC chain (the AGC settling from far above, as after every
+slot reset on the board) the first ~33k symbols are lost to the stale
+search peak of the transient (the existing frame sync behaviour: its data
+length check comes a QPSK normal frame later), so detection takes ~40-60k
+symbols, 40-60 ms at 1 MS/s, whatever the frame length.
+
+With the other pilots configured the frame sync's correlation keeps only the
+SOF (0.17-0.44 of the amplitude): with pilots off configured, no pilots-on
+signal except QPSK 2/3 (normal and short) is detected in 12 frames (as
+before); with pilots on configured every pilots-off signal is, except 8PSK
+8/9 short (0/8) and 9/10 (4/8), 8PSK 3/5 and 2/3 short 7/8. So MODCOD auto
+still alternates the pilots.
+
+Board (pluto2, 2026-11-18, digital loopback, `plutosat tx -i prbs` at 1
+MS/s, `plutosat rx --detect` from qpsk2/3 without pilots, timeout 10 s, 5
+starts per code; the station's detect logic unchanged): with 2.1.2, 8psk2/3
+short pilots 1/5, 8psk3/5 pilots 1/5, qpsk1/2 short pilots 3/5, qpsk3/4
+pilots 5/5 (0.8 s), 8psk9/10 1/5, qpsk1/4 short 1/5, the failed starts
+trying wrong hints (qpsk9/10, qpsk8/9 short, qpsk2/5, 8psk3/4, ...). With
+2.1.3 every start detected, each with only the true code as a hint:
+8psk2/3 short pilots 0.63-0.64 s, 8psk3/5 pilots 0.69-0.71 s, qpsk1/2 short
+pilots 0.13-0.15 s, qpsk3/4 pilots 0.24-0.30 s, 8psk9/10 0.21-0.23 s, qpsk1/4
+short 0.13-0.16 s, 8psk2/3 short 0.12-0.14 s, 8psk8/9 short pilots 0.62-0.70
+s, qpsk9/10 pilots 0.73-0.78 s, qpsk2/3 0.16-0.20 s, 8psk5/6 pilots 0.70-0.73
+s, qpsk1/4 pilots 0.24-0.31 s (60 of 60; the ~0.5 s more with pilots is the
+tool's first dwell on the wrong pilots). No regression with the right MODCOD
+(6 s each, fixed: 8psk2/3 short pilots, qpsk1/4, qpsk9/10 pilots, 8psk3/5
+pilots, qpsk2/3 short: every frame decoded but the first with pilots, which
+begins before the acquisition), and `dvbs2-selftest` (PL noise source, 6 s
+per point): qpsk1/4 at off / -1 / -2 dB with and without pilots, 8psk3/5
+pilots at off / 7 / 6 dB, 8psk2/3 short at off / 8 / 7 dB: PER 0 everywhere.
+
+Full build (Vivado 2026.1, master d296513 + this): 47697 LUT (89.7 %; master
+47753), slices 13300 of 13300, 137.5 of 140 BRAM tiles (+1: the PLS
+decoders' RAMB18s), 186 DSP (+8). The first version (energy rule in LUTs,
++260 LUT) and a second one (+84) did not place (8008 slices needed of 8001
+free); the block RAM version places. Timing: the project flow ended at WNS
+-0.118 ns, rx_clk (250 MHz), in rx_awgn's output saturation (ri -> out_i0
+reset; master +0.156 there): placement noise of a full device, not the RX
+(clk_fpga_0, the RX core: +0.152 ns). A re-placement (place_design
+AltSpreadLogic_high, phys_opt AggressiveExplore) gave WNS -0.005 ns on the
+same rx_awgn path, WHS +0.022 ns; that bitstream was used on the board. The
+rx_awgn path only matters while the noise source is on (a register in its
+saturation would close it).
+
+Tests: `model/test_model.py` `test_rx_detect_other_length` (ADC chain, 8PSK
+2/3 short pilots, 8PSK 3/5, QPSK 2/3 short, 8PSK 9/10 pilots, QPSK 1/4 short
+pilots at -2 dB: detected, no other code confident; without the probes:
+not detected) and `test_pls_energy_rule`; `sim/rx/test_rx_8psk.py`
+`test_core2_detect` (the whole two-slot core told QPSK 2/3: 8PSK 2/3 short
+pilots in slot 0, 8PSK 3/5 without pilots in slot 1, through the ADC chain;
+RTL = model including the probes' decodes, each slot's code confident from
+a probe, no other); `test_framesync*` compare the probes, `test_pls` the
+probe decodes and the energy rule, `test_rx_axi*` PLS_LAST / PLS_DATA.PROBE.
 
 ### DDC
 
