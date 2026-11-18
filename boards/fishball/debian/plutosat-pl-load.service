@@ -11,7 +11,10 @@ ConditionPathExists=/lib/firmware/plutosat.bit.bin
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/plutosat-pl-load
+# another image in /lib/firmware at boot (development): set
+# PLUTOSAT_BITSTREAM=plutosat-xyz.bit.bin in /etc/default/plutosat-pl-load
+EnvironmentFile=-/etc/default/plutosat-pl-load
+ExecStart=/usr/sbin/plutosat-pl-load $PLUTOSAT_BITSTREAM
 
 [Install]
 WantedBy=multi-user.target

@@ -63,7 +63,10 @@ only checks `/proc/device-tree`: the reserved memory, the UIO nodes,
 outside the bitstream's address map (IIO DMAs, `mwipcore`); it warns
 loudly when something is missing and changes nothing. It does not reload
 the PL: the new bitstream loads at the next boot, or now with
-`plutosat-pl-load`. It never touches the boot partition.
+`plutosat-pl-load`. A development image (another file in
+`/lib/firmware`) loads at boot instead with
+`PLUTOSAT_BITSTREAM=plutosat-xyz.bit.bin` in
+`/etc/default/plutosat-pl-load` (not a package file). It never touches the boot partition.
 
 **The C tools** are cross-built here with the host's
 `arm-linux-gnueabihf-gcc`, whose glibc (2.43) is newer than Debian 12's

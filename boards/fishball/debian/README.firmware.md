@@ -7,7 +7,7 @@ AD9363) running Debian 12:
 |---|---|
 | `/lib/firmware/plutosat.bit.bin` | the bitstream in FPGA-manager format |
 | `/usr/sbin/plutosat-pl-load [FILE]` | loads it (or `/lib/firmware/FILE`) at run time: unbinds the ADI drivers on the PL, programs it, binds them again; stops plutosatd around it |
-| `plutosat-pl-load.service` | runs `plutosat-pl-load` at every boot, before `plutosatd.service` |
+| `plutosat-pl-load.service` | runs `plutosat-pl-load` at every boot, before `plutosatd.service`; another image of `/lib/firmware` with `PLUTOSAT_BITSTREAM=FILE` in `/etc/default/plutosat-pl-load` (yours, not the package's) |
 | `/usr/share/plutosat-firmware/cores.txt` | the VERSION register of each core in this bitstream |
 | `/usr/share/plutosat-firmware/pl-axi.txt` | the bitstream's AXI address map (`BASE HIGH NAME`) |
 
