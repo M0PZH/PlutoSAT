@@ -102,6 +102,15 @@ ring writer's staging buffer), 22 DSP, WNS +1.86 ns (five channels, 2.0:
 2 DSP and a RAMB18; the shared comb 1.7k LUT, FIR 1.0k, ring writer 0.6k
 (its staging buffer in distributed RAM, as up to 2.0, cost 411 LUT more).
 
+Fishball full build (2026-11-18, master c966df4 with RX 2.1.1 + the
+slimmer BCH, RX 2.1.2; `DW` 64): nbiq 8009 LUT, 10346 FF, 2 RAMB36 + 14
+RAMB18, 22 DSP; the design 47753 LUT (89.8 %, slices 99.99 %), 136.5 of
+140 BRAM tiles, 178 DSP, WNS +0.116 ns, WHS +0.021 ns. It placed only
+with the BCH Chien search at 4 positions per clock (-1.1k LUT), the
+staging buffer in block RAM (-0.4k LUT) and the rx_awgn power meter's
+window end registered (its rx_clk paths at the 4 ns constraint failed by
+up to 0.75 ns otherwise).
+
 ## Files
 
 - `model/nbiq.py`: bit-exact model (vectorized, plus the scalar reference),
