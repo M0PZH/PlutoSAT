@@ -15,8 +15,8 @@
  *   -a AMP         tone amplitude, 0..1 of full scale (default 0.5)
  *   -g GAIN_DB     digital gain in dB (default 0; at most +12)
  *   -R RLOG        start/stop ramp of 2^RLOG input samples (default 8)
- *   -n SECONDS     stop after this long (default: at the end of the file,
- *                  or at Ctrl-C)
+ *   -n SECONDS     tones: stop after this long (default: at Ctrl-C); a
+ *                  file plays to its end (or Ctrl-C)
  *   -q             no status line
  *   -s             print the registers and exit
  *
@@ -330,26 +330,37 @@ int main(int argc, char **argv)
 	target &= ~63u;
 	double ph1 = 0, ph2 = 0, d1 = 2 * M_PI * f1 / fs_in, d2 = 2 * M_PI * f2 / fs_in;
 	double a = amp * 32767 / (ntone == 2 ? 2 : 1);
-	uint64_t total = secs > 0 ? (uint64_t)(secs * fs_in) : UINT64_MAX, made = 0;
-	int eof = 0, started = 0;
+	uint64_t total = secs > 0 ? (uint64_t)(secs * fs_in) : UINT64_MAX;
+	/* a file is followed by zeros, so that the ramp-down (and the up to 64
+	 * samples the core holds) fall after its end; a tone is cut by the
+	 * ramp-down after "total" samples */
+	int64_t pad = 0;                         /* zeros still to write after the file */
+	int ended = 0, done = 0, started = 0;
 	double t_stat = now();
 
-	while (!stop && !(eof && (uint32_t)(rd(R_RPTR) - wptr) == 0)) {
-		uint32_t fill = wptr - rd(R_RPTR);
+	while (!stop) {
+		uint32_t rptr = rd(R_RPTR);
+		if (done && rptr == wptr)
+			break;
+		if (!in && started && rd(R_SAMPLES) >= total)
+			break;
+		uint32_t fill = wptr - rptr;
 		/* refill in blocks of 16 samples (64 bytes, the core's burst) */
-		while (!eof && fill + 64 <= target) {
+		while (!done && fill + 64 <= target) {
 			uint32_t w = (wptr / 4) & (ring_words - 1);
 			for (int k = 0; k < 16; k++) {
 				int16_t si = 0, sq = 0;
-				if (made >= total || eof) {
-					eof = 1;
+				if (ended) {
+					pad--;
 				} else if (in) {
-					int16_t s[2];
-					if (fread(s, sizeof(s), 1, in) == 1) {
-						si = s[0];
-						sq = s[1];
-					} else
-						eof = 1;
+					int16_t smp[2];
+					if (fread(smp, sizeof(smp), 1, in) == 1) {
+						si = smp[0];
+						sq = smp[1];
+					} else {
+						ended = 1;
+						pad = (1 << rlog) + 64 - 1;
+					}
 				} else {
 					double x = a * cos(ph1) + (ntone == 2 ? a * cos(ph2) : 0);
 					double y = a * sin(ph1) + (ntone == 2 ? a * sin(ph2) : 0);
@@ -358,12 +369,12 @@ int main(int argc, char **argv)
 					ph1 = fmod(ph1 + d1, 2 * M_PI);
 					ph2 = fmod(ph2 + d2, 2 * M_PI);
 				}
-				if (!eof)
-					made++;
 				ring[(w + k) & (ring_words - 1)] = (uint16_t)si | (uint32_t)(uint16_t)sq << 16;
 			}
 			wptr += 64;
 			fill += 64;
+			if (ended && pad <= 0)
+				done = 1;
 		}
 		__sync_synchronize();
 		wr(R_WPTR, wptr);
