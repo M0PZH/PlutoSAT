@@ -29,11 +29,14 @@
 //     its xe half (128.5 - P_c) T_c clocks after xo[m]. Safe when
 //     S <= (128 - P_c) T_c (the remaining T_c / 2 >= 16 clocks cover the
 //     pipeline).
-// With the driver's per-channel share fout (npairs + 1) <= 0.9 clk / k
-// (k channels in use) both hold for every rate mix (at most 27 entries).
+// The driver (model/nbiq.py allocate()) gives the k channels in use the
+// same P_c = P with sum_c (P + 1) / T_c <= 0.9, so the FIFO needs at most
+// k + 0.9 ((k - 1) P + 2) / (P + 1) < 2 k <= 16 entries; it lowers P until
+// fir_check() also passes the sample-buffer bound (which only binds above
+// about 110 pairs).
 
 module nbiq_fir #(
-  parameter int NCH = 5
+  parameter int NCH = 8                     // <= 8 (3-bit channel numbers)
 ) (
   input  logic               clk,
   input  logic [NCH-1:0]     en,

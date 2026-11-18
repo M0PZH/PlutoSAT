@@ -1,7 +1,7 @@
 """Narrowband IQ channels: bit-exact model of rtl/nbiq_*.sv, and the filter
 design used by the driver (sw/nbiq.c does the same in C).
 
-Per channel (5 channels, any of the two AD9363 receive channels):
+Per channel (8 channels, any of the two AD9363 receive channels):
 
   NCO / mixer   y[n] = x[n] * exp(-j theta[n]),  theta[n] = n * finc / 2^32 * 2 pi
                 (frequency +finc/2^32 * fs moves to DC). 4096-step phase
@@ -21,8 +21,11 @@ Output rate fs / (2 R): 1 MSPS at R = 6, 500 kSPS at R = 12 and 48 kSPS at
 R = 125 for 12 MSPS.
 
 FIR engine (rtl/nbiq_fir.sv): one tap pair per clock, jobs oldest first. The
-driver gives each of the k channels in use npairs_for(fout, 0.9 clk / k) and
-checks fir_check() (the bounds in the header of nbiq_fir.sv).
+driver gives every channel in use the same number of tap pairs, as many as
+the engine takes: allocate() (the rule, with fir_check(), the bounds in the
+header of nbiq_fir.sv). FIR_NEED pairs reach the filter's alias rejection
+over 80 % of the band (about 60 dB, alias_rejection()); more pairs widen
+the protected part of the band (53 dB over 90 % from about 45 pairs).
 The k-th output sample of a channel is y[m], m = k + npairs - 1, the CIC
 output index n of x[n] corresponds to ADC sample T0 + R n + R - 1 (T0: the
 ADC sample counter when the channel was enabled).
@@ -31,7 +34,7 @@ import math
 
 import numpy as np
 
-NCH = 5
+NCH = 8
 LUT_N = 1024                 # quarter-wave entries
 LUT_AMP = 32767
 MIX_SH = 13
@@ -44,7 +47,8 @@ FIR_JQ = 32                  # job FIFO entries
 ACC_W = 48
 CLK_HZ = 100e6
 FIR_LOAD = 0.9 * CLK_HZ      # FIR engine clocks per second, all channels
-FIR_BUDGET = FIR_LOAD / NCH  # per channel when all channels are in use
+FIR_BUDGET = FIR_LOAD / NCH  # per channel when all channels run at one rate
+FIR_NEED = 22                # pairs for the full alias rejection over 80 % of the band
 
 
 def lut():
@@ -216,6 +220,50 @@ def npairs_for(fout, budget=FIR_BUDGET):
     return int(max(1, min(NPAIRS_MAX, math.floor(budget / fout + 1e-9) - 1)))
 
 
+def allocate(fouts, clk=CLK_HZ):
+    """The FIR tap pairs of the channels in use (output rates fouts, in
+    channel order): every channel gets the same number P, the largest the
+    engine takes, at most NPAIRS_MAX:
+
+        P = min(127, floor(0.9 clk / sum(fouts) + 1e-9) - 1)
+        while P > 1 and not fir_check(fouts, [P] * k): P -= 1
+
+    (only the sample-buffer bound can fail after the load bound, and only
+    for P above about 110). Filter quality depends on P alone, not on the
+    rate, so this gives every channel the same alias rejection; a channel's
+    cost is fout (P + 1) clocks per second, so the wide channels take most
+    of the engine. P >= FIR_NEED: the full rejection over 80 % of the band
+    on every channel. Raises ValueError if even P = 1 does not fit."""
+    if not fouts:
+        return []
+    k = len(fouts)
+    p = max(1, min(NPAIRS_MAX, math.floor(FIR_LOAD / CLK_HZ * clk / sum(fouts) + 1e-9) - 1))
+    while p > 1 and not fir_check(fouts, [p] * k, clk)[2]:
+        p -= 1
+    if not fir_check(fouts, [p] * k, clk)[2]:
+        raise ValueError(f"FIR engine: the rates {list(fouts)} do not fit")
+    return [p] * k
+
+
+def alias_rejection(cfg, frac, ng=101):
+    """Alias rejection in dB of a design (cfg from design()) over the part
+    frac of the output band: the largest response, relative to DC, of any
+    input frequency (ADC band, CIC and FIR) that folds onto |f| <= frac
+    fout / 2, other than the channel itself."""
+    R = cfg["R"]
+    h = np.asarray(cfg["h"], float)
+    n = np.arange(len(h))
+
+    def resp(u):                         # u: frequency / fout
+        fc = np.asarray(u, float) / 2    # cycles per CIC output sample
+        return cic_resp(fc, R) * np.abs(np.exp(-2j * np.pi * np.outer(fc, n)) @ h)
+
+    g = np.linspace(-frac / 2, frac / 2, ng)
+    u = np.concatenate([g + k for k in range(-2 * R + 1, 2 * R) if k != 0])
+    u = u[np.abs(u) <= R]
+    return -20 * math.log10(resp(u).max() / resp([0.0])[0])
+
+
 def fir_check(fouts, npairs, clk=CLK_HZ):
     """The FIR engine bounds (header of rtl/nbiq_fir.sv) for the channels
     in use: (load, FIFO entries needed, ok). load = sum fout (npairs + 1) /
@@ -234,8 +282,10 @@ def design(fs, rate, gain=8.0, npairs=None, atten=70.0, budget=FIR_BUDGET):
     ADC LSB (12-bit full scale 2048 -> 16384 for gain 8). Returns a cfg
     dict without finc. Filter: CIC-compensated Kaiser-windowed lowpass,
     cutoff at fout/2 (the alias-protected band shrinks with fewer taps).
-    budget: FIR engine clocks per second for this channel (FIR_LOAD / the
-    number of channels in use)."""
+    npairs: the tap pairs (the driver's allocate()); without it, as many as
+    budget allows: FIR engine clocks per second for this channel (default
+    FIR_LOAD / NCH, all channels in use at this rate, which is allocate()
+    for NCH channels of one rate)."""
     R = int(round(fs / (2 * rate)))
     if not R_MIN <= R <= R_MAX or abs(fs / (2 * R) - rate) > 1e-6 * rate:
         raise ValueError(f"rate {rate} is not fs/(2R) with R in {R_MIN}..{R_MAX}")
@@ -272,6 +322,28 @@ def write_lut(path=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("".join(f"{v:04x}\n" for v in _S))
+
+
+def plan_table(plans, fs=12e6):
+    """Markdown table of allocate() for channel plans (lists of rates): taps,
+    engine load and alias rejection at 70 / 80 / 90 % of the band."""
+    rows = ["| channels in use | taps | load | 70 % | 80 % | 90 % |", "|---|---|---|---|---|---|"]
+    for rates in plans:
+        fouts = [fs / (2 * round(fs / (2 * r))) for r in rates]
+        npairs = allocate(fouts)
+        load = fir_check(fouts, npairs)[0]
+        names, rej = [], {}
+        for r in rates:
+            if r not in rej:
+                d = design(fs, r, npairs=npairs[0])
+                rej[r] = [alias_rejection(d, f) for f in (0.7, 0.8, 0.9)]
+        for r in dict.fromkeys(rates):
+            n = rates.count(r)
+            names.append(f"{n} x {r / 1e3:g} k" if n > 1 else f"{r / 1e3:g} k")
+        worst = [min(v[i] for v in rej.values()) for i in range(3)]
+        rows.append(f"| {' + '.join(names)} | {2 * npairs[0]} | {100 * load:.0f} % | "
+                    + " | ".join(f"{w:.0f} dB" for w in worst) + " |")
+    return "\n".join(rows)
 
 
 if __name__ == "__main__":

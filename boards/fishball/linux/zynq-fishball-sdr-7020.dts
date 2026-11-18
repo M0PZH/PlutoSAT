@@ -210,7 +210,7 @@
 		interrupts = <0 53 IRQ_TYPE_LEVEL_HIGH>;
 	};
 
-	/* narrowband IQ channels (nbiq/): registers and the rings (ch0..3 512 KB each, ch4 2 MB) */
+	/* narrowband IQ channels (nbiq/): registers and the rings (nbiq 2.1: ch0..3 and ch5..7 256 KB each, ch4 2 MB at +1 MB) */
 	nbiq@7c520000 {
 		compatible = "generic-uio";
 		reg = <0x7c520000 0x10000>,     /* nbiq registers */

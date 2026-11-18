@@ -13,7 +13,7 @@
 //   0x004 ID          "FFTS" (0x46465453)
 //   0x008 CTRL        [0] RUN: averages back to back, [1] IRQ_EN,
 //                     [2] STREAM: send each result on m_axis,
-//                     [5:4] SRC (0 rx0, 1 rx1, 2 nbiq), [10:8] NB_CH (0..4),
+//                     [5:4] SRC (0 rx0, 1 rx1, 2 nbiq), [10:8] NB_CH (0..7),
 //                     [13:12] LEN: N = 4096 >> LEN (0 4096, 1 2048, 2 1024, 3 512)
 //   0x00C CMD         (wo) [0] START: clear DONE, start one average if idle;
 //                     [1] ABORT: reset the FFT and the sequencer, clear DONE;

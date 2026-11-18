@@ -137,7 +137,7 @@ doc = "Control; SRC, NB_CH and LEN are taken when an average starts"
   [[reg.field]]
   name = "NB_CH"
   bits = [8, 10]
-  doc = "nbiq channel (tap_ch) when SRC = NBIQ, 0..4"
+  doc = "nbiq channel (tap_ch) when SRC = NBIQ, 0..7"
   [[reg.field]]
   name = "LEN"
   bits = [12, 13]

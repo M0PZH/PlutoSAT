@@ -143,9 +143,11 @@ def check_tap(c, k0, ri, rq, mi, mq):
     assert np.array_equal(ti[k0:n], ri) and np.array_equal(tq[k0:n], rq), f"ch{c} tap / ring"
 
 
-def designs(rates):
-    """The driver's designs: each of the k channels in use gets 0.9 clk / k."""
-    return [nb.design(FS, r, budget=nb.FIR_LOAD / len(rates)) for r in rates]
+def designs(rates, fs=FS):
+    """The driver's designs: allocate() (the same tap pairs for every
+    channel in use, as many as the FIR engine takes)."""
+    fouts = [fs / (2 * round(fs / (2 * r))) for r in rates]
+    return [nb.design(fs, r, npairs=p) for r, p in zip(rates, nb.allocate(fouts))]
 
 
 CHANNELS = [  # (source, offset Hz, rate, ring bytes): the station's plan
@@ -153,29 +155,34 @@ CHANNELS = [  # (source, offset Hz, rate, ring bytes): the station's plan
     (1, 30e3, 48e3, 65536),
     (0, 4.1e6, 48e3, 65536),
     (1, 180e3, 48e3, 65536),
-    (1, 0.0, 500e3, 16384),             # overview of the transponder, wraps
+    (1, 0.0, 600e3, 16384),             # overview of the transponder, wraps
+    (1, 95e3, 48e3, 65536),             # background: FT8, recorder, beacon
+    (0, -3.3e6, 48e3, 65536),
+    (1, -120e3, 48e3, 65536),
 ]
 
 
 @pytest.mark.parametrize("stall", [0, 40])
 def test_channels(exe, tmp_path, stall):
-    """Four 48 kHz channels (R 125) and a 500 kHz overview (R 12), staggered
-    enables while samples flow: bit exact, tap = ring = model."""
+    """Seven 48 kHz channels (R 125) and a 600 kHz overview (R 10) on
+    channel 4, staggered enables while samples flow, rings not aligned to
+    their size: bit exact, tap = ring = model."""
     nadc = 120000
     adc = adc_signal(nadc, seed=stall + 1)
     cmd = Cmd()
     cmd.w(0x0C, 20000)                       # 200 us interrupt period
     cmd.w(0x08, 1)
     cfgs = designs([r for _, _, r, _ in CHANNELS])
-    assert [d["R"] for d in cfgs] == [125] * 4 + [12]
+    assert [d["R"] for d in cfgs] == [125] * 4 + [10] + [125] * 3
+    assert [d["npairs"] for d in cfgs] == [95] * 8
     load, jq, ok = nb.fir_check([d["fout"] for d in cfgs], [d["npairs"] for d in cfgs])
-    assert ok and abs(load - 0.426) < 0.01 and jq <= 8, (load, jq)
+    assert ok and abs(load - 0.899) < 0.005 and jq <= 16, (load, jq)
     bases = []
     base = 0x1000_0000
     for c, (src, foff, rate, size) in enumerate(CHANNELS):
         cfgs[c]["finc"] = nb.finc_for(foff, FS)
-        bases.append(base)
-        cmd.config(c, cfgs[c], src, base, size)
+        bases.append(base + 0x3040 * c)      # 64-byte aligned only (2.1: base + offset)
+        cmd.config(c, cfgs[c], src, bases[c], size)
         base += 0x10_0000
     cmd.adc(nadc)
     for c, (src, *_rest) in enumerate(CHANNELS):    # staggered enables while samples flow
@@ -183,7 +190,7 @@ def test_channels(exe, tmp_path, stall):
         cmd.enable(c, src)
     cmd.end()
     cmd.r(0x10)
-    for c in range(5):
+    for c in range(nb.NCH):
         cmd.readback(c)
     regs, mem = run(exe, tmp_path, cmd, adc, stall)
     assert regs[0][1] & 1, "interrupt status not set"
@@ -204,38 +211,38 @@ def test_channels(exe, tmp_path, stall):
 
 
 def test_registers(exe, tmp_path):
-    """ID, VERSION, INFO; the fifth channel's registers; addresses past the
+    """ID, VERSION, INFO; every channel's registers; addresses past the
     channels and the coefficient windows change nothing."""
     cmd = Cmd()
     for a in (0x000, 0x004, 0x01C):
         cmd.r(a)
-    for c in range(5):
+    for c in range(nb.NCH):
         a = CH_BASE + 0x40 * c
         cmd.w(a + 0x04, 0x1111_0000 + c)
         cmd.w(a + 0x08, 128 - c | (29 - c) << 8)
         cmd.w(a + 0x0C, 127 - c | (40 + c) << 8)
         cmd.w(a + 0x10, 0x2000_0000 + c * 0x1000)
         cmd.w(a + 0x14, 0xFFF + c * 0x1000)
-    for a in (0x240, 0x244, 0x248, 0x24C, 0x2C4, 0x3C4, 0x0404, 0x1104, 0x3400, 0x4104, 0x8104):
+    for a in (0x300, 0x304, 0x308, 0x30C, 0x3C4, 0x0404, 0x1104, 0x4104, 0x4400, 0x8104):
         cmd.w(a, 0xDEAD_BEEF)                # no channel there
-    for c in range(5):
+    for c in range(nb.NCH):
         a = CH_BASE + 0x40 * c
         for o in (0x00, 0x04, 0x08, 0x0C, 0x10, 0x14):
             cmd.r(a + o)
-    cmd.r(0x240)
+    cmd.r(0x300)
     cmd.r(0x0104 + 0x400)
     cmd.adc(10)
     regs, _ = run(exe, tmp_path, cmd, adc_signal(10, 0))
     v = [d for _, d in regs]
-    assert v[:3] == [0x0002_0000, 0x4E42_4951, 0x0080_7F05], [hex(x) for x in v[:3]]
-    for c in range(5):
+    assert v[:3] == [0x0002_0100, 0x4E42_4951, 0x0080_7F08], [hex(x) for x in v[:3]]
+    for c in range(nb.NCH):
         assert v[3 + 6 * c: 9 + 6 * c] == [0, 0x1111_0000 + c, 128 - c | (29 - c) << 8,
                                            127 - c | (40 + c) << 8, 0x2000_0000 + c * 0x1000,
                                            0xFFF + c * 0x1000], c
-    assert v[33:] == [0, 0]
+    assert v[3 + 6 * nb.NCH:] == [0, 0]
 
 
-@pytest.mark.parametrize("c", [2, 4])
+@pytest.mark.parametrize("c", [2, 7])
 def test_reenable(exe, tmp_path, c):
     """Disable and re-enable a channel with another configuration while
     samples flow (another channel keeps the FIR busy). The ring holds the
@@ -243,11 +250,12 @@ def test_reenable(exe, tmp_path, c):
     nadc = 60000
     adc = adc_signal(nadc, seed=7)
     cmd = Cmd()
-    a, b, o = (nb.design(FS, r, budget=nb.FIR_LOAD / 2) for r in (1e6, 200e3, 1e6))   # two in use
+    a, o = designs((1e6, 1e6))               # two in use
+    b = designs((200e3, 1e6))[0]
     a["finc"] = nb.finc_for(2e6, FS)
     b["finc"] = nb.finc_for(-1e6, FS)
     o["finc"] = nb.finc_for(-3e6, FS)
-    other = 1 if c == 4 else 3
+    other = 1 if c == 7 else 3
     cmd.config(c, a, 0, 0x2000_0000, 1 << 20)
     cmd.config(other, o, 0, 0x3000_0000, 1 << 20)
     cmd.adc(nadc)
@@ -285,11 +293,18 @@ def test_reenable(exe, tmp_path, c):
 
 # ---------------------------------------------------------------- model only
 
+def next_to_users(rate):
+    """The design for a channel at rate next to seven 48 kHz channels."""
+    fo = FS / (2 * round(FS / (2 * rate)))
+    return nb.design(FS, rate, npairs=nb.allocate([fo] + [48e3] * 7)[0])
+
+
 @pytest.mark.parametrize("rate", [1e6, 500e3, 250e3, 100e3, 48e3, FS / 256])
 def test_tone(rate):
     """A tone at offset + df comes out at df with the designed gain (8) and
-    the image / spurs well below it."""
-    cfg = nb.design(FS, rate)
+    the image / spurs well below it (the channel next to seven 48 kHz
+    channels)."""
+    cfg = next_to_users(rate)
     foff, amp = 1.234e6, 1000.0
     df = round(0.21 * 4096) / 4096 * cfg["fout"]       # on an FFT bin
     n = int(4096 * FS / rate) + 2 * cfg["R"] * (cfg["npairs"] + 60)
@@ -311,7 +326,7 @@ def test_tone(rate):
 def test_alias(rate):
     """A strong tone outside the channel that folds onto 0.3 fout is
     rejected by at least 60 dB (80 % of the band is alias-protected)."""
-    cfg = nb.design(FS, rate)
+    cfg = next_to_users(rate)
     fo = cfg["fout"]
     worst = -200
     for k in (1, -1, 2, -2, 3):
@@ -346,7 +361,8 @@ def test_model_vectorized(R):
 
 
 def test_c_design():
-    """sw/nbiq.c designs the same filters as model/nbiq.py (taps within 1 LSB)."""
+    """sw/nbiq.c designs the same filters as model/nbiq.py (taps within 1 LSB)
+    and allocates the same tap pairs."""
     sw = os.path.join(HERE, "..", "sw")
     os.makedirs(BUILD, exist_ok=True)
     tool = os.path.join(BUILD, "nbiq-host")         # not in sw/: that is the package source
@@ -360,22 +376,34 @@ def test_c_design():
         assert [int(hdr[i]) for i in (1, 3, 5, 7)] == [d["R"], d["cshift"], d["npairs"], d["oshift"]], R
         h = np.array([int(v) for v in out[1:] if v])
         assert np.abs(h - np.array(d["h"])).max() <= 1, R
+    # the FIR allocation (nbiq -P): the same as allocate() / fir_check()
+    rng = np.random.default_rng(3)
+    plans = [[48e3] * 7 + [600e3], [600e3, 48e3], [FS / 4] * 8, [1e6] * 5]
+    plans += [list(FS / (2 * rng.integers(2, 129, rng.integers(1, nb.NCH + 1)))) for _ in range(300)]
+    for rates in plans:
+        out = subprocess.run([tool, "-P", ",".join(f"{r:.6f}" for r in rates)], check=True,
+                             capture_output=True, text=True).stdout.split()
+        fo = [FS / (2 * round(FS / (2 * r))) for r in rates]
+        npairs = nb.allocate(fo)
+        load, jq, _ = nb.fir_check(fo, npairs)
+        assert (int(out[1]), int(out[5])) == (npairs[0], jq) and abs(float(out[3]) - load) < 1e-6, rates
 
 
 LOADS = [  # rates of the channels in use (0.., in order)
-    (1e6,) * 5,                              # 90 % load, short jobs
-    (1e6, FS / 86, FS / 86, FS / 86, FS / 86),   # 1 MSPS next to four 127-pair jobs
-    (FS / 4, FS / 4, FS / 86, FS / 86, FS / 86),  # the deepest FIFO (3 MSPS, R 2)
-    (FS / 256, FS / 250, FS / 256, 3e6 / 2, FS / 24),  # R 128, 125, 128, 4, 12
-    (1e6, 1e6, 1e6, 1e6),                    # four in use: 0.9 clk / 4 each
-    (FS / 2 / 3, 600e3, 120e3, 1e6),
+    (1e6,) * 8,                              # 88 % load, 10-pair jobs
+    (FS / 4,) * 8,                           # 3 MSPS (R 2) everywhere: 2-pair jobs
+    (FS / 4,) + (48e3,) * 7,                 # 3 MSPS next to seven 25-pair jobs
+    (600e3, 48e3),                           # the sample-buffer bound lowers 127 to 126 pairs
+    (FS / 256, FS / 250, FS / 256, 3e6 / 2, FS / 24, 48e3, 1e6, FS / 4),  # R 128 .. 2
+    (1e6, 1e6, 1e6, 1e6),                    # four in use
+    (FS / 2 / 3, 600e3, 120e3, 1e6, 48e3),
 ]
 
 
 @pytest.mark.parametrize("rates", LOADS)
 def test_load(exe, tmp_path, rates):
-    """Heavy FIR load (the driver's per-channel share) and long jobs next to
-    short ones: no drops, bit exact, the tap equals the ring."""
+    """Heavy FIR load (the driver's allocation) and long jobs next to short
+    ones: no drops, bit exact, the tap equals the ring."""
     nadc = 72000
     adc = adc_signal(nadc, seed=11)
     cmd = Cmd()
@@ -384,7 +412,7 @@ def test_load(exe, tmp_path, rates):
     assert ok and load > 0.5, (load, jq)
     nch = len(rates)
     for c, cfg in enumerate(cfgs):
-        cfg["finc"] = nb.finc_for(0.7e6 * (c - 2), FS)
+        cfg["finc"] = nb.finc_for(0.7e6 * (c - 3.5), FS)
         cmd.config(c, cfg, c & 1, 0x1000_0000 + c * 0x10_0000, 1 << 20)
     cmd.adc(nadc)
     cmd.wait(300)
@@ -405,18 +433,36 @@ def test_load(exe, tmp_path, rates):
 
 
 def test_fir_bounds():
-    """The per-channel share keeps every mix of rates (1..5 channels in use)
-    within the FIR engine's limits (header of rtl/nbiq_fir.sv)."""
-    Rs = [2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20, 24, 30, 43, 44, 60, 64, 86, 100, 125, 128]
+    """allocate() finds tap pairs within the FIR engine's limits (header of
+    rtl/nbiq_fir.sv) for every mix of rates (1..8 channels in use): the
+    largest common P, the FIFO below 16 entries."""
+    Rs = [2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 43, 44, 60, 86, 125, 128]
     worst = 0
     for k in range(1, nb.NCH + 1):
-        for comb in itertools.combinations_with_replacement(Rs, k):
+        for comb in itertools.combinations_with_replacement(Rs if k <= 6 else Rs[::2], k):
             fo = [FS / (2 * R) for R in comb]
-            npairs = [nb.npairs_for(f, nb.FIR_LOAD / k) for f in fo]
+            npairs = nb.allocate(fo)
             load, jq, ok = nb.fir_check(fo, npairs)
-            assert ok, (comb, load, jq)
+            assert ok and len(set(npairs)) == 1, (comb, load, jq)
+            p = npairs[0]
+            assert p == 127 or not nb.fir_check(fo, [p + 1] * k)[2], comb
             worst = max(worst, jq)
-    assert worst <= nb.FIR_JQ
+    assert worst < 2 * nb.NCH <= nb.FIR_JQ, worst
+
+
+def test_allocation_quality():
+    """With the station's plan (seven 48 kHz channels and the 600 kHz
+    overview) every channel keeps the full rejection over 80 % of its band;
+    FIR_NEED pairs are enough for it at any R >= 10."""
+    fo = [48e3] * 7 + [600e3]
+    p = nb.allocate(fo)[0]
+    assert p == 95
+    for r in (48e3, 600e3):
+        assert nb.alias_rejection(nb.design(FS, r, npairs=p), 0.8) > 59.5
+        assert nb.alias_rejection(nb.design(FS, r, npairs=p), 0.9) > 52.5
+    for R in (10, 24, 125, 128):
+        d = nb.design(FS, FS / (2 * R), npairs=nb.FIR_NEED)
+        assert nb.alias_rejection(d, 0.8) > 59.5, R
 
 
 def test_fast_adc(exe, tmp_path):
@@ -427,8 +473,9 @@ def test_fast_adc(exe, tmp_path):
     adc = adc_signal(nadc, seed=5)
     cmd = Cmd()
     cfgs = []
-    for c, R in ((1, 2), (3, 6), (4, 16)):
-        cfg = nb.design(fs, fs / (2 * R), budget=nb.FIR_LOAD / 3)
+    alloc = nb.allocate([fs / 4, fs / 12, fs / 32])
+    for (c, R), p in zip(((1, 2), (3, 6), (7, 16)), alloc):
+        cfg = nb.design(fs, fs / (2 * R), npairs=p)
         cfg["finc"] = nb.finc_for(1.3e6 * c, fs)
         cfgs.append((c, cfg))
         cmd.config(c, cfg, c & 1, 0x1000_0000 + c * 0x10_0000, 1 << 20)
@@ -461,7 +508,7 @@ def test_enable_phase(exe, tmp_path, phase):
     adc = adc_signal(nadc, seed=phase)
     cmd = Cmd()
     cfgs = []
-    chans = (0, 4)
+    chans = (0, 7)
     for k, c in enumerate(chans):
         cfg = nb.design(FS, 1e6)
         cfg["finc"] = nb.finc_for(1.1e6 * (k + 1), FS)

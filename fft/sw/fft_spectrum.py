@@ -118,7 +118,7 @@ def to_db(words, rshift, navg, scale, full_scale=2048.0):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", choices=SRC, default="rx0")
-    ap.add_argument("--ch", type=int, default=0, help="nbiq channel 0..4")
+    ap.add_argument("--ch", type=int, default=0, help="nbiq channel 0..7")
     ap.add_argument("--len", type=int, choices=sorted(LENS), default=N, help="transform length")
     ap.add_argument("--navg", type=int, default=16)
     ap.add_argument("--scale", type=lambda s: int(s, 0), default=None)

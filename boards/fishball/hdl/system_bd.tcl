@@ -389,8 +389,8 @@ create_bd_addr_seg -range 0x40000000 -offset 0x00000000 \
                     SEG_sys_ps7_HP1_DDR_LOWOCM
 ad_cpu_interrupt ps-9 mb-9 axi_dvbs2_rx_dma/irq
 
-# Narrowband IQ channels (nbiq/): 5 x (NCO, CIC, FIR) from either receive
-# channel (4 user channels + 1 overview) -> one DDR ring per channel, written
+# Narrowband IQ channels (nbiq/): 8 x (NCO, CIC, FIR) from either receive
+# channel (the overview on channel 4, user and background channels) -> one DDR ring per channel, written
 # through S_AXI_HP2 (64-bit). tap_* (the FIR outputs) feed the spectrum FFT.
 
 set nbiq_dir [file normalize [file join $ad_hdl_dir .. nbiq]]

@@ -1,4 +1,4 @@
-// Five programmable narrowband IQ channels from the AD9363 receive samples,
+// Eight programmable narrowband IQ channels from the AD9363 receive samples,
 // written to DDR ring buffers (one per channel). AXI-Lite registers, an
 // AXI3 write master of DW = 32 or 64 bits (S_AXI_GP / S_AXI_HP), a periodic
 // interrupt, and the FIR
@@ -9,26 +9,29 @@
 //
 // Registers (32-bit, byte addresses; unlisted addresses read 0, writes are
 // ignored):
-//   0x000 VERSION     0x0002_0000
+//   0x000 VERSION     0x0002_0100 (2.1: eight channels, RING_BASE + offset)
 //   0x004 ID          "NBIQ" (0x4E424951)
 //   0x008 CTRL        [0] interrupt enable
 //   0x00C IRQ_PERIOD  interrupt period in clocks (0: off)
 //   0x010 IRQ_STATUS  [0] period elapsed; write 1 to clear
 //   0x014 ADC_CNT_LO  ADC samples received (reading it latches ADC_CNT_HI)
 //   0x018 ADC_CNT_HI
-//   0x01C INFO        (ro) [7:0] channels (5), [15:8] max taps/2 (127), [23:16] R max (128)
-//   channel c = 0..4 at 0x100 + 0x40 c:
+//   0x01C INFO        (ro) [7:0] channels (NCH, 8), [15:8] max taps/2 (127), [23:16] R max (128)
+//   channel c = 0..NCH-1 at 0x100 + 0x40 c:
 //   +0x00 CTRL        [0] enable (0 clears the channel), [1] source rx1
 //   +0x04 FINC        NCO step: frequency finc / 2^32 * fs goes to DC
 //   +0x08 CIC         [7:0] R (2..128), [12:8] cshift    (change while disabled)
 //   +0x0C FIR         [6:0] npairs (1..127), [13:8] oshift (change while disabled)
-//   +0x10 RING_BASE   physical address, aligned to RING_MASK + 1
+//   +0x10 RING_BASE   physical address, 64-byte aligned (writes go to RING_BASE + (WPTR & RING_MASK))
 //   +0x14 RING_MASK   ring size - 1 (size a power of two >= 4096)
 //   +0x18 WPTR        (ro) bytes written to the ring since enable, wraps at 2^32
 //   +0x1C T0_LO       (ro) ADC_CNT at enable: the first ADC sample of the channel
 //   +0x20 T0_HI       (ro)
 //   +0x24 DROPS       (ro) [15:0] FIR overruns, [31:16] staging overflows
 //   0x2000 + 0x400 c + 4 i : FIR tap h[i] of channel c, i = 0..253 (18-bit signed, wo)
+//
+// NCH <= 8: the channel numbers are 3 bits wide throughout (tap_ch, the FIR
+// sample and coefficient memories of 8 x 128 pairs, the register decode).
 //
 // Ring contents: 32-bit words {Q[15:0], I[15:0]}, little-endian. The k-th
 // sample of a channel is FIR output m = k + npairs - 1, i.e. it ends at ADC
@@ -41,7 +44,7 @@
 
 module nbiq_axi #(
   parameter string LUT_FILE = "nbiq_lut.mem",
-  parameter int    NCH = 5,
+  parameter int    NCH = 8,
   parameter int    DW  = 32
 ) (
   input  logic        s_axi_aclk,
@@ -93,6 +96,8 @@ module nbiq_axi #(
   input  logic [15:0] adc_data_i1,
   input  logic [15:0] adc_data_q1
 );
+
+  initial assert (NCH >= 1 && NCH <= 8) else $fatal(1, "nbiq_axi: NCH must be 1..8");
 
   wire clk = s_axi_aclk;
   assign s_axi_bresp = 2'b00;
@@ -165,7 +170,7 @@ module nbiq_axi #(
       if (aw_hold && w_hold && !s_axi_bvalid) begin
         aw_hold <= 1'b0; w_hold <= 1'b0; s_axi_bvalid <= 1'b1;
         if (awaddr_q[15:13] == 3'b001) begin
-          coef_we <= awaddr_q[12:10] < 3'(NCH);
+          coef_we <= 4'(awaddr_q[12:10]) < 4'(NCH);   // 4 bits: NCH = 8
           coef_ch <= awaddr_q[12:10];
           coef_idx <= awaddr_q[9:2];
           coef_data <= wdata_q[17:0];
@@ -316,7 +321,7 @@ module nbiq_axi #(
           endcase
         else if (ar_q[15:8] == 8'd0)
           case (ar_q[7:2])
-            6'h00: s_axi_rdata <= 32'h0002_0000;
+            6'h00: s_axi_rdata <= 32'h0002_0100;
             6'h01: s_axi_rdata <= 32'h4E42_4951;
             6'h02: s_axi_rdata <= {31'd0, irq_en};
             6'h03: s_axi_rdata <= irq_period;

@@ -5,7 +5,7 @@ average) computed in the PL; the ARM reads the result (N 32-bit words) over
 AXI-Lite, or the core streams each result as one packet to an axi_dmac
 (AXI4-Stream master, 64-bit) that writes it into a DDR ring, and converts
 to dB. One FFT core, time-shared between the sources selected by a
-register: rx0 or rx1 at the ADC rate (12 MSPS) or one nbiq channel (0..4;
+register: rx0 or rx1 at the ADC rate (12 MSPS) or one nbiq channel (0..7;
 the 600 kS/s overview or a 48 kHz user channel).
 
 ```

@@ -11,11 +11,12 @@
 // stage read 0 until then (the same results as cleared delays).
 //
 // Each channel delivers at most one sample per NCH clocks (fs / R <= clk /
-// NCH) and holds it (s_i/s_q) until its next s_valid; the lowest pending
+// NCH: 12.5 MHz for eight channels at 100 MHz, 12 MSPS / 2 = 6 MHz at most
+// here) and holds it (s_i/s_q) until its next s_valid; the lowest pending
 // channel goes first.
 
 module nbiq_comb #(
-  parameter int NCH = 5,
+  parameter int NCH = 8,                   // <= 8
   parameter int W = 53
 ) (
   input  logic               clk,

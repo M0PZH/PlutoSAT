@@ -6,11 +6,11 @@
 #define NBIQ_UIO "nbiq"
 #define NBIQ_SIZE 0x00010000u
 #define NBIQ_ID_VALUE 0x4E424951u
-#define NBIQ_VERSION_VALUE 0x00020000u
+#define NBIQ_VERSION_VALUE 0x00020100u
 #define NBIQ_MAP_REGS 0
 #define NBIQ_MAP_RING 1
 
-/* VERSION (ro): Core version (major in [31:16]) */
+/* VERSION (ro): Core version (major in [31:16], minor in [15:8]): 2.1 = eight channels, RING_BASE added to the offset */
 #define NBIQ_VERSION 0x000
 /* ID (ro): Core identifier "NBIQ" */
 #define NBIQ_ID 0x004
@@ -34,7 +34,7 @@
 #define NBIQ_ADC_CNT_HI 0x018
 /* INFO (ro): Core parameters */
 #define NBIQ_INFO 0x01C
-/*   [7:0] CHANNELS: Number of channels (5) */
+/*   [7:0] CHANNELS: Number of channels (8) */
 #define NBIQ_INFO_CHANNELS_SHIFT 0
 #define NBIQ_INFO_CHANNELS_WIDTH 8
 #define NBIQ_INFO_CHANNELS_MASK 0x000000FFu
@@ -47,10 +47,10 @@
 #define NBIQ_INFO_R_MAX_WIDTH 8
 #define NBIQ_INFO_R_MAX_MASK 0x00FF0000u
 
-/* CH[0..4]:  */
+/* CH[0..7]:  */
 #define NBIQ_CH_BASE 0x100
 #define NBIQ_CH_STRIDE 0x040
-#define NBIQ_CH_COUNT 5
+#define NBIQ_CH_COUNT 8
 /* +0x00 CTRL (rw): Channel control */
 #define NBIQ_CH_CTRL_OFF 0x00
 #define NBIQ_CH_CTRL(i) (NBIQ_CH_BASE + NBIQ_CH_STRIDE * (i) + NBIQ_CH_CTRL_OFF)
@@ -89,7 +89,7 @@
 #define NBIQ_CH_FIR_OSHIFT_SHIFT 8
 #define NBIQ_CH_FIR_OSHIFT_WIDTH 6
 #define NBIQ_CH_FIR_OSHIFT_MASK 0x00003F00u
-/* +0x10 RING_BASE (rw): Ring physical address, aligned to RING_MASK + 1 */
+/* +0x10 RING_BASE (rw): Ring physical address, 64-byte aligned; the core writes RING_BASE + (WPTR & RING_MASK) (2.0: RING_BASE | ..., so aligned to RING_MASK + 1) */
 #define NBIQ_CH_RING_BASE_OFF 0x10
 #define NBIQ_CH_RING_BASE(i) (NBIQ_CH_BASE + NBIQ_CH_STRIDE * (i) + NBIQ_CH_RING_BASE_OFF)
 /* +0x14 RING_MASK (rw): Ring size - 1 (size a power of two >= 4096) */
@@ -121,7 +121,7 @@
 #define NBIQ_COEF_WORDS 256
 #define NBIQ_COEF_WIDTH 18
 #define NBIQ_COEF_STRIDE 0x0400
-#define NBIQ_COEF_COUNT 5
+#define NBIQ_COEF_COUNT 8
 #define NBIQ_COEF(c, i) (NBIQ_COEF_BASE + NBIQ_COEF_STRIDE * (c) + 4 * (i))
 
 #endif /* NBIQ_REGS_H */

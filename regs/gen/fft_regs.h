@@ -75,7 +75,7 @@
 #define FFT_CTRL_SRC_RX0 0
 #define FFT_CTRL_SRC_RX1 1
 #define FFT_CTRL_SRC_NBIQ 2
-/*   [10:8] NB_CH: nbiq channel (tap_ch) when SRC = NBIQ, 0..4 */
+/*   [10:8] NB_CH: nbiq channel (tap_ch) when SRC = NBIQ, 0..7 */
 #define FFT_CTRL_NB_CH_SHIFT 8
 #define FFT_CTRL_NB_CH_WIDTH 3
 #define FFT_CTRL_NB_CH_MASK 0x00000700u

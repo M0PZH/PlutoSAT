@@ -24,7 +24,7 @@ README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 - Low-latency playback in the browser, with audio and video synchronised.
 
 **Narrowband transponder** (`nbiq/`)
-- Five independent decimating channels: SSB/CW receivers for several users plus a background decoder.
+- Eight independent decimating channels: SSB/CW receivers for several users, the transponder overview and background decoders (FT8, recorder, beacon lock).
 - FT8/FT4 decoding, both in the daemon and in the browser (WebAssembly).
 
 **Narrowband transmitter** (`iqtx/`)

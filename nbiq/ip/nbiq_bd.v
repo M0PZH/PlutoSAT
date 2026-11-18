@@ -3,7 +3,7 @@
 // rtl/gen/nbiq_lut.mem and dvbs2/rtl/dvbs2_async_fifo.sv with this file.
 // m_axi: 64-bit AXI3 write-only master (read channels tied off), for a
 // Zynq S_AXI_HP port in its default 64-bit mode (fishball: S_AXI_HP2).
-// tap_*: the FIR output samples of all five channels, in the
+// tap_*: the FIR output samples of all eight channels, in the
 // s_axi_aclk domain (one clock per sample with tap_valid; see nbiq_axi.sv),
 // e.g. for the PL FFT; leave unconnected if unused.
 
@@ -112,7 +112,7 @@ module nbiq_bd #(
   assign m_axi_arvalid = 1'b0;
   assign m_axi_rready  = 1'b1;
 
-  nbiq_axi #(.LUT_FILE(LUT_FILE), .DW(64)) i_nbiq_axi (
+  nbiq_axi #(.LUT_FILE(LUT_FILE), .NCH(8), .DW(64)) i_nbiq_axi (
     .s_axi_aclk    (s_axi_aclk),
     .s_axi_aresetn (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

@@ -5,15 +5,17 @@
 // Each channel collects its samples ({Q, I}, 16 bits each) in a 64-entry
 // staging buffer and writes them as 64-byte bursts (16 beats at DW 32, 8 at
 // DW 64; lane l of a beat holds sample 2 k + l, i.e. little-endian) to
-// base | (wptr & mask); wptr (bytes, wraps at 2^32) advances when a burst's
-// response is back, so everything below it is in memory. base must be
-// aligned to mask + 1, a power of two >= 4096. A sample that finds its
+// base + (wptr & mask); wptr (bytes, wraps at 2^32) advances when a burst's
+// response is back, so everything below it is in memory. mask + 1 is a
+// power of two >= 4096; base needs only 64-byte alignment (a burst never
+// crosses a 4 KB boundary then). (Up to 2.0 the address was base | (wptr &
+// mask), which needed base aligned to mask + 1.) A sample that finds its
 // staging buffer full is dropped and counted. While a channel is disabled
 // its staging buffer and wptr are cleared. Channels with a full burst are
 // served round-robin.
 
 module nbiq_wr #(
-  parameter int NCH = 5,
+  parameter int NCH = 8,                     // <= 8
   parameter int DW  = 32                     // 32 or 64
 ) (
   input  logic               clk,
@@ -64,12 +66,13 @@ module nbiq_wr #(
   logic [6:0] wc [NCH], rc [NCH];             // written / read, mod 128
 
   // burst state
-  typedef enum logic [1:0] {W_IDLE, W_BURST, W_RESP} wst_t;
+  typedef enum logic [1:0] {W_IDLE, W_ADDR, W_BURST, W_RESP} wst_t;
   wst_t        st;
   logic [2:0]  bc, rr;
   logic [5:0]  rb;                            // rc[bc] at the burst start
   logic        aw_done, w_done, kill;
   logic [3:0]  beat;
+  logic [31:0] a_base, a_off;                // the burst's ring base and offset
 
   wire s_ok = s_valid && en[s_ch] && 7'(wc[s_ch] - rc[s_ch]) != 7'd64;
 
@@ -117,11 +120,17 @@ module nbiq_wr #(
         W_IDLE: if (pick) begin
           bc <= pc; rr <= (pc == 3'(NCH - 1)) ? 3'd0 : pc + 3'd1;
           rb <= rc[pc][5:0];
-          m_axi_awaddr <= base[pc] | (wptr[pc] & mask[pc]);
-          m_axi_awvalid <= 1'b1;
-          m_axi_wvalid <= 1'b1;
+          a_base <= base[pc];
+          a_off <= wptr[pc] & mask[pc];
           aw_done <= 1'b0; w_done <= 1'b0; kill <= 1'b0;
           beat <= '0;
+          st <= W_ADDR;
+        end
+
+        W_ADDR: begin                         // the adder in its own clock
+          m_axi_awaddr <= {a_base[31:6] + a_off[31:6], 6'd0};
+          m_axi_awvalid <= 1'b1;
+          m_axi_wvalid <= 1'b1;
           st <= W_BURST;
         end
 

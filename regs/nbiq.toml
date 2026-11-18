@@ -4,7 +4,7 @@ title = "Narrowband IQ channels"
 uio = "nbiq"
 size = 0x10000
 id = { offset = 0x004, value = 0x4E424951 }
-version = { offset = 0x000, value = 0x00020000 }
+version = { offset = 0x000, value = 0x00020100 }
 rtl = "nbiq/rtl/nbiq_axi.sv"
 maps = ["regs", "ring"]
 
@@ -12,8 +12,8 @@ maps = ["regs", "ring"]
 name = "VERSION"
 offset = 0x000
 access = "ro"
-reset = 0x00020000
-doc = "Core version (major in [31:16])"
+reset = 0x00020100
+doc = "Core version (major in [31:16], minor in [15:8]): 2.1 = eight channels, RING_BASE added to the offset"
 
 [[reg]]
 name = "ID"
@@ -67,12 +67,12 @@ doc = "ADC samples received, high word (as latched by reading ADC_CNT_LO)"
 name = "INFO"
 offset = 0x01C
 access = "ro"
-reset = 0x00807F05
+reset = 0x00807F08
 doc = "Core parameters"
   [[reg.field]]
   name = "CHANNELS"
   bits = [0, 7]
-  doc = "Number of channels (5)"
+  doc = "Number of channels (8)"
   [[reg.field]]
   name = "NPAIRS_MAX"
   bits = [8, 15]
@@ -86,7 +86,7 @@ doc = "Core parameters"
 name = "CH"
 offset = 0x100
 stride = 0x40
-count = 5
+count = 8
   [[array.reg]]
   name = "CTRL"
   offset = 0x00
@@ -145,7 +145,7 @@ count = 5
   offset = 0x10
   access = "rw"
   reset = 0
-  doc = "Ring physical address, aligned to RING_MASK + 1"
+  doc = "Ring physical address, 64-byte aligned; the core writes RING_BASE + (WPTR & RING_MASK) (2.0: RING_BASE | ..., so aligned to RING_MASK + 1)"
 
   [[array.reg]]
   name = "RING_MASK"
@@ -190,7 +190,7 @@ count = 5
 name = "COEF"
 offset = 0x2000
 stride = 0x400
-count = 5
+count = 8
 words = 256
 access = "wo"
 width = 18
