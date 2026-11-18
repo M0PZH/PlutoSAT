@@ -22,7 +22,7 @@ plutosdr-fw with:
   - the web UI (`station/web`, built on HamUI `M0PZH/HamUI`, pinned by commit in `station/web/package.json`);
   - the API reference `station/docs/api.md`;
   - `station/ios/`, a native iOS client added by another contributor (2026-11-05).
-- **Board files**: `boards/fishball/` (HDL project, device tree, u-boot/Linux configs, Debian deployment).
+- **Board files**: `boards/fishball/` (HDL project, device tree, u-boot/Linux configs, Debian deployment and packages).
 
 Remotes: superproject `git@github.com:M0PZH/PlutoSAT.git` (master), station
 `git@github.com:M0PZH/PlutoSAT-station.git` (main). Pushing needs the user's
@@ -57,6 +57,7 @@ Host: Ubuntu 24.04, 96 cores. Only Vivado/Vitis **2026.1** is installed
 | Board binaries | `cargo build --release --target armv7-unknown-linux-musleabihf -p plutosatd -p plutosat-cli` (static, rust-lld) |
 | RADE C sources | `station/rust/crates/plutosat-rade/fetch-sources.sh` once (pinned, checksummed, into the gitignored `third_party/`; needs clang + llvm-ar to build). Without them plutosatd builds without RADE (a cargo warning; the recorder's RADE mode reports itself unavailable) and the RADE tests skip; `PLUTOSAT_RADE_REQUIRED=1` makes both an error. `deploy.sh --station` fetches them and requires them. |
 | Web | node is not on PATH in non-interactive shells: `export PATH=/home/peter/.local/share/nvm/v22.11.0/bin:$PATH`; `cd station/web && npm ci && npm test && npm run build` |
+| Debian packages | `boards/fishball/debian/build-debs.sh` → `build/debs/`: `plutosat-firmware`, `plutosat-tools`, `plutosatd` and, when `build/system_top.xsa` is the XSA of `build/system_top.bit`, the optional `plutosat-boot` (FSBL built in `/tmp/plutosat-fsbl`, PS setup checked against `ps7_init.ref`; `BOOT_REF=` a known-good BOOT.bin to compare; `UBOOT_ELF=` if `u-boot/` is not checked out). Needs node on PATH (see Web) and the RADE sources. `deploy.sh --debs root@board` builds and installs the first three. Details: `boards/fishball/debian/README.md`. |
 | Web e2e | `station/web/test/e2e/{e2e,nb,spectrum,tx,stutter}.mjs` (headless Chromium via playwright-core) against `plutosatd --sim`. Use non-default ports, because other daemons may hold the defaults. |
 
 Notes:
@@ -97,9 +98,12 @@ As set up on 2026-11-05:
 
 ### Software on the board
 
-- **systemd `plutosatd`** (enabled): `/usr/local/bin/plutosatd -c /etc/plutosat/plutosatd.toml`, serving the web UI on `https://board/` (0.0.0.0:443, `tls = "auto"` self-signed, because WebCodecs and the camera need a secure context; port 80 redirects). Installed by `boards/fishball/debian/deploy.sh --station`.
-- **`plutosat-pl-load [FILE]`:** reprograms the PL at run time from `/lib/firmware`. It stops the plutosatd service around the reload. Default `plutosat.bit.bin`; other images live alongside it, e.g. `plutosat-rx141.bit.bin`.
-- **C tools in `/usr/local/bin`** (built on the board by `deploy.sh`): `dvbs2-rx`, `dvbs2-tx`, `dvbs2-selftest`, `nbiq`, `rx-awgn`, …. The 1.x versions are in `/usr/local/bin/pre-rx20`.
+Installed as Debian packages since 2026-11-18 (`deploy.sh --debs`; the files the older `deploy.sh` had put there by hand are in `/root/pre-deb/`):
+
+- **`plutosatd`** (package `plutosatd`; systemd `plutosatd`, enabled): `/usr/bin/plutosatd -c /etc/plutosat/plutosatd.toml`, serving the web UI on `https://board/` (0.0.0.0:443, `tls = "auto"` self-signed, because WebCodecs and the camera need a secure context; port 80 redirects). pluto2's config is the user's own (kept by the package, transmit enabled there); a fresh installation ships with `[tx]` / `[nbtx] enabled = false`.
+- **`plutosat-pl-load [FILE]`** (package `plutosat-firmware`, `/usr/sbin`): reprograms the PL at run time from `/lib/firmware`. It stops the plutosatd service around the reload. Default `plutosat.bit.bin` (the package's); other images live alongside it, e.g. `plutosat-rx141.bit.bin`. **`plutosat-pl-load.service`** (enabled) runs it at every boot, before plutosatd (BOOT.bin already has the same bitstream; reloading it is harmless).
+- **C tools in `/usr/bin`** (package `plutosat-tools`, cross-built, dynamically linked for glibc 2.36): `dvbs2-rx`, `dvbs2-tx`, `dvbs2-selftest`, `nbiq`, `iqtx`, `rx-awgn`, `ts-prbs`, `fft-spectrum`. The 1.x versions are in `/usr/local/bin/pre-rx20`.
+- **`plutosat-boot`** (optional package, writes BOOT.bin / devicetree.dtb / uEnv.txt with a preflight and `plutosat-boot-rollback`) is **not** installed on pluto2: its boot files are already equivalent (tested there: "nothing to do"). `device-tree-compiler` came with that test.
 - **User trial setup** `/root/try/try.sh MIN lb|rf`: plutosatd on 127.0.0.1:18080 in digital loopback or over the cable. It stops the service while it runs and starts it again afterwards. The user also runs their own instance there (`qo100.toml`, 0.0.0.0:443 TLS): don't touch `/root/try` except try.sh/try*.toml.
 - **NTP:** systemd-timesyncd. The board has no RTC.
 

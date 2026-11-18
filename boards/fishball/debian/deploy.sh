@@ -2,9 +2,18 @@
 # Deploy the PlutoSAT PL design and tools to a fishball board that runs its
 # own Debian (kernel, u-boot and BOOT.bin stay as they are).
 #
-#   deploy.sh [--boot] [--station] root@HOST
+#   deploy.sh --debs [--boot] root@HOST     (the Debian packages: recommended)
+#   deploy.sh [--boot] [--station] root@HOST (files copied by hand: older way)
 #
-# Always:   build/system_top.bit -> /lib/firmware/plutosat.bit.bin (the one
+# --debs:   build the packages (build-debs.sh --no-boot; DEBS_PREBUILT=1: take
+#           build/debs as it is) and install plutosat-firmware, plutosat-tools
+#           and plutosatd with apt (non-interactive, existing configs kept).
+#           Files an earlier deploy.sh put there by hand (/usr/local/bin/*,
+#           /usr/local/sbin/plutosat-pl-load, /etc/systemd/system/plutosatd.service,
+#           /usr/share/plutosat) move to /root/pre-deb/DATE/ first;
+#           /etc/plutosat/plutosatd.toml stays as it is. Never the boot files
+#           (plutosat-boot is a separate, optional package).
+# Without --debs, always: build/system_top.bit -> /lib/firmware/plutosat.bit.bin (the one
 #           before kept as plutosat.bit.bin.prev),
 #           plutosat-pl-load (run-time FPGA load), and the tools built on the
 #           board from dvbs2/sw, nbiq/sw, awgn/sw, iqtx/sw into /usr/local/bin.
@@ -31,20 +40,58 @@ TOP=$(cd "$(dirname "$0")/../../.." && pwd)
 HERE=$TOP/boards/fishball/debian
 BOOT=0
 STATION=0
+DEBS=0
 while [ $# -gt 1 ]; do
   case $1 in
     --boot) BOOT=1 ;;
     --station) STATION=1 ;;
+    --debs) DEBS=1 ;;
     *) break ;;
   esac
   shift
 done
-[ -n "$1" ] || { sed -n '2,28s/^# \{0,1\}//p' "$0"; exit 2; }
+[ -n "$1" ] || { sed -n '2,/^set -e/s/^# \{0,1\}//p' "$0"; exit 2; }
 H=$1
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 ssh_() { ssh -o BatchMode=yes "$H" "$@" < /dev/null; }
 
+if [ $DEBS = 1 ]; then
+  [ "$DEBS_PREBUILT" = 1 ] || "$HERE/build-debs.sh" --no-boot
+  set -- "$TOP"/build/debs/plutosat-firmware_*_armhf.deb "$TOP"/build/debs/plutosat-tools_*_armhf.deb "$TOP"/build/debs/plutosatd_*_armhf.deb
+  for f in "$@"; do [ -f "$f" ] || { echo "no $f"; exit 1; }; done
+  ssh_ 'rm -rf /tmp/plutosat-debs && mkdir /tmp/plutosat-debs'
+  scp -q "$@" "$H:/tmp/plutosat-debs/"
+  # one board lock holder at a time (see AGENTS.md); the service restarts
+  ssh_ 'flock -w 900 /run/plutosat-board.lock sh -ec "
+    B=/root/pre-deb/\$(date +%Y%m%dT%H%M%S)
+    moved=0
+    for f in /usr/local/bin/plutosatd /usr/local/bin/plutosat /usr/local/bin/dvbs2-tx /usr/local/bin/dvbs2-rx \
+             /usr/local/bin/nbiq /usr/local/bin/iqtx /usr/local/bin/rx-awgn /usr/local/bin/ts-prbs \
+             /usr/local/bin/dvbs2-selftest /usr/local/bin/fft-spectrum /usr/local/sbin/plutosat-pl-load \
+             /etc/systemd/system/plutosatd.service; do
+      if [ -e \$f ]; then
+        if [ \$moved = 0 ]; then
+          mkdir -p \$B; moved=1
+          systemctl stop plutosatd 2> /dev/null || true
+          systemctl disable plutosatd 2> /dev/null || true
+        fi
+        mv \$f \$B/; echo \"moved \$f to \$B/\"
+      fi
+    done
+    if [ -d /usr/share/plutosat ] && ! dpkg-query -S /usr/share/plutosat > /dev/null 2>&1; then
+      mkdir -p \$B; mv /usr/share/plutosat \$B/usr-share-plutosat; echo \"moved /usr/share/plutosat to \$B/\"
+    fi
+    [ ! -f /lib/firmware/plutosat.bit.bin ] || dpkg-query -S /lib/firmware/plutosat.bit.bin > /dev/null 2>&1 \
+      || cp -p /lib/firmware/plutosat.bit.bin /lib/firmware/plutosat.bit.bin.prev
+    systemctl daemon-reload
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold /tmp/plutosat-debs/*.deb
+    rm -rf /tmp/plutosat-debs
+    systemctl --no-pager --lines=5 status plutosatd || true"'
+fi
+
+if [ $DEBS = 0 ]; then
 # bitstream -> FPGA manager format
 [ -f "$TOP/build/system_top.bit" ] || { echo "no build/system_top.bit (make TARGET=fishball)"; exit 1; }
 cp "$TOP/build/system_top.bit" "$TMP/plutosat.bit"
@@ -67,6 +114,7 @@ ssh_ 'set -e; command -v gcc >/dev/null || apt-get install -y gcc make;
   install -m 755 /tmp/plutosat-inst/usr/bin/* /usr/local/bin/;
   rm -rf /tmp/plutosat-src /tmp/plutosat-inst /tmp/plutosat-src.tgz;
   echo "tools: $(ls /usr/local/bin | tr "\n" " ")"'
+fi
 
 if [ $BOOT = 1 ]; then
   ssh_ 'mkdir -p /mnt/plutosat-boot && mount /dev/mmcblk0p1 /mnt/plutosat-boot'
@@ -87,7 +135,7 @@ if [ $BOOT = 1 ]; then
   echo "boot files updated: reboot the board, then run plutosat-pl-load"
 fi
 
-if [ $STATION = 1 ]; then
+if [ $STATION = 1 ] && [ $DEBS = 0 ]; then
   S=$TOP/station
   # RADE (the recorder's RADE mode): the pinned C sources; without them the
   # build goes on without RADE only when PLUTOSAT_RADE_REQUIRED=0
@@ -114,7 +162,7 @@ if [ $STATION = 1 ]; then
     tar xzf /tmp/plutosat-web.tgz -C /usr/share/plutosat/web.new
     rm -rf /usr/share/plutosat/web && mv /usr/share/plutosat/web.new /usr/share/plutosat/web
     install -m 644 /tmp/api.md /usr/share/plutosat/api.md
-    install -m 644 /tmp/plutosatd.service /etc/systemd/system/plutosatd.service
+    sed "s|/usr/bin/plutosatd|/usr/local/bin/plutosatd|" /tmp/plutosatd.service > /etc/systemd/system/plutosatd.service
     if [ ! -e /etc/plutosat/plutosatd.toml ]; then
       mkdir -p /etc/plutosat
       PW=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d " \n")

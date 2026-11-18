@@ -60,26 +60,34 @@ README is kept as [README.plutosdr-fw.md](README.plutosdr-fw.md).
 
 ## Getting started
 
-The board keeps its own Debian system; PlutoSAT is deployed onto it over ssh.
+The board keeps its own Debian 12 system; PlutoSAT goes onto it as Debian
+packages (armhf), built on the build host:
+
+| package | contents |
+|---|---|
+| `plutosat-firmware` | the bitstream, `plutosat-pl-load` and a systemd unit that loads it at every boot; never touches the boot partition |
+| `plutosatd` | the daemon, the CLI `plutosat`, the web UI, the systemd service, `/etc/plutosat/plutosatd.toml` (transmitting disabled) |
+| `plutosat-tools` | the C tools (`dvbs2-tx`, `dvbs2-rx`, `nbiq`, `iqtx`, `rx-awgn`, `dvbs2-selftest`, ...) |
+| `plutosat-boot` | optional and risky: BOOT.bin with the bitstream, the patched device tree, uEnv.txt (see below) |
 
 1. **Build the FPGA design** (Vivado 2026.1):
    ```
    source /opt/Xilinx/2026.1/Vivado/settings64.sh
    ADI_IGNORE_VERSION_CHECK=1 make -C boards/fishball/hdl
-   cp boards/fishball/hdl/fishball.runs/impl_1/system_top.bit build/
+   cp boards/fishball/hdl/fishball.runs/impl_1/system_top.bit boards/fishball/hdl/fishball.sdk/system_top.xsa build/
    ```
-2. **Deploy** (needs `bootgen`, `dtc`, and for the station part `cargo` with the `armv7-unknown-linux-musleabihf` target and `npm`):
+2. **Build and install the packages** (needs `dpkg-deb`, `fakeroot`, `bootgen`, `dtc`, `arm-linux-gnueabihf-gcc`, `cargo` with the `armv7-unknown-linux-musleabihf` target and `npm`):
    ```
-   boards/fishball/debian/deploy.sh --boot root@board      # once: device tree and boot arguments, then reboot
-   boards/fishball/debian/deploy.sh --station root@board   # bitstream, tools, plutosatd + web UI as a systemd service
+   boards/fishball/debian/deploy.sh --debs --boot root@board   # first time, then reboot the board
+   boards/fishball/debian/deploy.sh --debs root@board          # updates
    ```
-3. **Load the bitstream**:
-   - at every boot: `ssh root@board plutosat-pl-load`;
-   - or put it into BOOT.bin once, as described in [`boards/fishball/debian/README.md`](boards/fishball/debian/README.md).
+   `--debs` runs `build-debs.sh` and installs `plutosat-firmware`, `plutosat-tools` and `plutosatd` with apt; by hand: copy `build/debs/plutosat-{firmware,tools}_*.deb` and `plutosatd_*.deb` to the board and `apt install ./*.deb`. The installation prints the admin password once; an existing `/etc/plutosat/plutosatd.toml` is kept as it is.
+   `--boot` (once per board) patches the board's own `devicetree.dtb` and `uEnv.txt` (the originals stay as `*.pre-plutosat`): the kernel needs reserved DMA memory and UIO nodes for the cores, and no IIO streaming DMAs. The `plutosat-firmware` package checks the running device tree and warns.
+3. **The bitstream** is loaded at every boot by `plutosat-pl-load.service`, whatever BOOT.bin the board has; `plutosat-pl-load` loads it at once. Optionally the `plutosat-boot` package puts it into BOOT.bin (the PL is then ours from power-on), with checks, backups and `plutosat-boot-rollback`; a bad boot file needs someone at the SD card ([`boards/fishball/debian/README.md`](boards/fishball/debian/README.md)).
 4. **Open the UI** at `https://board/` (plain `http://board/` redirects there).
    - The daemon serves HTTPS with a self-signed certificate (`tls = "auto"`), because browsers give WebCodecs and the camera only to a secure context.
    - Accept the certificate once, or install it from `https://board/cert.crt`.
-   - The admin password is printed by `deploy.sh --station` and kept in `/etc/plutosat/plutosatd.toml`.
+5. **To transmit**, set `enabled = true` in `[tx]` (DATV) and / or `[nbtx]` (narrowband) of `/etc/plutosat/plutosatd.toml`, then `systemctl restart plutosatd`. Off, the daemon refuses to arm.
 
 A self-test without any RF: `ssh root@board dvbs2-selftest -p` (stop the service first: `systemctl stop plutosatd`).
 
