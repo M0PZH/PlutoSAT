@@ -5,7 +5,7 @@ Zynq-7020 (xc7z020clg400-2) + AD9363 (LVDS, 2R2T), 1 GB DDR3.
 | | |
 |---|---|
 | `hdl/` | the PlutoSAT block design (`system_bd.tcl`), top, constraints; `make -C boards/fishball/hdl` |
-| `linux/`, `u-boot/`, `br2/`, `buildroot/` | buildroot firmware (installed into the submodules by `install.sh`) |
+| `linux/`, `u-boot/`, `br2/`, `buildroot/` | buildroot firmware with the PlutoSAT bitstream, C tools and station, booted from the SD card (installed into the submodules by `install.sh`; see `buildroot/README.md`) |
 | `debian/` | deploying onto a board that keeps its own Debian (see `debian/README.md`) |
 
 ## PL design
