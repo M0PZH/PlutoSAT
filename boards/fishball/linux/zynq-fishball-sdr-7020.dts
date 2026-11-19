@@ -133,6 +133,13 @@
 /delete-node/ &rx_dma;
 /delete-node/ &tx_dma;
 
+/* Every PL node must exist in the bitstream (u-boot loads it from the FIT
+ * before the kernel): the Pluto tree's MathWorks HDL Coder slot is not in
+ * the PlutoSAT design. A boot with it in the tree hung (2026-11-05). */
+&fpga_axi {
+	/delete-node/ mwipcore@43c00000;
+};
+
 &cf_ad9364_adc_core_0 {
 	/delete-property/ dmas;
 	/delete-property/ dma-names;
