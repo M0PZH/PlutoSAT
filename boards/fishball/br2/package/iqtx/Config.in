@@ -1,0 +1,7 @@
+config BR2_PACKAGE_IQTX
+	bool "iqtx"
+	help
+	  Board test tool for the PL narrowband IQ transmitter: a test
+	  tone, a two-tone signal or an IQ file at an offset from the TX
+	  LO (plutosatd has its own driver).
+	  Source: iqtx/sw in plutosdr-fw.

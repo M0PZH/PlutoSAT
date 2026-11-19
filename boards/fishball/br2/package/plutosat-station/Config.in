@@ -1,0 +1,14 @@
+config BR2_PACKAGE_PLUTOSAT_STATION
+	bool "plutosat-station"
+	help
+	  The PlutoSAT station: the daemon plutosatd (web UI on
+	  https://BOARD/, port 80 redirects), the CLI plutosat and the
+	  web front end, started by /etc/init.d/S95plutosatd. Its
+	  configuration and TLS certificate are kept on the SD card
+	  (/mnt/sd/plutosat) or in the QSPI flash (/mnt/jffs2/plutosat).
+	  Transmitting is disabled in the first configuration.
+
+	  Built outside buildroot (cargo, npm) by
+	  boards/fishball/br2/build-station.sh into build/station; the
+	  top-level make TARGET=fishball runs it first.
+	  Source: the station submodule (M0PZH/PlutoSAT-station).

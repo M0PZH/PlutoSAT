@@ -1,0 +1,9 @@
+# plutosatd on the fishball-sdr-7020 buildroot firmware; every key not set
+# here has the default of /usr/share/plutosatd/api.md section 5.
+# /etc/init.d/S95plutosatd made this file at the first start from
+# /usr/share/plutosatd/plutosatd.toml.default, with a random admin password,
+# in the persistent PlutoSAT directory (/etc/plutosat links to it):
+# /mnt/sd/plutosat on the SD card's FAT partition, else /mnt/jffs2/plutosat
+# in the QSPI flash. The TLS certificate (tls = "auto") is kept next to it.
+# After editing: /etc/init.d/S95plutosatd restart (or reboot).
+

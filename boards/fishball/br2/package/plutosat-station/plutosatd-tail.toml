@@ -1,0 +1,7 @@
+
+# Background recorder (api.md 6.6); its channels are off until configured.
+# On the SD card the overs go next to this file; without an SD card into
+# RAM (/tmp, lost at reboot) with a small limit.
+[recorder]
+dir = "@RECORDER_DIR@"
+max_mb = @RECORDER_MAX_MB@

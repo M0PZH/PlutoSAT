@@ -139,9 +139,11 @@ build/%.dtb: linux/arch/arm/boot/dts/xilinx/%.dtb | build
 
 $(BUILDROOT_DIR)/output/images/rootfs.cpio.$(ROOTFS_EXT): board-install
 	@echo device-fw $(VERSION)> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS
-	@$(foreach dir,$(VSUBDIRS),echo $(dir) $(shell cd $(dir) && git describe --abbrev=4 --dirty --always --tags) >> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS;)
+	@$(foreach dir,$(VSUBDIRS),echo $(dir) $(shell cd $(dir) && test -e .git && git describe --abbrev=4 --dirty --always --tags || echo not-checked-out) >> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS;)
 	@echo buildroot $(shell cd $(BUILDROOT_DIR) && git describe --abbrev=4 --dirty --always --tags 2>/dev/null || echo unknown) >> $(BR2_EXT_DIR)/board/adi/$(TARGET)/VERSIONS
 	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) ARCH=arm zynq_$(TARGET)_defconfig
+	# buildroot copies a local package's source only once: start them afresh
+	$(foreach p,$(BOARD_BR2_LOCAL_PKGS),$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) $(p)-dirclean;)
 
 ifneq (1, ${SKIP_LEGAL})
 	$(MAKE) -C $(BUILDROOT_DIR) BR2_EXTERNAL=$(BR2_EXTERNALS) legal-info
@@ -208,10 +210,15 @@ sdimg: build/boot.bin build/$(TARGET).itb
 	rm -rf build/sdimg && mkdir -p build/sdimg
 	cp build/boot.bin build/sdimg/BOOT.bin
 	cp build/$(TARGET).itb build/sdimg/$(TARGET).itb
+	$(if $(SDIMG_FILES),cp $(SDIMG_FILES) build/sdimg/)
 
 ### MSD update firmware file ###
 
 build/$(TARGET).frm: build/$(TARGET).itb
+ifneq ($(FIT_MAX_SIZE),)
+	@test $$(stat -c %s $<) -le $$(($(FIT_MAX_SIZE))) || \
+		{ echo "$< ($$(stat -c %s $<) bytes) does not fit the flash partition ($(FIT_MAX_SIZE)): no $@"; exit 1; }
+endif
 	md5sum $< | cut -d ' ' -f 1 > $@.md5
 	cat $< $@.md5 > $@
 

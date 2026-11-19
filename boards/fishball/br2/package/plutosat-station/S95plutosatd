@@ -1,0 +1,107 @@
+#!/bin/sh
+#
+# plutosatd, the PlutoSAT station daemon: web UI on https://BOARD/ (port 443,
+# self-signed certificate; port 80 redirects to it).
+#
+# The configuration and the TLS certificate persist in the PlutoSAT
+# directory, the first of
+#   /mnt/sd/plutosat      the SD card's FAT partition (mounted by S30sdcard)
+#   /mnt/jffs2/plutosat   the QSPI flash (nvmfs, jffs2, 896 KB)
+#   /var/lib/plutosat     RAM (lost at reboot)
+# and /etc/plutosat links to it. At the first start plutosatd.toml is made
+# there from /usr/share/plutosatd/plutosatd.toml.default with a random admin
+# password, printed on the console once. Transmitting is disabled in it.
+# plutosatd-run waits for the PL cores, logs to syslog (logger -t plutosatd)
+# and restarts the daemon after a crash.
+#
+# A file named "disabled" in the PlutoSAT directory keeps plutosatd off.
+# Stop it before driving the PL cores with the C tools (dvbs2-rx, nbiq, ...).
+
+DEFAULT=/usr/share/plutosatd/plutosatd.toml.default
+PIDFILE=/var/run/plutosatd-run.pid
+
+mounted() {
+	grep -q " $1 " /proc/mounts
+}
+
+plutosat_dir() {
+	if mounted /mnt/sd; then
+		echo /mnt/sd/plutosat
+	elif mounted /mnt/jffs2; then
+		echo /mnt/jffs2/plutosat
+	else
+		echo /var/lib/plutosat
+	fi
+}
+
+first_config() {
+	conf=$1/plutosatd.toml
+	[ -f "$conf" ] && return 0
+	mkdir -p "$1" || return 1
+	case $1 in
+	/mnt/sd/*) rec=$1/recordings max=2000 ;;
+	*) rec=/tmp/plutosat-recordings max=64 ;;
+	esac
+	pw=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	[ ${#pw} = 24 ] || return 1
+	sed -e "s/^admin_password = \"ADMIN_PASSWORD\"/admin_password = \"$pw\"/" \
+		-e "s|@RECORDER_DIR@|$rec|" -e "s|@RECORDER_MAX_MB@|$max|" \
+		"$DEFAULT" > "$conf.new" || return 1
+	chmod 600 "$conf.new"
+	mv "$conf.new" "$conf" || return 1
+	sync
+	echo "-----------------------------------------------------------------"
+	echo "plutosatd: web UI https://$(hostname)/  admin password: $pw"
+	echo "  (in $conf, [auth] admin_password; shown only now)"
+	echo "  Transmitting is disabled: [tx] / [nbtx] enabled = false there."
+	echo "-----------------------------------------------------------------"
+	logger -t plutosatd "made $conf (new admin password, in that file)"
+}
+
+start() {
+	dir=$(plutosat_dir)
+	if [ -f "$dir/disabled" ]; then
+		echo "plutosatd: disabled ($dir/disabled)"
+		return 0
+	fi
+	if ! first_config "$dir"; then
+		echo "plutosatd: cannot make $dir/plutosatd.toml"
+		return 1
+	fi
+	if [ -L /etc/plutosat ] || [ ! -e /etc/plutosat ]; then
+		ln -sfn "$dir" /etc/plutosat
+	fi
+	printf "Starting plutosatd: "
+	start-stop-daemon -S -b -q -m -p $PIDFILE -x /bin/sh -- /usr/sbin/plutosatd-run "$dir/plutosatd.toml"
+	[ $? = 0 ] && echo "OK ($dir)" || echo "FAIL"
+}
+
+stop() {
+	printf "Stopping plutosatd: "
+	start-stop-daemon -K -q -p $PIDFILE
+	rm -f $PIDFILE
+	killall plutosatd 2> /dev/null
+	n=0
+	while pidof plutosatd > /dev/null && [ $n -lt 50 ]; do
+		usleep 100000
+		n=$((n + 1))
+	done
+	pidof plutosatd > /dev/null && killall -9 plutosatd
+	echo "OK"
+}
+
+case "$1" in
+start)
+	start
+	;;
+stop)
+	stop
+	;;
+restart|reload)
+	stop
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac

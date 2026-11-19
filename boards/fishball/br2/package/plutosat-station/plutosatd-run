@@ -1,0 +1,62 @@
+#!/bin/sh
+# plutosatd-run CONFIG: runs plutosatd for /etc/init.d/S95plutosatd.
+# Waits for the PlutoSAT PL (UIO device dvbs2-rx) and the AD9363 (IIO device
+# ad9361-phy), and briefly for an eth0 address (the self-signed certificate
+# names every interface address), then runs plutosatd with its output in
+# syslog and restarts it when it exits: at most 5 starts a minute, then a
+# pause of a minute (a PL without the PlutoSAT cores faults every start).
+
+CONF=$1
+
+log() {
+	logger -t plutosatd-run "$*"
+}
+
+have() {	# class name
+	for f in $1/*/name; do
+		[ "$(cat "$f" 2> /dev/null)" = "$2" ] && return 0
+	done
+	return 1
+}
+
+uptime_s() {
+	cut -d. -f1 /proc/uptime
+}
+
+# u-boot loads the PL from the FIT before the kernel: the drivers probe at boot
+t=0
+until have /sys/class/uio dvbs2-rx && have /sys/bus/iio/devices ad9361-phy; do
+	if [ $t -ge 30 ]; then
+		log "no UIO device dvbs2-rx or no IIO device ad9361-phy after 30 s: not the PlutoSAT bitstream, or uio_pdrv_genirq.of_id=generic-uio missing on the kernel command line; plutosatd not started"
+		exit 1
+	fi
+	sleep 1
+	t=$((t + 1))
+done
+
+t=0
+while [ -e /sys/class/net/eth0 ] && ! ip -4 addr show dev eth0 | grep -q ' inet ' && [ $t -lt 20 ]; do
+	sleep 1
+	t=$((t + 1))
+done
+
+n=0
+t0=$(uptime_s)
+while :; do
+	plutosatd -c "$CONF" 2>&1 | logger -t plutosatd
+	now=$(uptime_s)
+	if [ $((now - t0)) -ge 60 ]; then
+		n=0
+		t0=$now
+	fi
+	n=$((n + 1))
+	if [ $n -ge 5 ]; then
+		log "plutosatd exited 5 times within a minute; next start in 60 s"
+		sleep 60
+		n=0
+		t0=$(uptime_s)
+	else
+		log "plutosatd exited; restart in 2 s"
+		sleep 2
+	fi
+done
