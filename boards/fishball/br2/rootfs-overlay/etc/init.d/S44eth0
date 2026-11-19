@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# eth0 (the Zynq GEM0, RGMII): S40network brings it up with DHCP, but ifup's
+# udhcpc gives up when no lease comes at boot (cable or DHCP server late).
+# Then keep a DHCP client running in the background (-b), so that eth0 still
+# gets an address later. A static address (fw_setenv ipaddr_eth / netmask_eth,
+# as on the Pluto) is left alone.
+#
+
+PIDFILE=/var/run/udhcpc.eth0.pid
+
+case "$1" in
+start)
+	[ -e /sys/class/net/eth0 ] || exit 0
+	grep -q "^iface eth0 inet dhcp" /etc/network/interfaces 2> /dev/null || exit 0
+	[ -f $PIDFILE ] && kill -0 "$(cat $PIDFILE)" 2> /dev/null && exit 0
+	printf "Starting the DHCP client on eth0 in the background: "
+	ip link set eth0 up
+	udhcpc -b -R -S -i eth0 -p $PIDFILE -x hostname:"$(hostname)" > /dev/null 2>&1
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	;;
+stop)
+	;;
+restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0

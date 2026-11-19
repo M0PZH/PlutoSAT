@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Wall-clock time: the board has no RTC. busybox ntpd sets the clock from
+# pool.ntp.org, or from the "server" lines of ntp.conf in the PlutoSAT
+# directory (/mnt/sd/plutosat/ntp.conf or /mnt/jffs2/plutosat/ntp.conf),
+# copied to /etc/ntp.conf. It keeps trying until the network is there.
+#
+
+# ntpd daemonises and writes its pid file itself
+PIDFILE=/var/run/ntpd.pid
+
+case "$1" in
+start)
+	for f in /mnt/sd/plutosat/ntp.conf /mnt/jffs2/plutosat/ntp.conf; do
+		if [ -f $f ]; then
+			cp $f /etc/ntp.conf
+			break
+		fi
+	done
+	printf "Starting ntpd: "
+	if [ -f /etc/ntp.conf ]; then
+		start-stop-daemon -S -q -p $PIDFILE -x /usr/sbin/ntpd
+	else
+		start-stop-daemon -S -q -p $PIDFILE -x /usr/sbin/ntpd -- -p pool.ntp.org
+	fi
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	;;
+stop)
+	printf "Stopping ntpd: "
+	start-stop-daemon -K -q -p $PIDFILE
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	;;
+restart|reload)
+	"$0" stop
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0

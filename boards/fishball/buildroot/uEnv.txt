@@ -1,0 +1,8 @@
+# uEnv.txt for the SD card: boot the PlutoSAT buildroot firmware
+# (fishball.itb: device tree, bitstream, kernel, initramfs) from the FAT
+# partition. u-boot imports this file and runs uenvcmd before its own SD
+# boot, whatever environment it has (the fishball default, or an old one
+# kept in the QSPI flash at 0x100000). The kernel needs
+# uio_pdrv_genirq.of_id=generic-uio for the PlutoSAT cores (UIO); panic=10
+# reboots 10 s after a kernel panic.
+uenvcmd=echo Booting the PlutoSAT buildroot firmware fishball.itb from SD ...; load mmc 0 0x2080000 fishball.itb && setenv bootargs console=ttyPS0,115200 maxcpus=2 rootfstype=ramfs root=/dev/ram0 rw earlyprintk clk_ignore_unused uio_pdrv_genirq.of_id=generic-uio panic=10 uboot="${ver}" && bootm 0x2080000#config@0

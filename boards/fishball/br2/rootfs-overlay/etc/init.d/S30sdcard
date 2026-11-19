@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# Mount the SD card's first partition (FAT: BOOT.bin, fishball.itb, uEnv.txt)
+# read-write at /mnt/sd: the PlutoSAT station keeps its configuration in
+# /mnt/sd/plutosat (S95plutosatd), where it can also be edited on a PC.
+# "flush" writes data back early; files are root-only (umask 0077).
+# /mnt/sd/plutosat/authorized_keys, if there, is added to root's ssh keys.
+#
+
+DEV=/dev/mmcblk0p1
+DIR=/mnt/sd
+
+case "$1" in
+start)
+	# the SD host probes asynchronously; mdev makes the node
+	n=0
+	while [ ! -b $DEV ] && [ $n -lt 30 ]; do
+		usleep 100000
+		n=$((n + 1))
+	done
+	[ -b $DEV ] || exit 0
+	grep -q " $DIR " /proc/mounts && exit 0
+	mkdir -p $DIR
+	printf "Mounting the SD card on $DIR: "
+	if mount -t vfat -o rw,noatime,flush,quiet,umask=0077 $DEV $DIR; then
+		echo "OK"
+		# ssh keys for root (dropbear), e.g. copied from another system on the card
+		if [ -f $DIR/plutosat/authorized_keys ]; then
+			mkdir -p /root/.ssh
+			chmod 700 /root/.ssh
+			cat $DIR/plutosat/authorized_keys >> /root/.ssh/authorized_keys
+			chmod 600 /root/.ssh/authorized_keys
+		fi
+	else
+		echo "FAIL"
+		rmdir $DIR
+	fi
+	;;
+stop)
+	if grep -q " $DIR " /proc/mounts; then
+		sync
+		umount $DIR
+	fi
+	;;
+restart|reload)
+	"$0" stop
+	"$0" start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0

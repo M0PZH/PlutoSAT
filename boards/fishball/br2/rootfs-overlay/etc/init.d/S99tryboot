@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# Unattended test boots (boards/fishball/buildroot/README.md): with
+# plutosat.reboot_after=SECONDS on the kernel command line, reboot that long
+# after boot, unless /tmp/plutosat-stay exists by then (touch it to keep this
+# boot). A board that boots this image once from another system (Debian)
+# then goes back to it even when the image is not reachable on the network.
+#
+
+case "$1" in
+start)
+	s=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^plutosat\.reboot_after=\([0-9][0-9]*\)$/\1/p')
+	[ -n "$s" ] || exit 0
+	echo "Test boot: rebooting in $s s unless /tmp/plutosat-stay exists"
+	logger -t tryboot "rebooting in $s s unless /tmp/plutosat-stay exists"
+	(
+		sleep "$s"
+		if [ -e /tmp/plutosat-stay ]; then
+			logger -t tryboot "/tmp/plutosat-stay: staying"
+		else
+			logger -t tryboot "rebooting (plutosat.reboot_after=$s)"
+			reboot
+		fi
+	) < /dev/null > /dev/null 2>&1 &
+	;;
+stop)
+	;;
+restart|reload)
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0
