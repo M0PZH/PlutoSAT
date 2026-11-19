@@ -134,7 +134,8 @@ changes over the API last until the daemon restarts (api.md).
 
 The QSPI `qspi-linux` partition (0x200000..0x1000000) holds 14 MB
 (0xE00000 = 14 680 064 bytes); u-boot's `read_sf` reads at most that. The
-full image does not fit (2026-11-19, bitstream eca32cd, station ed776ac):
+full image does not fit (2026-11-19, bitstream eca32cd, station ed776ac,
+`SKIP_LEGAL=1`; with legal-info the USB drive's LICENSE.html adds 0.1 MB):
 
 | part of `fishball.itb` | bytes |
 |---|---|
@@ -182,6 +183,10 @@ DFU modes). Nothing is written to flash at boot.
 
    The Debian part is the line of `../debian/README.md` unchanged; without
    the code every boot (reboot, power cycle) is a Debian boot as before.
+   (This logic was run in a sandbox build of the pinned u-boot, with RAM
+   addresses for the SLCR registers: code `b0` boots the itb and clears
+   the register, a failing `bootm` falls through to Debian, any other
+   value boots Debian.)
 3. `echo 0xb0 > /sys/kernel/debug/zynq_rst/code && systemctl reboot`.
    u-boot sees `b0`, clears the register (as Pluto's `clear_reset_cause`)
    and boots `fishball.itb`; if loading or `bootm` fails it boots Debian.
